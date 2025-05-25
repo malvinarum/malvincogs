@@ -1,6 +1,7 @@
 import discord
 import asyncio
 import psutil
+from datetime import datetime
 from redbot.core import commands
 
 class SystemMonitor(commands.Cog):
@@ -9,6 +10,7 @@ class SystemMonitor(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.message = None
+        self.previous_net_io = psutil.net_io_counters()
         self.bot.loop.create_task(self.monitor_loop())
 
     async def monitor_loop(self):
@@ -23,16 +25,22 @@ class SystemMonitor(commands.Cog):
         cpu_usage = psutil.cpu_percent(interval=1)
         memory_usage = psutil.virtual_memory().used // (1024 * 1024)
         disk_usage = psutil.disk_usage("/").percent
-        net_io = psutil.net_io_counters()
-        network_sent = net_io.bytes_sent // (1024 * 1024)  # Convert to MB
-        network_received = net_io.bytes_recv // (1024 * 1024)  # Convert to MB
+
+        # Calculate bandwidth usage
+        current_net_io = psutil.net_io_counters()
+        network_sent_speed = (current_net_io.bytes_sent - self.previous_net_io.bytes_sent) / (1024 * 1024)  # MB/sec
+        network_received_speed = (current_net_io.bytes_recv - self.previous_net_io.bytes_recv) / (1024 * 1024)  # MB/sec
+        self.previous_net_io = current_net_io  # Update previous values for next iteration
+
+        last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         embed = discord.Embed(title="System Usage", color=discord.Color.blue())
         embed.add_field(name="CPU", value=f"{cpu_usage}%", inline=True)
         embed.add_field(name="Memory", value=f"{memory_usage} MB", inline=True)
         embed.add_field(name="Disk", value=f"{disk_usage}%", inline=True)
-        embed.add_field(name="Network Sent", value=f"{network_sent} MB", inline=True)
-        embed.add_field(name="Network Received", value=f"{network_received} MB", inline=True)
+        embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} MB/sec", inline=True)
+        embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} MB/sec", inline=True)
+        embed.set_footer(text=f"Last Updated: {last_updated}")
 
         if self.message:
             await self.message.edit(embed=embed)
