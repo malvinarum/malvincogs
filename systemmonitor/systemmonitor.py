@@ -1,5 +1,5 @@
 import discord
-from redbot.core import commands, tasks
+from redbot.core.utils import commands, tasks
 import psutil
 
 class SystemMonitor(commands.Cog):
