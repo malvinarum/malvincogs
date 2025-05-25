@@ -1,0 +1,11 @@
+{
+  "author": [
+    "Malvinarum"
+  ],
+  "description": "System monitor",
+  "hidden": false,
+  "install_msg": "System monitor",
+  "short": "System monitor",
+  "end_user_data_statement": "This cog does not store end user data.",
+  "min_bot_version": "3.5.0"
+}
