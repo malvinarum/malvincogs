@@ -32,7 +32,7 @@ class SystemMonitor(commands.Cog):
         network_received_speed = (current_net_io.bytes_recv - self.previous_net_io.bytes_recv) / (1024 * 128)  # MB/sec
         self.previous_net_io = current_net_io  # Update previous values for next iteration
 
-        last_updated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        last_updated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
 
         embed = discord.Embed(title="System Usage", color=discord.Color.blue())
         embed.add_field(name="CPU", value=f"{cpu_usage}%", inline=True)
