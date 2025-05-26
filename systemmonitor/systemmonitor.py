@@ -1,8 +1,8 @@
 import discord
-from discord.ext import commands, tasks
+from redbot.core import commands, Config
+from discord.ext import tasks
 import psutil
 from datetime import datetime
-from redbot.core import Config
 
 class SystemMonitor(commands.Cog):
     """A Redbot cog for monitoring system and network usage with a dynamic report channel."""
@@ -136,3 +136,4 @@ class SystemMonitor(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(SystemMonitor(bot))
+
