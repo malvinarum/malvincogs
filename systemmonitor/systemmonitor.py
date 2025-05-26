@@ -80,10 +80,10 @@ class SystemMonitor(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="Upload Speed", value=f"{upload_speed_mbps:.2f} Mbps", inline=True
+            name="Upload Speed", value=f"{upload_speed_mbps:.2f} of 1024 Mbps", inline=True
         )
         embed.add_field(
-            name="Download Speed", value=f"{download_speed_mbps:.2f} Mbps", inline=True
+            name="Download Speed", value=f"{download_speed_mbps:.2f} of 1024 Mbps", inline=True
         )
         embed.set_footer(text=f"Last Updated: {last_updated}")
 
