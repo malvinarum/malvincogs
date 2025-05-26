@@ -1,4 +1,5 @@
-# SystemMonitor Cog
+# Various Cogs for Redbot
+# SystemMonitor
 
 The **SystemMonitor** cog is a Redbot cog that monitors your system’s CPU, memory, disk, and network usage in real-time. It displays these stats as an embedded message in a designated Discord channel, updating automatically every minute. The cog uses [psutil](https://github.com/giampaolo/psutil) to fetch system metrics, and makes use of Redbot's configuration system to persist your channel settings.
 
