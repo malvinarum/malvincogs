@@ -36,10 +36,10 @@ class SystemMonitor(commands.Cog):
 
         embed = discord.Embed(title="System Usage", color=discord.Color.blue())
         embed.add_field(name="CPU", value=f"{cpu_usage}%", inline=True)
-        embed.add_field(name="Memory", value=f"{memory_usage:.2f} GB of 16 GB", inline=True)
-        embed.add_field(name="Disk", value=f"{disk_usage:.2f} GB of 2.048 GB", inline=True)
-        embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} MBPS of 1.024 MBPS", inline=True)
-        embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} MBPS of 1.024 MBPS", inline=True)
+        embed.add_field(name="Memory", value=f"{memory_usage:.2f} of 16 GB", inline=True)
+        embed.add_field(name="Disk", value=f"{disk_usage:.2f} of 2.048 GB", inline=True)
+        embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} of 1.024 Mbps", inline=True)
+        embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} of 1.024 Mbps", inline=True)
         embed.set_footer(text=f"Last Updated: {last_updated}")
 
         if self.message:
