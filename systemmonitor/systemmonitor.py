@@ -93,21 +93,21 @@ class SystemMonitor(commands.Cog):
         self.previous_time = now
 
         last_updated = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
-        embed = discord.Embed(title="System Usage", color=discord.Color.blue())
-        embed.add_field(name="CPU", value=f"{cpu_usage:.1f}%", inline=True)
+        embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
+        embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False
         embed.add_field(
-            name="Memory",
+            name=":bar_chart: Memory",
             value=f"{used_memory_gb:.2f} of {total_memory_gb:.2f} GB",
-            inline=True,
+            inline=False,
         )
         embed.add_field(
-            name="Disk",
+            name=":file_folder: Storage",
             value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB",
-            inline=True,
+            inline=False,
         )
-        embed.add_field(name="Bandwidth (Download)", value=f"{download_speed_mbps:.2f} of 1024 Mbps", inline=True)
-        embed.add_field(name="Bandwidth (Upload)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps", inline=True)
-        embed.set_footer(text=f"Last Updated: {last_updated}")
+        embed.add_field(name=":arrow_double_down: Bandwidth (Download)", value=f"{download_speed_mbps:.2f} of 1024 Mbps", inline=False)
+        embed.add_field(name=":arrow_double_up: Bandwidth (Upload)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps", inline=False)
+        embed.set_footer(text=f":watch: Last Updated: {last_updated}")
 
         # Verify that a monitor channel is configured.
         if self.monitor_channel_id is None:
