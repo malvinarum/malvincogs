@@ -4,7 +4,6 @@ import psutil
 from datetime import datetime
 from redbot.core import Config
 
-
 class SystemMonitor(commands.Cog):
     """A Redbot cog for monitoring system and network usage with a dynamic report channel."""
 
@@ -119,21 +118,15 @@ class SystemMonitor(commands.Cog):
 
     @commands.command()
     async def systemmonitorset(self, ctx, channel: discord.TextChannel):
-        """
-        Set the channel where system monitor reports will be posted.
-
-        Example:
-          [p]systemmonitorset #system-monitor
-        """
+        print(f"[DEBUG] systemmonitorset invoked by {ctx.author}")
         await self.config.monitor_channel.set(channel.id)
         self.monitor_channel_id = channel.id
-        # Clear the previous message so a new one is sent in the correct channel.
         self.message = None
         await ctx.send(f"System monitor channel updated to {channel.mention}.")
 
     @commands.command()
     async def system(self, ctx):
-        """Manually trigger a system report."""
+        print(f"[DEBUG] system command invoked by {ctx.author}")
         await self.monitor()
         if self.message and self.message.embeds:
             await ctx.send(embed=self.message.embeds[0])
