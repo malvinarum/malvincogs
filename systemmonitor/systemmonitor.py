@@ -4,12 +4,26 @@ from discord.ext import tasks
 import psutil
 from datetime import datetime
 
+
+def is_owner_or_admin():
+    async def predicate(ctx):
+        # Check if the command author is the bot owner.
+        if await ctx.bot.is_owner(ctx.author):
+            return True
+        # If in a guild, check if the author has administrator permissions.
+        if ctx.guild is not None and ctx.author.guild_permissions.administrator:
+            return True
+        raise commands.CheckFailure("Only the bot owner or administrators can use this command.")
+
+    return commands.check(predicate)
+
+
 class SystemMonitor(commands.Cog):
     """A Redbot cog for monitoring system and network usage with a dynamic report channel."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.message = None  # The message that holds the current embed.
+        self.message = None  # The persistent message for system stats.
 
         # For accurate network speed measurements.
         self.previous_net_io = psutil.net_io_counters()
@@ -21,19 +35,19 @@ class SystemMonitor(commands.Cog):
         self.config.register_global(**default_global)
         self.monitor_channel_id = None
 
-        # Retrieve stored configuration asynchronously.
+        # Load the configuration asynchronously.
         self.bot.loop.create_task(self.initialize_config())
 
-        # Start the periodic monitoring loop.
+        # Start the background monitoring task.
         self.monitor_loop.start()
 
     async def initialize_config(self):
-        """Initialize configuration values from storage."""
+        """Loads the monitor channel configuration."""
         self.monitor_channel_id = await self.config.monitor_channel()
 
     @tasks.loop(seconds=60)
     async def monitor_loop(self):
-        """Update system stats every 60 seconds."""
+        """Updates system stats every 60 seconds."""
         try:
             await self.monitor()
         except Exception as e:
@@ -41,17 +55,18 @@ class SystemMonitor(commands.Cog):
 
     async def monitor(self):
         now = datetime.now()
+        # Calculate the elapsed time since the last sample.
         sample_period = (now - self.previous_time).total_seconds()
 
-        # CPU usage (note: interval=1 blocks for one second).
+        # CPU usage (blocking for 1 second due to interval=1).
         cpu_usage = psutil.cpu_percent(interval=1)
 
-        # Dynamic memory usage.
+        # Memory usage.
         memory = psutil.virtual_memory()
         used_memory_gb = memory.used / (1024 ** 3)
         total_memory_gb = memory.total / (1024 ** 3)
 
-        # Aggregate disk usage from all mounted partitions.
+        # Aggregate disk usage across all mounted partitions.
         total_used_disk = 0
         total_total_disk = 0
         partitions = psutil.disk_partitions(all=False)
@@ -94,17 +109,17 @@ class SystemMonitor(commands.Cog):
         embed.add_field(name="Download Speed", value=f"{download_speed_mbps:.2f} Mbps", inline=True)
         embed.set_footer(text=f"Last Updated: {last_updated}")
 
-        # Check that a monitor channel is configured.
+        # Verify that a monitor channel is configured.
         if self.monitor_channel_id is None:
-            print("No monitor channel configured. Please use !systemmonitorset to set the channel.")
+            print("No monitor channel configured. Use the systemmonitorset command.")
             return
 
         channel = self.bot.get_channel(self.monitor_channel_id)
         if channel is None:
-            print("Invalid channel configured. Please use !systemmonitorset to set a valid channel.")
+            print("Invalid channel configured. Please verify the channel ID.")
             return
 
-        # If the saved message is in a different channel, clear it.
+        # If the saved message is in a different channel, reset it.
         if self.message and self.message.channel.id != self.monitor_channel_id:
             self.message = None
 
@@ -117,16 +132,27 @@ class SystemMonitor(commands.Cog):
             print(f"Error updating the system message: {e}")
 
     @commands.command()
+    @is_owner_or_admin()
     async def systemmonitorset(self, ctx, channel: discord.TextChannel):
-        print(f"[DEBUG] systemmonitorset invoked by {ctx.author}")
+        """
+        Set the channel where system monitor reports will be posted.
+
+        Example:
+          [p]systemmonitorset #system-monitor
+        """
         await self.config.monitor_channel.set(channel.id)
         self.monitor_channel_id = channel.id
-        self.message = None
+        self.message = None  # Reset the existing message so a new one is posted.
         await ctx.send(f"System monitor channel updated to {channel.mention}.")
 
     @commands.command()
+    @is_owner_or_admin()
     async def system(self, ctx):
-        print(f"[DEBUG] system command invoked by {ctx.author}")
+        """
+        Manually trigger a system report.
+
+        This command updates the system monitor embed with the latest stats.
+        """
         await self.monitor()
         if self.message and self.message.embeds:
             await ctx.send(embed=self.message.embeds[0])
@@ -136,4 +162,3 @@ class SystemMonitor(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(SystemMonitor(bot))
-
