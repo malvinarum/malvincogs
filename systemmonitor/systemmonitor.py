@@ -94,7 +94,7 @@ class SystemMonitor(commands.Cog):
 
         last_updated = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
         embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
-        embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False
+        embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False)
         embed.add_field(
             name=":bar_chart: Memory",
             value=f"{used_memory_gb:.2f} of {total_memory_gb:.2f} GB",
