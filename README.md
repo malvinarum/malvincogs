@@ -17,10 +17,10 @@ The **SystemMonitor** cog is a Redbot cog that monitors your system’s CPU, mem
   Invoke the system report on demand with the `system` command.
 
 ## Installation
-[p]repo add malvincogs https://github.com/malvinarum/malvincogs/
-[p]cog install malvincogs systemmonitor
-[p]load systemmonitor
+- [p]repo add malvincogs https://github.com/malvinarum/malvincogs/
+- [p]cog install malvincogs systemmonitor
+- [p]load systemmonitor
 
 ## Usage
-[p]systemmonitorset #channel -- (for autoupdate message)
-[p]system -- to manually trigger systemusage message (in the same channel command is run)
+- [p]systemmonitorset #channel -- (for autoupdate message)
+- [p]system -- to manually trigger systemusage message (in the same channel command is run)
