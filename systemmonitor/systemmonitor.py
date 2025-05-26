@@ -1,8 +1,7 @@
 import discord
-import asyncio
+from discord.ext import commands, tasks
 import psutil
 from datetime import datetime
-from redbot.core import commands
 
 class SystemMonitor(commands.Cog):
     """A Redbot cog for monitoring system and network usage."""
@@ -10,49 +9,93 @@ class SystemMonitor(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.message = None
+        # Initialize previous network I/O and timestamp for accurate speed calculation.
         self.previous_net_io = psutil.net_io_counters()
-        self.bot.loop.create_task(self.monitor_loop())
+        self.previous_time = datetime.now()
+        # Start the background loop.
+        self.monitor_loop.start()
 
+    @tasks.loop(seconds=60)
     async def monitor_loop(self):
-        """Continuously updates system stats every minute."""
-        await self.bot.wait_until_ready()
-        while not self.bot.is_closed():
+        """Background task that updates the system stats every 60 seconds."""
+        try:
             await self.monitor()
-            await asyncio.sleep(60)  # Wait 60 seconds before updating
+        except Exception as e:
+            print(f"Error in monitor_loop: {e}")
 
     async def monitor(self):
-        """Fetches system stats and updates the message."""
+        """Fetches system stats and updates (or creates) the embedded message."""
+        now = datetime.now()
+        # Calculate the elapsed time (in seconds) since the last update.
+        sample_period = (now - self.previous_time).total_seconds()
+
+        # Fetch CPU usage (the interval=1 will block for one second).
         cpu_usage = psutil.cpu_percent(interval=1)
-        memory_usage = psutil.virtual_memory().used // (1024 * 1024 * 1024)
-        disk_usage = psutil.disk_usage("/").used / (1024 * 1024 * 1024)
 
-        # Calculate bandwidth usage
+        # Retrieve memory statistics dynamically.
+        memory = psutil.virtual_memory()
+        used_memory_gb = memory.used / (1024 ** 3)
+        total_memory_gb = memory.total / (1024 ** 3)
+
+        # Retrieve disk usage data.
+        disk = psutil.disk_usage("/")
+        used_disk_gb = disk.used / (1024 ** 3)
+        total_disk_gb = disk.total / (1024 ** 3)
+
+        # Calculate network speed in Mbps.
         current_net_io = psutil.net_io_counters()
-        network_sent_speed = (current_net_io.bytes_sent - self.previous_net_io.bytes_sent) / (1024 * 128)  # MB/sec
-        network_received_speed = (current_net_io.bytes_recv - self.previous_net_io.bytes_recv) / (1024 * 128)  # MB/sec
-        self.previous_net_io = current_net_io  # Update previous values for next iteration
+        delta_bytes_sent = current_net_io.bytes_sent - self.previous_net_io.bytes_sent
+        delta_bytes_recv = current_net_io.bytes_recv - self.previous_net_io.bytes_recv
 
-        last_updated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        # Convert bytes to megabits and divide by the sample period.
+        upload_speed_mbps = (delta_bytes_sent * 8) / (1024 * 1024 * sample_period)
+        download_speed_mbps = (delta_bytes_recv * 8) / (1024 * 1024 * sample_period)
 
+        # Update previous network statistics and timestamp for the next iteration.
+        self.previous_net_io = current_net_io
+        self.previous_time = now
+
+        last_updated = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+        # Create the embed with dynamically retrieved values.
         embed = discord.Embed(title="System Usage", color=discord.Color.blue())
-        embed.add_field(name="CPU", value=f"{cpu_usage}%", inline=True)
-        embed.add_field(name="Memory", value=f"{memory_usage:.2f} of 16 GB", inline=True)
-        embed.add_field(name="Disk", value=f"{disk_usage:.2f} of 2.048 GB", inline=True)
-        embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} of 1.024 Mbps", inline=True)
-        embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} of 1.024 Mbps", inline=True)
+        embed.add_field(name="CPU", value=f"{cpu_usage:.1f}%", inline=True)
+        embed.add_field(
+            name="Memory",
+            value=f"{used_memory_gb:.2f} of {total_memory_gb:.2f} GB",
+            inline=True,
+        )
+        embed.add_field(
+            name="Disk",
+            value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB",
+            inline=True,
+        )
+        embed.add_field(name="Upload Speed", value=f"{upload_speed_mbps:.2f} Mbps", inline=True)
+        embed.add_field(name="Download Speed", value=f"{download_speed_mbps:.2f} Mbps", inline=True)
         embed.set_footer(text=f"Last Updated: {last_updated}")
 
-        if self.message:
-            await self.message.edit(embed=embed)
-        else:
-            channel = self.bot.get_channel(1369497173678358651)  # Replace with actual channel ID
-            self.message = await channel.send(embed=embed)
+        # Update the existing message or send a new one if it's not set.
+        try:
+            if self.message:
+                await self.message.edit(embed=embed)
+            else:
+                # Replace with your actual channel ID.
+                channel = self.bot.get_channel(1369497173678358651)
+                if channel:
+                    self.message = await channel.send(embed=embed)
+                else:
+                    print("Channel not found; please verify the channel ID.")
+        except Exception as e:
+            print(f"Error updating the system message: {e}")
 
     @commands.command()
     async def system(self, ctx):
         """Manually trigger a system report."""
         await self.monitor()
-        await ctx.send(embed=self.message.embeds[0])  # Send the same embed used in the loop
+        if self.message and self.message.embeds:
+            await ctx.send(embed=self.message.embeds[0])
+        else:
+            await ctx.send("System information not available at the moment.")
 
 async def setup(bot):
-    bot.add_cog(SystemMonitor(bot))
+    await bot.add_cog(SystemMonitor(bot))
