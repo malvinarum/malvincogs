@@ -2,7 +2,7 @@ import discord
 from redbot.core import commands, Config
 from discord.ext import tasks
 import psutil
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 def is_owner_or_admin():
@@ -92,6 +92,17 @@ class SystemMonitor(commands.Cog):
         self.previous_net_io = current_net_io
         self.previous_time = now
 
+        # Calculate system uptime
+        boot_time_timestamp = psutil.boot_time()
+        boot_time = datetime.fromtimestamp(boot_time_timestamp)
+        uptime_delta = now - boot_time
+
+        # Format uptime for display
+        days = uptime_delta.days
+        hours, remainder = divmod(uptime_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_string = f"{days}d {hours}h {minutes}m"
+
         last_updated = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
         embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
         embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False)
@@ -107,7 +118,8 @@ class SystemMonitor(commands.Cog):
         )
         embed.add_field(name=":arrow_double_down: Bandwidth (Download)", value=f"{download_speed_mbps:.2f} of 1024 Mbps", inline=False)
         embed.add_field(name=":arrow_double_up: Bandwidth (Upload)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps", inline=False)
-        embed.set_footer(text=f":watch: Last Updated: {last_updated}")
+        embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False) # Add the uptime field
+        embed.set_footer(text=f"Last Updated: {last_updated}")
 
         # Verify that a monitor channel is configured.
         if self.monitor_channel_id is None:
