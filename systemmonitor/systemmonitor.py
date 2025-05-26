@@ -55,5 +55,5 @@ class SystemMonitor(commands.Cog):
         await self.monitor()
         await ctx.send(embed=self.message.embeds[0])  # Send the same embed used in the loop
 
-def setup(bot):
+async def setup(bot):
     bot.add_cog(SystemMonitor(bot))

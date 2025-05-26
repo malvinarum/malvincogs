@@ -1,4 +1,4 @@
 from .systemmonitor import SystemMonitor
 
-def setup(bot):
+async def setup(bot):
     bot.add_cog(SystemMonitor(bot))
