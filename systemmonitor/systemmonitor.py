@@ -23,7 +23,7 @@ class SystemMonitor(commands.Cog):
     async def monitor(self):
         """Fetches system stats and updates the message."""
         cpu_usage = psutil.cpu_percent(interval=1)
-        memory_usage = psutil.virtual_memory().used // (1024 * 1024)
+        memory_usage = psutil.virtual_memory().used // (1024 * 1024 * 1024)
         disk_usage = psutil.disk_usage("/").used / (1024 * 1024 * 1024)
 
         # Calculate bandwidth usage
@@ -36,8 +36,8 @@ class SystemMonitor(commands.Cog):
 
         embed = discord.Embed(title="System Usage", color=discord.Color.blue())
         embed.add_field(name="CPU", value=f"{cpu_usage}%", inline=True)
-        embed.add_field(name="Memory", value=f"{memory_usage} MB of 16384 MB", inline=True)
-        embed.add_field(name="Disk", value=f"{disk_usage} GB of 2048 GB", inline=True)
+        embed.add_field(name="Memory", value=f"{memory_usage:.2f} MB of 16 GB", inline=True)
+        embed.add_field(name="Disk", value=f"{disk_usage:.2f} GB of 2.048 GB", inline=True)
         embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} MB/sec of 128 MB/sec", inline=True)
         embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} MB/sec of 128 MB/sec", inline=True)
         embed.set_footer(text=f"Last Updated: {last_updated} CST")
