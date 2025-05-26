@@ -28,18 +28,18 @@ class SystemMonitor(commands.Cog):
 
         # Calculate bandwidth usage
         current_net_io = psutil.net_io_counters()
-        network_sent_speed = (current_net_io.bytes_sent - self.previous_net_io.bytes_sent) / (1024 * 1024)  # MB/sec
-        network_received_speed = (current_net_io.bytes_recv - self.previous_net_io.bytes_recv) / (1024 * 1024)  # MB/sec
+        network_sent_speed = (current_net_io.bytes_sent - self.previous_net_io.bytes_sent) / (1024 * 128)  # MB/sec
+        network_received_speed = (current_net_io.bytes_recv - self.previous_net_io.bytes_recv) / (1024 * 128)  # MB/sec
         self.previous_net_io = current_net_io  # Update previous values for next iteration
 
         last_updated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
         embed = discord.Embed(title="System Usage", color=discord.Color.blue())
         embed.add_field(name="CPU", value=f"{cpu_usage}%", inline=True)
-        embed.add_field(name="Memory", value=f"{memory_usage:.2f} MB of 16 GB", inline=True)
+        embed.add_field(name="Memory", value=f"{memory_usage:.2f} GB of 16 GB", inline=True)
         embed.add_field(name="Disk", value=f"{disk_usage:.2f} GB of 2.048 GB", inline=True)
-        embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} MB/sec of 128 MB/sec", inline=True)
-        embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} MB/sec of 128 MB/sec", inline=True)
+        embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} MBPS of 1.024 MBPS", inline=True)
+        embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} MBPS of 1.024 MBPS", inline=True)
         embed.set_footer(text=f"Last Updated: {last_updated}")
 
         if self.message:
