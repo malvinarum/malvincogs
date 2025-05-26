@@ -40,7 +40,7 @@ class SystemMonitor(commands.Cog):
         embed.add_field(name="Disk", value=f"{disk_usage}%", inline=True)
         embed.add_field(name="Upload Speed", value=f"{network_sent_speed:.2f} MB/sec", inline=True)
         embed.add_field(name="Download Speed", value=f"{network_received_speed:.2f} MB/sec", inline=True)
-        embed.set_footer(text=f"Last Updated: {last_updated}")
+        embed.set_footer(text=f"Last Updated: <t:{int(datetime.now().timestamp())}:R>")
 
         if self.message:
             await self.message.edit(embed=embed)
