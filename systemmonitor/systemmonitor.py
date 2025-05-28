@@ -179,8 +179,12 @@ class SystemMonitor(commands.Cog):
         minutes, _ = divmod(remainder, 60)  # Seconds not needed for brief uptime string
         uptime_string = f"{days}d {hours}h {minutes}m"
 
-        # Use server's local time without timezone abbreviation for the display string
-        last_updated = now.strftime("%Y-%m-%d %H:%M")
+        # Use Discord's dynamic timestamp for "Last Updated"
+        # :F shows "Wednesday, June 9, 2021 9:02 AM" (example)
+        # :f shows "June 9, 2021 9:02 AM" (example)
+        # :R shows relative time "2 hours ago" (example) - not ideal for fixed update time
+        unix_timestamp = int(now.timestamp())
+        last_updated_discord_format = f"<t:{unix_timestamp}:F>"
 
         embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
         embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False)
@@ -194,7 +198,7 @@ class SystemMonitor(commands.Cog):
         embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps",
                         inline=False)  # Removed "of 1024"
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
-        embed.set_footer(text=f"Last Updated: {last_updated}")
+        embed.set_footer(text=f"Last Updated: {last_updated_discord_format}")
 
         # --- Update Discord Message ---
         try:
