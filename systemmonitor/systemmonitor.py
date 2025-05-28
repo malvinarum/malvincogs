@@ -193,10 +193,10 @@ class SystemMonitor(commands.Cog):
         if total_total_disk > 0:  # Only show disk if we could read it
             embed.add_field(name=":file_folder: Storage", value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB",
                             inline=False)
-        embed.add_field(name=":arrow_double_down: Bandwidth (DL)", value=f"{download_speed_mbps:.2f} Mbps",
-                        inline=False)  # Removed "of 1024"
-        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps",
-                        inline=False)  # Removed "of 1024"
+        embed.add_field(name=":arrow_double_down: Bandwidth (DL)", value=f"{download_speed_mbps:.2f} of 1024 Mbps",
+                        inline=False)
+        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps",
+                        inline=False)
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
         embed.set_footer(text=f"Last Updated: {last_updated_discord_format}")
 
