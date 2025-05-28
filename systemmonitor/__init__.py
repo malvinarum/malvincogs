@@ -11,4 +11,12 @@ class SystemMonitor(commands.Cog):
 from .systemmonitor import SystemMonitor
 async def setup(bot):
     await bot.add_cog(SystemMonitor(bot))
+
+class plexactivity(commands.Cog):
+    """A Redbot cog for monitoring active playback sessions on a Plex Server."""
+
+    def __init__(self, bot):
+        self.bot = bot
+from .plex_activity import plexactivity
+async def setup(bot):
     await bot.add_cog(PlexActivity(bot))
