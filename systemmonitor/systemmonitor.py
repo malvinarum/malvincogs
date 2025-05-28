@@ -179,7 +179,8 @@ class SystemMonitor(commands.Cog):
         minutes, _ = divmod(remainder, 60)  # Seconds not needed for brief uptime string
         uptime_string = f"{days}d {hours}h {minutes}m"
 
-        last_updated = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        # Use server's local time without timezone abbreviation for the display string
+        last_updated = now.strftime("%Y-%m-%d %H:%M")
 
         embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
         embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False)
