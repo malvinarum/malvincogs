@@ -1,0 +1,11 @@
+{
+  "author": [
+    "Malvinarum"
+  ],
+  "description": "Plex Activity",
+  "hidden": false,
+  "install_msg": "Plex Activity",
+  "short": "Plex Activity",
+  "end_user_data_statement": "This cog does not store end user data.",
+  "min_bot_version": "3.5.0"
+}

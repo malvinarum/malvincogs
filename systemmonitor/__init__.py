@@ -1,8 +1,6 @@
 import discord
 from redbot.core import commands, Config
 from discord.ext import tasks
-from .systemmonitor import SystemMonitor
-from .plex_activity import PlexActivity
 import psutil
 
 class SystemMonitor(commands.Cog):
@@ -10,10 +8,6 @@ class SystemMonitor(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+from .systemmonitor import SystemMonitor
 async def setup(bot):
     await bot.add_cog(SystemMonitor(bot))
-    """
-    This function is called by Redbot when the cog is loaded.
-    It adds the PlexActivity cog to the bot.
-    """
-    await bot.add_cog(PlexActivity(bot))
