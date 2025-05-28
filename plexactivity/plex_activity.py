@@ -9,7 +9,7 @@ from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import humanize_list, box, pagify
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
-from redbot.core import tasks  # Corrected import: tasks is directly from redbot.core
+from discord.ext import tasks  # Changed import as requested
 
 log = logging.getLogger("red.plex_activity")
 
