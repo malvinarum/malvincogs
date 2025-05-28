@@ -2,7 +2,7 @@
 import asyncio
 import aiohttp
 import logging
-from datetime import datetime  # No need for timezone import, datetime.now() handles local time
+from datetime import datetime
 import xml.etree.ElementTree as ET  # Import for XML parsing
 
 import discord
@@ -89,20 +89,25 @@ class PlexActivity(commands.Cog):
             async with self.session.get(api_url, timeout=10) as response:
                 response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
                 data = await response.text()  # Plex API returns XML
+                log.debug(f"Plex API raw response for guild {guild_id}:\n{data}")  # Log raw XML response
 
                 sessions = []
                 try:
                     root = ET.fromstring(data)
                     # Iterate through all session types (Video, Photo, Track)
-                    for session_elem in root.findall(".//VideoSession") + root.findall(
-                            ".//PhotoSession") + root.findall(".//TrackSession"):
+                    # Note: Plex API usually nests these directly under MediaContainer
+                    for session_elem in root.findall("./VideoSession") + root.findall("./PhotoSession") + root.findall(
+                            "./TrackSession"):
+                        log.debug(
+                            f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")  # Log each session element
+
                         user_elem = session_elem.find("User")
                         media_elem = session_elem.find("Media")
                         player_elem = session_elem.find("Player")
 
                         if user_elem is None or media_elem is None or player_elem is None:
                             log.warning(
-                                f"Skipping session due to missing User, Media, or Player element: {ET.tostring(session_elem, encoding='unicode')}")
+                                f"Skipping session due to missing User, Media, or Player element in guild {guild_id}.")
                             continue
 
                         username = user_elem.get("title", "Unknown User")
@@ -371,4 +376,3 @@ class PlexActivity(commands.Cog):
 async def setup(bot):
     """Adds the cog to the bot."""
     await bot.add_cog(PlexActivity(bot))
-
