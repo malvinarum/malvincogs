@@ -94,35 +94,41 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # CORRECTED: Iterate through <Video>, <Photo>, <Track> elements directly
+                    # Iterate through <Video>, <Photo>, <Track> elements directly
                     # These tags contain the session information in the provided XML
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
                         log.debug(
                             f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
 
                         user_elem = session_elem.find("User")
+                        # Media element might contain parentTitle for TV shows, but main title/duration/offset are on session_elem
                         media_elem = session_elem.find("Media")
                         player_elem = session_elem.find("Player")
 
-                        if user_elem is None or media_elem is None or player_elem is None:
+                        if user_elem is None or player_elem is None:
                             log.warning(
-                                f"Skipping session due to missing User, Media, or Player element in guild {guild_id} for element:\n{ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
+                                f"Skipping session due to missing User or Player element in guild {guild_id} for element:\n{ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
                             continue
 
                         username = user_elem.get("title", "Unknown User")
-                        media_title = media_elem.get("title", "Unknown Title")
-                        parent_title = media_elem.get("parentTitle")  # For TV shows
-                        media_type = media_elem.get("type", "media")
 
-                        view_offset = int(media_elem.get("viewOffset", "0"))
-                        duration = int(media_elem.get("duration", "1"))  # Avoid division by zero
+                        # Get title, duration, and viewOffset directly from the session_elem (e.g., <Video> tag)
+                        media_title = session_elem.get("title", "Unknown Title")
+                        view_offset = int(session_elem.get("viewOffset", "0"))
+                        duration = int(session_elem.get("duration", "1"))  # Avoid division by zero
+
+                        # parentTitle is usually found on the Media element for TV show episodes
+                        parent_title = None
+                        if media_elem is not None:
+                            parent_title = media_elem.get("parentTitle")
+
+                        media_type = session_elem.get("type", "media")
 
                         progress = f"{(view_offset / duration * 100):.0f}%" if duration > 0 else "0%"
 
                         device = player_elem.get("product", "Unknown Device")
-                        # IP address is intentionally not extracted for display in the embed
-                        # ip_address = player_elem.get("address", "N/A")
 
+                        # Construct full title: "Parent Title - Episode Title" or "Movie Title"
                         full_title = f"{parent_title} - {media_title}" if parent_title else media_title
 
                         sessions.append({
@@ -131,7 +137,6 @@ class PlexActivity(commands.Cog):
                             "type": media_type,
                             "progress": progress,
                             "device": device,
-                            # "ip_address": ip_address # Removed for privacy
                         })
                 except ET.ParseError as e:
                     log.error(
@@ -174,8 +179,6 @@ class PlexActivity(commands.Cog):
                 media_type = session.get("type", "media")
                 progress = session.get("progress", "N/A")
                 device = session.get("device", "Unknown Device")
-                # IP address is already removed from the session dict in _get_plex_sessions
-                # ip_address = session.get("ip_address", "N/A")
 
                 description_parts.append(
                     f"**{user}** is watching **{title}** ({media_type.capitalize()})\n"
