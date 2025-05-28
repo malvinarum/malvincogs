@@ -9,7 +9,7 @@ from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import humanize_list, box, pagify
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
-from redbot.core import tasks
+from redbot.core.tasks import loop  # Corrected import: tasks is from redbot.core.tasks
 
 log = logging.getLogger("red.plex_activity")
 
@@ -226,7 +226,7 @@ class PlexActivity(commands.Cog):
 
         return embed
 
-    @tasks.loop(seconds=60)  # Default to update every 60 seconds
+    @loop(seconds=60)  # Default to update every 60 seconds
     async def plex_activity_loop(self):
         """
         Background task to periodically fetch and update Plex activity.
@@ -413,3 +413,4 @@ class PlexActivity(commands.Cog):
 async def setup(bot):
     """Adds the cog to the bot."""
     await bot.add_cog(PlexActivity(bot))
+
