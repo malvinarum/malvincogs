@@ -2,7 +2,7 @@
 import asyncio
 import aiohttp
 import logging
-from datetime import datetime
+from datetime import datetime  # No need for timezone import, datetime.now() handles local time
 import xml.etree.ElementTree as ET  # Import for XML parsing
 
 import discord
@@ -156,7 +156,7 @@ class PlexActivity(commands.Cog):
         embed = discord.Embed(
             title="Plex Media Server Activity",
             color=discord.Color.gold(),
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now()  # Changed to local time
         )
         embed.set_footer(text="Last updated")
 
