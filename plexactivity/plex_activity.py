@@ -94,12 +94,11 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # Iterate through all session types (Video, Photo, Track)
-                    # Note: Plex API usually nests these directly under MediaContainer
-                    for session_elem in root.findall("./VideoSession") + root.findall("./PhotoSession") + root.findall(
-                            "./TrackSession"):
+                    # CORRECTED: Iterate through <Video>, <Photo>, <Track> elements directly
+                    # These tags contain the session information in the provided XML
+                    for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
                         log.debug(
-                            f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")  # Log each session element
+                            f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
 
                         user_elem = session_elem.find("User")
                         media_elem = session_elem.find("Media")
@@ -107,7 +106,7 @@ class PlexActivity(commands.Cog):
 
                         if user_elem is None or media_elem is None or player_elem is None:
                             log.warning(
-                                f"Skipping session due to missing User, Media, or Player element in guild {guild_id}.")
+                                f"Skipping session due to missing User, Media, or Player element in guild {guild_id} for element:\n{ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
                             continue
 
                         username = user_elem.get("title", "Unknown User")
@@ -272,7 +271,7 @@ class PlexActivity(commands.Cog):
         Your Plex URL should be the full address to your Plex server, e.g.,
         `http://192.168.1.100:32400` or `https://app.plex.tv/desktop`.
         Your Plex token can be found by inspecting network requests
-        when browsing your Plex server or through various online guides.
+        when Browse your Plex server or through various online guides.
         """
         await ctx.send(
             "Please enter your Plex Media Server URL (e.g., `http://192.168.1.100:32400`):"
