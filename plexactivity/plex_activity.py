@@ -10,7 +10,7 @@ from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import humanize_list, box, pagify
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
-from discord.ext import tasks  # Changed import as requested
+from discord.ext import tasks
 
 log = logging.getLogger("red.plex_activity")
 
@@ -61,6 +61,20 @@ class PlexActivity(commands.Cog):
         if self.session:
             await self.session.close()
 
+    def _format_milliseconds_to_time(self, milliseconds: int) -> str:
+        """
+        Converts milliseconds into HH:MM:SS or MM:SS format.
+        """
+        total_seconds = milliseconds // 1000
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+
+        if hours > 0:
+            return f"{hours:02}:{minutes:02}:{seconds:02}"
+        else:
+            return f"{minutes:02}:{seconds:02}"
+
     async def _get_plex_sessions(self, guild_id: int):
         """
         Fetches active sessions from the Plex Media Server API.
@@ -101,7 +115,6 @@ class PlexActivity(commands.Cog):
                             f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
 
                         user_elem = session_elem.find("User")
-                        # Media element might contain parentTitle for TV shows, but main title/duration/offset are on session_elem
                         media_elem = session_elem.find("Media")
                         player_elem = session_elem.find("Player")
 
@@ -114,8 +127,12 @@ class PlexActivity(commands.Cog):
 
                         # Get title, duration, and viewOffset directly from the session_elem (e.g., <Video> tag)
                         media_title = session_elem.get("title", "Unknown Title")
-                        view_offset = int(session_elem.get("viewOffset", "0"))
-                        duration = int(session_elem.get("duration", "1"))  # Avoid division by zero
+                        view_offset_ms = int(session_elem.get("viewOffset", "0"))
+                        duration_ms = int(session_elem.get("duration", "1"))  # Avoid division by zero
+
+                        # Format times
+                        current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
+                        total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
 
                         # parentTitle is usually found on the Media element for TV show episodes
                         parent_title = None
@@ -124,19 +141,29 @@ class PlexActivity(commands.Cog):
 
                         media_type = session_elem.get("type", "media")
 
-                        progress = f"{(view_offset / duration * 100):.0f}%" if duration > 0 else "0%"
-
                         device = player_elem.get("product", "Unknown Device")
 
                         # Construct full title: "Parent Title - Episode Title" or "Movie Title"
                         full_title = f"{parent_title} - {media_title}" if parent_title else media_title
 
+                        # Get image URL (thumbnail or art)
+                        image_url = None
+                        thumb_path = session_elem.get("thumb") or session_elem.get("art")
+                        if thumb_path:
+                            # Construct the full URL for the image, including the Plex token
+                            # Ensure the base Plex URL is used, and the token is appended correctly
+                            # Remove any trailing slash from plex_url before joining with thumb_path
+                            base_plex_url = plex_url.rstrip('/')
+                            image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
+
                         sessions.append({
                             "user": username,
                             "title": full_title,
                             "type": media_type,
-                            "progress": progress,
+                            "current_time": current_time_formatted,
+                            "total_duration": total_duration_formatted,
                             "device": device,
+                            "image_url": image_url  # Add image URL to session data
                         })
                 except ET.ParseError as e:
                     log.error(
@@ -177,15 +204,22 @@ class PlexActivity(commands.Cog):
                 user = session.get("user", "Unknown User")
                 title = session.get("title", "Unknown Title")
                 media_type = session.get("type", "media")
-                progress = session.get("progress", "N/A")
+                current_time = session.get("current_time", "00:00")
+                total_duration = session.get("total_duration", "00:00")
                 device = session.get("device", "Unknown Device")
+                image_url = session.get("image_url")  # Get the image URL
 
                 description_parts.append(
                     f"**{user}** is watching **{title}** ({media_type.capitalize()})\n"
-                    f"  - Progress: `{progress}`\n"
+                    f"  - Progress: `{current_time} / {total_duration}`\n"
                     f"  - Device: `{device}`"
                 )
             embed.description = "\n\n".join(description_parts)
+
+            # Set the thumbnail of the embed using the image_url from the first session
+            # If there are multiple sessions, only the first one's image will be shown
+            if sessions and sessions[0].get("image_url"):
+                embed.set_thumbnail(url=sessions[0]["image_url"])
 
         return embed
 
@@ -274,7 +308,7 @@ class PlexActivity(commands.Cog):
         Your Plex URL should be the full address to your Plex server, e.g.,
         `http://192.168.1.100:32400` or `https://app.plex.tv/desktop`.
         Your Plex token can be found by inspecting network requests
-        when Browse your Plex server or through various online guides.
+        when browsing your Plex server or through various online guides.
         """
         await ctx.send(
             "Please enter your Plex Media Server URL (e.g., `http://192.168.1.100:32400`):"
