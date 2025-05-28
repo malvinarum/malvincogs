@@ -134,25 +134,26 @@ class PlexActivity(commands.Cog):
                         current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
                         total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
 
-                        # parentTitle is usually found on the Media element for TV show episodes
-                        parent_title = None
-                        if media_elem is not None:
-                            parent_title = media_elem.get("parentTitle")
+                        # Get grandparentTitle (Series Name) for TV shows
+                        series_title = session_elem.get("grandparentTitle")
 
                         media_type = session_elem.get("type", "media")
 
                         device = player_elem.get("product", "Unknown Device")
 
-                        # Construct full title: "Parent Title - Episode Title" or "Movie Title"
-                        full_title = f"{parent_title} - {media_title}" if parent_title else media_title
+                        # Construct full title: "Series Name - Episode Title" or "Movie Title"
+                        if media_type == "episode" and series_title:
+                            full_title = f"{series_title} - {media_title}"
+                        else:
+                            full_title = media_title
 
                         # Get image URL (thumbnail or art)
                         image_url = None
-                        thumb_path = session_elem.get("thumb") or session_elem.get("art")
+                        # Prioritize 'art' as it's often a larger poster, then 'thumb'
+                        thumb_path = session_elem.get("art") or session_elem.get("thumb")
                         if thumb_path:
                             # Construct the full URL for the image, including the Plex token
                             # Ensure the base Plex URL is used, and the token is appended correctly
-                            # Remove any trailing slash from plex_url before joining with thumb_path
                             base_plex_url = plex_url.rstrip('/')
                             image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
@@ -199,7 +200,14 @@ class PlexActivity(commands.Cog):
         if not sessions:
             embed.description = "No active sessions currently."
         else:
-            description_parts = []
+            # Set the main image of the embed using the image_url from the first session
+            # This is a larger image than a thumbnail and is displayed at the bottom
+            if sessions[0].get("image_url"):
+                embed.set_image(url=sessions[0]["image_url"])
+
+            # Clear description as we'll use fields
+            embed.description = None
+
             for session in sessions:
                 user = session.get("user", "Unknown User")
                 title = session.get("title", "Unknown Title")
@@ -207,19 +215,13 @@ class PlexActivity(commands.Cog):
                 current_time = session.get("current_time", "00:00")
                 total_duration = session.get("total_duration", "00:00")
                 device = session.get("device", "Unknown Device")
-                image_url = session.get("image_url")  # Get the image URL
 
-                description_parts.append(
-                    f"**{user}** is watching **{title}** ({media_type.capitalize()})\n"
-                    f"  - Progress: `{current_time} / {total_duration}`\n"
-                    f"  - Device: `{device}`"
+                field_name = f"**{user}** is watching **{title}** ({media_type.capitalize()})"
+                field_value = (
+                    f"Progress: `{current_time} / {total_duration}`\n"
+                    f"Device: `{device}`"
                 )
-            embed.description = "\n\n".join(description_parts)
-
-            # Set the thumbnail of the embed using the image_url from the first session
-            # If there are multiple sessions, only the first one's image will be shown
-            if sessions and sessions[0].get("image_url"):
-                embed.set_thumbnail(url=sessions[0]["image_url"])
+                embed.add_field(name=field_name, value=field_value, inline=False)
 
         return embed
 
