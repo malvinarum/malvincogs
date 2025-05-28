@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import logging
 from datetime import datetime
+import xml.etree.ElementTree as ET  # Import for XML parsing
 
 import discord
 from redbot.core import commands, Config, app_commands, checks
@@ -87,98 +88,53 @@ class PlexActivity(commands.Cog):
         try:
             async with self.session.get(api_url, timeout=10) as response:
                 response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-                data = await response.text()  # Plex API returns XML, we'll parse it
+                data = await response.text()  # Plex API returns XML
 
-                # A very basic XML parsing for sessions.
-                # For more robust parsing, consider `xml.etree.ElementTree`
-                # or a dedicated Plex API wrapper.
                 sessions = []
-                # This is a simplified parsing. In a real scenario, you'd use an XML parser.
-                # Example: <MediaContainer size="1" allowSync="0" identifier="com.plexapp.plugins.library" mediaTagPrefix="/system/bundle/media/flags/" mediaTagVersion="1716892697" platform="Linux" platformVersion="5.15.0-107-generic" serverVersion="1.32.8.7639-fb64a6472" syncSupported="1" myPlex="1" myPlexMappingState="direct" myPlexSigninState="ok" myPlexSubscription="1" myPlexUsername="user@example.com" machineIdentifier="xxxxxxxxxxxxxxxxxxxx" claimed="1" content="sessions">
-                #   <VideoSession addedAt="1716912345" at="1716912345" device="Chrome" live="0" location="lan" machineIdentifier="xxxxxxxxxxxx" transcodeDecision="copy" protocol="http" state="playing" sessionKey="12345" userState="playing" viewOffset="12345">
-                #     <User id="1" thumb="https://plex.tv/users/xxxxxxxx/avatar" title="PlexUser" />
-                #     <Player address="192.168.1.100" agent="Chrome" device="Chrome" machineIdentifier="xxxxxxxxxxxx" platform="Chrome" platformVersion="125.0" product="Plex Web" state="playing" title="Plex Web (Chrome)" local="1" relayed="0" secure="1" userID="1" />
-                #     <Session id="12345" bandwidth="10000" location="lan" />
-                #     <TranscodeSession key="/transcode/sessions/xxxxxxxxxx" throttledBuffer="0" complete="0" progress="0" speed="0" duration="0" container="mp4" videoCodec="h264" audioCodec="aac" protocol="http" remaining="0" context="streaming" sourceVideoCodec="h264" sourceAudioCodec="aac" videoDecision="copy" audioDecision="copy" />
-                #     <Media id="12345" parentRatingKey="123" ratingKey="12345" sessionKey="12345" type="episode" title="Episode Title" parentTitle="Show Title" grandparentNode="123" grandparentNodeTitle="Show Title" grandparentNodeType="show" thumb="/library/metadata/123/thumb/12345" art="/library/metadata/123/art/12345" duration="1234567" viewOffset="12345" />
-                #   </VideoSession>
-                # </MediaContainer>
+                try:
+                    root = ET.fromstring(data)
+                    # Iterate through all session types (Video, Photo, Track)
+                    for session_elem in root.findall(".//VideoSession") + root.findall(
+                            ".//PhotoSession") + root.findall(".//TrackSession"):
+                        user_elem = session_elem.find("User")
+                        media_elem = session_elem.find("Media")
+                        player_elem = session_elem.find("Player")
 
-                # Simple regex or string parsing can extract key info for now.
-                # A more robust solution would use an XML parser.
-                # For demonstration, we'll simulate parsing a few key fields.
+                        if user_elem is None or media_elem is None or player_elem is None:
+                            log.warning(
+                                f"Skipping session due to missing User, Media, or Player element: {ET.tostring(session_elem, encoding='unicode')}")
+                            continue
 
-                # Example of a very basic string search for sessions:
-                # This is highly brittle and should be replaced with proper XML parsing.
-                if "<VideoSession" in data or "<PhotoSession" in data or "<TrackSession" in data:
-                    # Simulate finding sessions. In reality, you'd iterate through XML elements.
-                    # For now, let's assume we find one session for demonstration.
-                    # You'd need to parse the XML to get actual user, title, etc.
-                    # Example of extracting user and title from XML:
-                    # from xml.etree import ElementTree as ET
-                    # root = ET.fromstring(data)
-                    # for session_elem in root.findall(".//VideoSession"):
-                    #     user_elem = session_elem.find("User")
-                    #     media_elem = session_elem.find("Media")
-                    #     if user_elem is not None and media_elem is not None:
-                    #         username = user_elem.get("title")
-                    #         media_title = media_elem.get("title")
-                    #         parent_title = media_elem.get("parentTitle")
-                    #         media_type = media_elem.get("type")
-                    #         view_offset = int(media_elem.get("viewOffset", 0))
-                    #         duration = int(media_elem.get("duration", 1))
-                    #         progress_percent = (view_offset / duration) * 100 if duration > 0 else 0
-                    #         sessions.append({
-                    #             "user": username,
-                    #             "title": f"{parent_title} - {media_title}" if parent_title else media_title,
-                    #             "type": media_type,
-                    #             "progress": f"{progress_percent:.0f}%"
-                    #         })
+                        username = user_elem.get("title", "Unknown User")
+                        media_title = media_elem.get("title", "Unknown Title")
+                        parent_title = media_elem.get("parentTitle")  # For TV shows
+                        media_type = media_elem.get("type", "media")
 
-                    # Placeholder for actual parsed sessions:
-                    # If there's a MediaContainer, it means there's activity.
-                    # We'll just return a dummy session for now if any session tag is found.
-                    # This needs to be replaced with actual XML parsing.
-                    if 'size="0"' not in data:  # Check if there are active sessions
-                        # This part needs proper XML parsing to extract real data.
-                        # For now, we'll just indicate activity if the size is not 0.
-                        # This is a *placeholder* and will not show detailed info without XML parsing.
-                        log.debug(f"Plex API response for guild {guild_id}: {data[:500]}...")  # Log first 500 chars
+                        view_offset = int(media_elem.get("viewOffset", "0"))
+                        duration = int(media_elem.get("duration", "1"))  # Avoid division by zero
 
-                        # Example of what a parsed session might look like:
+                        progress = f"{(view_offset / duration * 100):.0f}%" if duration > 0 else "0%"
+
+                        device = player_elem.get("product", "Unknown Device")
+                        # IP address is intentionally not extracted for display in the embed
+                        # ip_address = player_elem.get("address", "N/A")
+
+                        full_title = f"{parent_title} - {media_title}" if parent_title else media_title
+
                         sessions.append({
-                            "user": "A User",
-                            "title": "A Movie/Episode",
-                            "type": "movie",
-                            "progress": "50%",
-                            "device": "Web",
-                            "ip_address": "192.168.1.1"  # This will be filtered in _format_sessions_embed
+                            "user": username,
+                            "title": full_title,
+                            "type": media_type,
+                            "progress": progress,
+                            "device": device,
+                            # "ip_address": ip_address # Removed for privacy
                         })
-                        # In a real scenario, you'd parse the XML to populate this list accurately.
-                        # For instance, using xml.etree.ElementTree:
-                        # import xml.etree.ElementTree as ET
-                        # root = ET.fromstring(data)
-                        # for video_session in root.findall(".//VideoSession"):
-                        #     user_title = video_session.find("User").get("title")
-                        #     media_title = video_session.find("Media").get("title")
-                        #     parent_title = video_session.find("Media").get("parentTitle")
-                        #     media_type = video_session.find("Media").get("type")
-                        #     view_offset = int(video_session.find("Media").get("viewOffset", "0"))
-                        #     duration = int(video_session.find("Media").get("duration", "1"))
-                        #     progress = f"{(view_offset / duration * 100):.0f}%" if duration > 0 else "0%"
-                        #     device = video_session.find("Player").get("product")
-                        #     ip_address = video_session.find("Player").get("address")
-                        #     sessions.append({
-                        #         "user": user_title,
-                        #         "title": f"{parent_title} - {media_title}" if parent_title else media_title,
-                        #         "type": media_type,
-                        #         "progress": progress,
-                        #         "device": device,
-                        #         "ip_address": ip_address
-                        #     })
+                except ET.ParseError as e:
+                    log.error(
+                        f"Failed to parse Plex API XML response for guild {guild_id}: {e}\nResponse: {data[:500]}...")
+                    return []  # Return empty list on parse error
 
-                else:
-                    log.debug(f"No active sessions found for guild {guild_id}.")
+                log.debug(f"Found {len(sessions)} active sessions for guild {guild_id}.")
         except aiohttp.ClientError as e:
             log.error(f"Failed to connect to Plex API for guild {guild_id}: {e}")
         except asyncio.TimeoutError:
@@ -214,13 +170,13 @@ class PlexActivity(commands.Cog):
                 media_type = session.get("type", "media")
                 progress = session.get("progress", "N/A")
                 device = session.get("device", "Unknown Device")
-                # Removed ip_address from display for privacy
+                # IP address is already removed from the session dict in _get_plex_sessions
                 # ip_address = session.get("ip_address", "N/A")
 
                 description_parts.append(
                     f"**{user}** is watching **{title}** ({media_type.capitalize()})\n"
                     f"  - Progress: `{progress}`\n"
-                    f"  - Device: `{device}`"  # Removed IP address
+                    f"  - Device: `{device}`"
                 )
             embed.description = "\n\n".join(description_parts)
 
@@ -338,8 +294,10 @@ class PlexActivity(commands.Cog):
         # Test connection immediately
         await ctx.send("Testing Plex connection...")
         sessions = await self._get_plex_sessions(ctx.guild.id)
-        if sessions is not None:
-            await ctx.send("Plex connection successful! (Note: Actual session parsing needs more robust XML handling).")
+        if sessions is not None and len(sessions) > 0:
+            await ctx.send(f"Plex connection successful! Found {len(sessions)} active sessions during test.")
+        elif sessions is not None and len(sessions) == 0:
+            await ctx.send("Plex connection successful! No active sessions found during test.")
         else:
             await ctx.send("Plex connection failed. Please double check your URL and token.")
 
