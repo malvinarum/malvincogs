@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from redbot.core import commands, app_commands, Config
 from redbot.core.utils.chat_formatting import humanize_timedelta
 from redbot.core.bot import Red
-from redbot.core.errors import MissingRequiredArguments
+# from redbot.core.errors import MissingRequiredArguments # This import is causing the error and is not used
 import logging
 
 log = logging.getLogger("red.systemmonitor")
@@ -139,7 +139,7 @@ class SystemMonitor(commands.Cog):
             final_net_io = psutil.net_io_counters()
 
             download_bytes_diff = final_net_io.bytes_recv - initial_net_io.bytes_recv
-            upload_bytes_diff = final_net_io.bytes_sent - final_net_io.bytes_sent  # Corrected: should be initial_net_io.bytes_sent
+            upload_bytes_diff = final_net_io.bytes_sent - initial_net_io.bytes_sent  # Corrected: was final_net_io.bytes_sent
 
             download_speed_mbps = (download_bytes_diff * 8) / (1024 ** 2 * 0.5)
             upload_speed_mbps = (upload_bytes_diff * 8) / (1024 ** 2 * 0.5)
