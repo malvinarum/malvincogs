@@ -147,8 +147,8 @@ class SystemMonitor(commands.Cog):
         # Uptime
         boot_time_timestamp = psutil.boot_time()
         uptime_seconds = datetime.now().timestamp() - boot_time_timestamp
-        # Corrected: Pass timedelta object as keyword argument 'delta'
-        uptime_string = humanize_timedelta(delta=timedelta(seconds=int(uptime_seconds)))
+        # Corrected: Pass timedelta object as positional argument
+        uptime_string = humanize_timedelta(timedelta(seconds=int(uptime_seconds)))
 
         # Last Updated Time
         last_updated = datetime.now()
