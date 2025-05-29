@@ -1,299 +1,438 @@
 import discord
-from redbot.core import commands, Config
-from redbot.core.bot import Red
-from discord.ext import tasks
 import psutil
+import asyncio
 from datetime import datetime, timedelta
+from redbot.core import commands, app_commands, Config
+from redbot.core.utils.chat_formatting import humanize_timedelta
+from redbot.core.bot import Red
+from redbot.core.errors import MissingRequiredArguments
 import logging
 
-# Initialize logger
-log = logging.getLogger("red.SystemMonitor")
-
-
-# Admin/Owner check decorator
-def is_owner_or_admin():
-    async def predicate(ctx: commands.Context):
-        if await ctx.bot.is_owner(ctx.author):
-            return True
-        if ctx.guild is not None and ctx.author.guild_permissions.administrator:
-            return True
-        raise commands.CheckFailure("Only the bot owner or administrators can use this command.")
-
-    return commands.check(predicate)
+log = logging.getLogger("red.systemmonitor")
 
 
 class SystemMonitor(commands.Cog):
-    """A Redbot cog for monitoring system and network usage with a dynamic, persistent report message."""
+    """
+    Monitors and displays the current usage of the Ubuntu server, with auto-updating messages.
+    """
 
-    # Define constants for conversions
-    BYTES_TO_GB = 1024 ** 3
-    BYTES_TO_MBPS_FACTOR = 8 / (1024 * 1024)  # For converting bytes/sec to Mbps
+    # Default configuration for each guild
+    # This will store channel_id, message_id, enabled status, and disk display preference
+    # It also stores the last network I/O counters for bandwidth calculation over time.
+    DEFAULT_GUILD_SETTINGS = {
+        "channel_id": None,
+        "message_id": None,
+        "enabled": False,
+        "show_full_disk": False,
+        "last_net_io_sent": 0,
+        "last_net_io_recv": 0,
+        "last_net_time": 0.0  # Unix timestamp
+    }
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.message: discord.Message | None = None  # The persistent message for system stats.
+        # Initialize the Config object for guild-specific settings
+        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
+        self.config.register_guild(**self.DEFAULT_GUILD_SETTINGS)
 
-        # For accurate network speed measurements.
-        self.previous_net_io = psutil.net_io_counters()
-        self.previous_time = datetime.now()
+        # Initialize the background task to None
+        self._update_task = None
+        # Store a lock to prevent multiple simultaneous updates for the same guild
+        self._update_locks = {}
 
-        # Setup Redbot configuration
-        self.config = Config.get_conf(self, identifier=1234567891,
-                                      force_registration=True)  # Changed identifier slightly
-        default_global = {
-            "monitor_channel_id": None,
-            "monitor_message_id": None,
-        }
-        self.config.register_global(**default_global)
+    async def cog_load(self):
+        """
+        Starts the background task when the cog is loaded.
+        """
+        log.info("SystemMonitor cog loaded. Starting update loop.")
+        self._update_task = self.bot.loop.create_task(self._update_loop())
 
-        self.monitor_channel_id: int | None = None
-        self.monitor_message_id: int | None = None
+    async def cog_unload(self):
+        """
+        Cancels the background task when the cog is unloaded.
+        """
+        log.info("SystemMonitor cog unloaded. Cancelling update loop.")
+        if self._update_task:
+            self._update_task.cancel()
+            try:
+                await self._update_task
+            except asyncio.CancelledError:
+                pass  # Task was cancelled as expected
 
-        # Start the background monitoring task
-        self.monitor_loop.start()
+    async def _get_system_stats(self, show_full_disk: bool = False, guild_id: int = None):
+        """
+        Gathers system usage statistics.
+        Returns a tuple: (cpu_usage, used_memory_gb, total_memory_gb,
+                          used_disk_gb, total_disk_gb, download_speed_mbps,
+                          upload_speed_mbps, uptime_string, last_updated_discord_format)
+        """
+        # CPU Usage
+        cpu_usage = psutil.cpu_percent(interval=0.5)  # Measure over 0.5 seconds
 
-    def cog_unload(self):
-        """Cog cleanup, cancel the monitoring task."""
-        self.monitor_loop.cancel()
-        log.info("SystemMonitor cog unloaded, monitor loop cancelled.")
-
-    async def initialize_config_and_message(self):
-        """Loads configuration and attempts to fetch the existing monitor message."""
-        self.monitor_channel_id = await self.config.monitor_channel_id()
-        self.monitor_message_id = await self.config.monitor_message_id()
-
-        if self.monitor_channel_id and self.monitor_message_id:
-            channel = self.bot.get_channel(self.monitor_channel_id)
-            if channel and isinstance(channel, discord.TextChannel):
-                try:
-                    self.message = await channel.fetch_message(self.monitor_message_id)
-                    log.info(
-                        f"Successfully fetched existing monitor message ID: {self.message.id} in channel ID: {channel.id}")
-                except discord.NotFound:
-                    log.info(
-                        f"Previous monitor message (ID: {self.monitor_message_id}) not found in channel (ID: {self.monitor_channel_id}). Will create a new one.")
-                    await self.config.monitor_message_id.set(None)
-                    self.monitor_message_id = None
-                    self.message = None
-                except discord.Forbidden:
-                    log.error(
-                        f"Missing permissions to fetch message (ID: {self.monitor_message_id}) in channel (ID: {self.monitor_channel_id}).")
-                    # Optionally clear IDs, or keep them hoping perms are restored.
-                    # For now, clearing to allow new message creation if possible.
-                    await self.config.monitor_message_id.set(None)
-                    self.monitor_message_id = None
-                    self.message = None
-                except Exception as e:
-                    log.error(
-                        f"Error fetching initial message (ID: {self.monitor_message_id}) in channel (ID: {self.monitor_channel_id}): {e}",
-                        exc_info=True)
-                    self.message = None
-            else:
-                log.warning(
-                    f"Monitor channel (ID: {self.monitor_channel_id}) not found or not a text channel during init. Clearing message ID.")
-                await self.config.monitor_channel_id.set(None)  # Clear invalid channel
-                await self.config.monitor_message_id.set(None)
-                self.monitor_channel_id = None
-                self.monitor_message_id = None
-                self.message = None
-        elif self.monitor_channel_id and not self.monitor_message_id:
-            log.info(
-                f"Monitor channel (ID: {self.monitor_channel_id}) is set, but no message ID. A new message will be posted.")
-
-    @tasks.loop(seconds=60)
-    async def monitor_loop(self):
-        """Periodically calls the monitor function."""
-        try:
-            await self.monitor()
-        except Exception as e:
-            log.error(f"Unhandled error in monitor_loop: {e}", exc_info=True)
-
-    @monitor_loop.before_loop
-    async def before_monitor_loop(self):
-        """Ensures the bot is ready and config is loaded before the loop starts."""
-        await self.bot.wait_until_ready()
-        log.info("Bot is ready. Initializing SystemMonitor configuration and message...")
-        await self.initialize_config_and_message()
-        log.info("SystemMonitor initialization complete. Starting monitor loop.")
-
-    async def monitor(self):
-        """Gathers system stats and updates the Discord message."""
-        if not self.monitor_channel_id:
-            # log.debug("Monitor channel not set. Skipping system monitoring.") # Use debug for frequent messages
-            return
-
-        channel = self.bot.get_channel(self.monitor_channel_id)
-        if not channel or not isinstance(channel, discord.TextChannel):
-            log.warning(
-                f"Configured monitor channel (ID: {self.monitor_channel_id}) not found or is not a text channel. Clearing configuration.")
-            await self.config.monitor_channel_id.set(None)
-            await self.config.monitor_message_id.set(None)
-            self.monitor_channel_id = None
-            self.monitor_message_id = None
-            self.message = None
-            return
-
-        # --- Gather System Stats ---
-        now = datetime.now()
-        sample_period = max((now - self.previous_time).total_seconds(),
-                            0.1)  # Avoid division by zero if time hasn't passed
-
-        cpu_usage = psutil.cpu_percent(interval=0.5)  # Reduced interval for less blocking
-
+        # Memory Usage
         memory = psutil.virtual_memory()
-        used_memory_gb = memory.used / self.BYTES_TO_GB
-        total_memory_gb = memory.total / self.BYTES_TO_GB
+        total_memory_gb = memory.total / (1024 ** 3)
+        used_memory_gb = memory.used / (1024 ** 3)
 
-        total_used_disk = 0
-        total_total_disk = 0
-        try:
-            partitions = psutil.disk_partitions(all=False)
-            for partition in partitions:
+        # Disk Usage
+        total_total_disk = 0  # Used to check if any disk could be read
+        used_disk_gb = 0
+        total_disk_gb = 0
+
+        if show_full_disk:
+            for part in psutil.disk_partitions(all=False):
+                if 'cdrom' in part.opts or part.fstype == '':
+                    continue  # Skip optical drives and empty fstypes
                 try:
-                    usage = psutil.disk_usage(partition.mountpoint)
-                    total_used_disk += usage.used
+                    usage = psutil.disk_usage(part.mountpoint)
                     total_total_disk += usage.total
+                    used_disk_gb += usage.used / (1024 ** 3)
+                    total_disk_gb += usage.total / (1024 ** 3)
                 except Exception as e:
-                    log.debug(f"Skipping disk usage for {partition.mountpoint}: {e}")  # Debug for non-critical errors
-        except Exception as e:
-            log.warning(f"Could not retrieve disk partitions: {e}")
+                    log.debug(f"Could not read disk usage for {part.mountpoint}: {e}")
+        else:
+            try:
+                disk = psutil.disk_usage('/')
+                total_total_disk = disk.total
+                used_disk_gb = disk.used / (1024 ** 3)
+                total_disk_gb = disk.total / (1024 ** 3)
+            except Exception as e:
+                log.debug(f"Could not read disk usage for root partition: {e}")
+                total_total_disk = 0  # Indicate no disk info if root fails
 
-        used_disk_gb = total_used_disk / self.BYTES_TO_GB
-        total_disk_gb = total_total_disk / self.BYTES_TO_GB if total_total_disk > 0 else 0
+        # Bandwidth Usage - calculated over the interval between updates
+        download_speed_mbps = 0.0
+        upload_speed_mbps = 0.0
 
         current_net_io = psutil.net_io_counters()
-        delta_bytes_sent = current_net_io.bytes_sent - self.previous_net_io.bytes_sent
-        delta_bytes_recv = current_net_io.bytes_recv - self.previous_net_io.bytes_recv
+        current_time = datetime.now()
+        current_timestamp = current_time.timestamp()
 
-        upload_speed_mbps = (delta_bytes_sent * self.BYTES_TO_MBPS_FACTOR) / sample_period
-        download_speed_mbps = (delta_bytes_recv * self.BYTES_TO_MBPS_FACTOR) / sample_period
+        # Retrieve last stored network stats from config for this guild
+        if guild_id:
+            guild_settings = await self.config.guild(discord.Object(id=guild_id)).all()
+            last_net_io_sent = guild_settings["last_net_io_sent"]
+            last_net_io_recv = guild_settings["last_net_io_recv"]
+            last_net_time = guild_settings["last_net_time"]
 
-        self.previous_net_io = current_net_io
-        self.previous_time = now
+            if last_net_time != 0.0 and current_timestamp > last_net_time:
+                time_diff_seconds = current_timestamp - last_net_time
+                if time_diff_seconds > 0:
+                    bytes_recv_diff = current_net_io.bytes_recv - last_net_io_recv
+                    bytes_sent_diff = current_net_io.bytes_sent - last_net_io_sent
 
+                    download_speed_mbps = (bytes_recv_diff * 8) / (1024 ** 2 * time_diff_seconds)
+                    upload_speed_mbps = (bytes_sent_diff * 8) / (1024 ** 2 * time_diff_seconds)
+
+            # Update config with current network stats for the next iteration
+            await self.config.guild(discord.Object(id=guild_id)).set({
+                "last_net_io_sent": current_net_io.bytes_sent,
+                "last_net_io_recv": current_net_io.bytes_recv,
+                "last_net_time": current_timestamp
+            })
+        else:
+            # If no guild_id (e.g., manual command), calculate over a short snapshot
+            # This is less accurate for "speed" but provides a value.
+            # For a manual command, we don't store global state for bandwidth.
+            initial_net_io = psutil.net_io_counters()
+            await asyncio.sleep(0.5)
+            final_net_io = psutil.net_io_counters()
+
+            download_bytes_diff = final_net_io.bytes_recv - initial_net_io.bytes_recv
+            upload_bytes_diff = final_net_io.bytes_sent - final_net_io.bytes_sent  # Corrected: should be initial_net_io.bytes_sent
+
+            download_speed_mbps = (download_bytes_diff * 8) / (1024 ** 2 * 0.5)
+            upload_speed_mbps = (upload_bytes_diff * 8) / (1024 ** 2 * 0.5)
+
+        # Uptime
         boot_time_timestamp = psutil.boot_time()
-        boot_time = datetime.fromtimestamp(boot_time_timestamp)
-        uptime_delta = now - boot_time
-        days = uptime_delta.days
-        hours, remainder = divmod(uptime_delta.seconds, 3600)
-        minutes, _ = divmod(remainder, 60)  # Seconds not needed for brief uptime string
-        uptime_string = f"{days}d {hours}h {minutes}m"
+        uptime_seconds = datetime.now().timestamp() - boot_time_timestamp
+        uptime_string = humanize_timedelta(timedelta(seconds=int(uptime_seconds)))
 
-        # Use Discord's dynamic timestamp for "Last Updated"
-        # :F shows "Wednesday, June 9, 2021 9:02 AM" (example)
-        # :f shows "June 9, 2021 9:02 AM" (example)
-        # :R shows relative time "2 hours ago" (example) - not ideal for fixed update time
-        unix_timestamp = int(now.timestamp())
-        last_updated_discord_format = f"<t:{unix_timestamp}:F>"
+        # Last Updated Time
+        last_updated = datetime.now()
+        last_updated_discord_format = discord.utils.format_dt(last_updated, style='T')
+
+        return (cpu_usage, used_memory_gb, total_memory_gb,
+                used_disk_gb, total_disk_gb, total_total_disk,  # Pass total_total_disk for the check
+                download_speed_mbps, upload_speed_mbps,
+                uptime_string, last_updated_discord_format)
+
+    def _get_bar_chart(self, percentage: float, length: int = 10):
+        """
+        Generates a text-based bar chart using Unicode block characters.
+        """
+        filled_blocks = int(length * (percentage / 100))
+        empty_blocks = length - filled_blocks
+        return "█" * filled_blocks + "░" * empty_blocks
+
+    async def _build_embed(self, stats: tuple, show_full_disk: bool):
+        """
+        Builds the Discord embed from system statistics.
+        """
+        (cpu_usage, used_memory_gb, total_memory_gb,
+         used_disk_gb, total_disk_gb, total_total_disk,
+         download_speed_mbps, upload_speed_mbps,
+         uptime_string, last_updated_discord_format) = stats
 
         embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
-        embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%", inline=False)
-        embed.add_field(name=":bar_chart: Memory", value=f"{used_memory_gb:.2f} of {total_memory_gb:.2f} GB",
+
+        # CPU
+        cpu_bar = self._get_bar_chart(cpu_usage)
+        embed.add_field(name=":desktop: CPU", value=f"{cpu_usage:.1f}%\n`{cpu_bar}`", inline=False)
+
+        # Memory
+        memory_percentage = (used_memory_gb / total_memory_gb) * 100 if total_memory_gb > 0 else 0
+        memory_bar = self._get_bar_chart(memory_percentage)
+        embed.add_field(name=":bar_chart: Memory",
+                        value=f"{used_memory_gb:.2f} of {total_memory_gb:.2f} GB\n`{memory_bar}`", inline=False)
+
+        # Storage
+        if total_total_disk > 0:
+            disk_name = "Storage (Total)" if show_full_disk else "Storage (Root)"
+            disk_percentage = (used_disk_gb / total_disk_gb) * 100 if total_disk_gb > 0 else 0
+            disk_bar = self._get_bar_chart(disk_percentage)
+            embed.add_field(name=f":file_folder: {disk_name}",
+                            value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB\n`{disk_bar}`", inline=False)
+
+        embed.add_field(name=":arrow_double_down: Bandwidth (DL)", value=f"{download_speed_mbps:.2f} Mbps",
                         inline=False)
-        if total_total_disk > 0:  # Only show disk if we could read it
-            embed.add_field(name=":file_folder: Storage", value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB",
-                            inline=False)
-        embed.add_field(name=":arrow_double_down: Bandwidth (DL)", value=f"{download_speed_mbps:.2f} of 1024 Mbps",
-                        inline=False)
-        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps",
-                        inline=False)
+        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps", inline=False)
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
         embed.set_footer(text=f"Last Updated: {last_updated_discord_format}")
+        return embed
 
-        # --- Update Discord Message ---
-        try:
-            if self.message:
-                # Ensure message is still in the configured channel (could be manually moved or config changed)
-                if self.message.channel.id != self.monitor_channel_id:
-                    log.warning(
-                        f"Monitor message (ID: {self.message.id}) is in channel {self.message.channel.id}, but configured channel is {self.monitor_channel_id}. Resetting message.")
-                    self.message = None
-                    await self.config.monitor_message_id.set(None)
-                    self.monitor_message_id = None
-                else:
-                    await self.message.edit(embed=embed)
-                    # log.debug(f"Updated system message ID: {self.message.id}") # Too verbose for every 60s
-                    return  # Successfully edited
-
-            # If self.message is None (either initially, or after a failed edit/mismatch)
-            if not self.message:
-                log.info(f"Sending new system monitor message to channel ID: {channel.id}")
-                new_message = await channel.send(embed=embed)
-                self.message = new_message
-                self.monitor_message_id = new_message.id
-                await self.config.monitor_message_id.set(new_message.id)
-                log.info(f"New system message posted with ID: {self.message.id}")
-
-        except discord.NotFound:
-            log.warning(
-                f"Failed to edit message (ID: {self.monitor_message_id if self.monitor_message_id else 'Unknown'}) - not found. Will try to send a new one.")
-            self.message = None
-            self.monitor_message_id = None
-            await self.config.monitor_message_id.set(None)
-            # Attempt to send a new one in the next cycle, or immediately:
+    async def _update_loop(self):
+        """
+        The main background task that periodically updates system usage messages.
+        """
+        await self.bot.wait_until_ready()
+        while True:
             try:
-                log.info(
-                    f"Sending new system monitor message to channel ID: {channel.id} after previous was not found.")
-                new_message = await channel.send(embed=embed)
-                self.message = new_message
-                self.monitor_message_id = new_message.id
-                await self.config.monitor_message_id.set(new_message.id)
-                log.info(f"New system message posted with ID: {self.message.id} after previous not found.")
-            except Exception as e_send:
-                log.error(f"Failed to send new message after previous not found: {e_send}", exc_info=True)
+                # Get all guild settings
+                all_guild_settings = await self.config.all_guilds()
 
-        except discord.Forbidden:
-            log.error(f"Failed to send/edit message in channel (ID: {channel.id}) due to missing permissions.")
-            # Potentially set self.message = None to prevent repeated failed attempts if it was an edit
-            if self.message:  # If it was an edit attempt
-                self.message = None  # Stop trying to edit this specific message
-                # Keep monitor_message_id in config, maybe perms will be restored for fetching
-        except Exception as e:
-            log.error(f"Error updating the system message: {e}", exc_info=True)
+                for guild_id, settings in all_guild_settings.items():
+                    if not settings["enabled"]:
+                        continue  # Skip if auto-update is not enabled for this guild
 
-    @commands.command()
-    @is_owner_or_admin()
-    async def systemmonitorset(self, ctx: commands.Context, channel: discord.TextChannel):
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild:
+                        log.warning(f"Guild {guild_id} not found. Disabling SystemMonitor for it.")
+                        await self.config.guild(discord.Object(id=guild_id)).enabled.set(False)
+                        continue
+
+                    channel_id = settings["channel_id"]
+                    message_id = settings["message_id"]
+                    show_full_disk = settings["show_full_disk"]
+
+                    if not channel_id:
+                        log.warning(f"No channel set for guild {guild.name} ({guild_id}). Skipping update.")
+                        continue
+
+                    channel = guild.get_channel(channel_id)
+                    if not channel:
+                        log.warning(
+                            f"Channel {channel_id} not found for guild {guild.name} ({guild_id}). Disabling SystemMonitor for it.")
+                        await self.config.guild(guild).enabled.set(False)
+                        continue
+
+                    # Acquire a lock for this guild to prevent race conditions if manual update runs
+                    if guild_id not in self._update_locks:
+                        self._update_locks[guild_id] = asyncio.Lock()
+
+                    async with self._update_locks[guild_id]:
+                        try:
+                            stats = await self._get_system_stats(show_full_disk, guild_id)
+                            embed = await self._build_embed(stats, show_full_disk)
+
+                            message = None
+                            if message_id:
+                                try:
+                                    message = await channel.fetch_message(message_id)
+                                except discord.NotFound:
+                                    log.warning(
+                                        f"Message {message_id} not found in channel {channel.name} ({channel_id}) for guild {guild.name}. Sending new message.")
+                                    message = None  # Message was deleted, need to send a new one
+                                except discord.Forbidden:
+                                    log.error(
+                                        f"Bot lacks permissions to fetch message in {channel.name} ({channel_id}) for guild {guild.name}. Disabling.")
+                                    await self.config.guild(guild).enabled.set(False)
+                                    continue
+                                except Exception as e:
+                                    log.error(
+                                        f"Error fetching message in {channel.name} ({channel_id}) for guild {guild.name}: {e}. Disabling.")
+                                    await self.config.guild(guild).enabled.set(False)
+                                    continue
+
+                            if message:
+                                await message.edit(embed=embed)
+                            else:
+                                # Send a new message and store its ID
+                                new_message = await channel.send(embed=embed)
+                                await self.config.guild(guild).message_id.set(new_message.id)
+                                log.info(
+                                    f"Sent new SystemMonitor message {new_message.id} in {channel.name} for guild {guild.name}.")
+
+                        except discord.Forbidden:
+                            log.error(
+                                f"Bot lacks permissions to send/edit messages in {channel.name} ({channel_id}) for guild {guild.name}. Disabling SystemMonitor for it.")
+                            await self.config.guild(guild).enabled.set(False)
+                        except Exception as e:
+                            log.error(f"Error during SystemMonitor update for guild {guild.name} ({guild_id}): {e}",
+                                      exc_info=True)
+                            # Do not disable on general errors, just log and continue
+
+            except asyncio.CancelledError:
+                log.info("SystemMonitor update loop cancelled.")
+                break  # Exit the loop if cancelled
+            except Exception as e:
+                log.critical(f"Unhandled error in SystemMonitor update loop: {e}", exc_info=True)
+
+            await asyncio.sleep(60)  # Wait for 60 seconds before the next update
+
+    @commands.group(name="systemmonitor", aliases=["sysmon"])
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def systemmonitor(self, ctx: commands.Context):
         """
-        Set the channel where system monitor reports will be posted.
-        A new message will be posted in the specified channel.
-
-        Example:
-          [p]systemmonitorset #system-monitor
+        Manage the System Monitor auto-updating message.
         """
-        await self.config.monitor_channel_id.set(channel.id)
-        await self.config.monitor_message_id.set(None)  # Clear old message ID as channel changes
+        pass
 
-        self.monitor_channel_id = channel.id
-        self.monitor_message_id = None  # Reset instance variable
-        self.message = None  # Reset the existing message object
-
-        await ctx.send(f"System monitor channel updated to {channel.mention}. A new message will be posted there.")
-        log.info(f"System monitor channel set to {channel.id} by {ctx.author} ({ctx.author.id}). Message ID cleared.")
-        # Trigger an immediate update to post the new message
-        await self.monitor()
-
-    @commands.command(aliases=["sysmon"])
-    @is_owner_or_admin()
-    async def system(self, ctx: commands.Context):
+    @systemmonitor.command(name="setchannel")
+    @app_commands.describe(
+        channel="The channel where the system usage message should be posted."
+    )
+    async def sysmon_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
-        Manually trigger a system report and post it to the current channel.
-        This also updates the persistent monitor message if configured.
-        """
-        # Call monitor to update the persistent message and gather current stats
-        await self.monitor()
+        Sets the channel for the auto-updating system usage message.
 
-        if self.message and self.message.embeds:
-            # Send a copy of the latest embed to the command channel
-            await ctx.send(embed=self.message.embeds[0])
-        elif self.monitor_channel_id:
-            await ctx.send(
-                "System monitor is configured, but the message could not be updated or retrieved. Check logs.")
+        The bot will post and update the system usage message in this channel.
+        """
+        await self.config.guild(ctx.guild).channel_id.set(channel.id)
+        # Reset message_id when channel changes to ensure a new message is sent
+        await self.config.guild(ctx.guild).message_id.set(None)
+        await ctx.send(f"System usage message will now be posted and updated in {channel.mention}.")
+        log.info(f"SystemMonitor channel set to {channel.id} for guild {ctx.guild.name}.")
+
+    @systemmonitor.command(name="toggle")
+    async def sysmon_toggle(self, ctx: commands.Context):
+        """
+        Toggles the auto-updating system usage message for this guild.
+
+        If enabled, the bot will periodically update the message in the set channel.
+        """
+        current_status = await self.config.guild(ctx.guild).enabled()
+        new_status = not current_status
+        await self.config.guild(ctx.guild).enabled.set(new_status)
+
+        if new_status:
+            # When enabling, reset network stats to get accurate bandwidth from now on
+            current_net_io = psutil.net_io_counters()
+            await self.config.guild(ctx.guild).set({
+                "last_net_io_sent": current_net_io.bytes_sent,
+                "last_net_io_recv": current_net_io.bytes_recv,
+                "last_net_time": datetime.now().timestamp()
+            })
+            await ctx.send("System usage auto-updates have been **enabled**.")
+            log.info(f"SystemMonitor enabled for guild {ctx.guild.name}.")
         else:
-            await ctx.send("System monitor channel is not configured. Use `[p]systemmonitorset`.")
+            await ctx.send("System usage auto-updates have been **disabled**.")
+            log.info(f"SystemMonitor disabled for guild {ctx.guild.name}.")
 
+    @systemmonitor.command(name="togglefulldisk")
+    async def sysmon_toggle_full_disk(self, ctx: commands.Context):
+        """
+        Toggles whether to show full disk stats or just the root partition.
+        """
+        current_setting = await self.config.guild(ctx.guild).show_full_disk()
+        new_setting = not current_setting
+        await self.config.guild(ctx.guild).show_full_disk.set(new_setting)
+        status_text = "full disk usage (all partitions)" if new_setting else "root partition usage only"
+        await ctx.send(f"System Monitor will now show **{status_text}**.")
+        log.info(f"SystemMonitor full disk display toggled to {new_setting} for guild {ctx.guild.name}.")
 
-async def setup(bot: Red):
-    cog = SystemMonitor(bot)
-    await bot.add_cog(cog)
-    log.info("SystemMonitor cog loaded.")
+    @systemmonitor.command(name="showsettings")
+    async def sysmon_show_settings(self, ctx: commands.Context):
+        """
+        Shows the current System Monitor settings for this guild.
+        """
+        settings = await self.config.guild(ctx.guild).all()
+        channel_id = settings["channel_id"]
+        message_id = settings["message_id"]
+        enabled = settings["enabled"]
+        show_full_disk = settings["show_full_disk"]
+
+        channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
+        message_link = f"https://discord.com/channels/{ctx.guild.id}/{channel_id}/{message_id}" if channel_id and message_id else "Not set"
+
+        embed = discord.Embed(title="System Monitor Settings", color=discord.Color.purple())
+        embed.add_field(name="Auto-Updates Enabled", value=str(enabled), inline=False)
+        embed.add_field(name="Update Channel", value=channel_mention, inline=False)
+        embed.add_field(name="Message ID", value=str(message_id) if message_id else "Not set", inline=False)
+        embed.add_field(name="Message Link", value=message_link, inline=False)
+        embed.add_field(name="Show Full Disk", value=str(show_full_disk), inline=False)
+
+        await ctx.send(embed=embed)
+
+    @systemmonitor.command(name="manualupdate")
+    async def sysmon_manual_update(self, ctx: commands.Context):
+        """
+        Manually triggers an update of the system usage message.
+        """
+        guild_id = ctx.guild.id
+        settings = await self.config.guild(ctx.guild).all()
+        channel_id = settings["channel_id"]
+        message_id = settings["message_id"]
+        show_full_disk = settings["show_full_disk"]
+        enabled = settings["enabled"]  # Check if enabled, though manual update can run regardless
+
+        if not channel_id:
+            return await ctx.send("Please set a channel first using `[p]systemmonitor setchannel <channel>`.")
+
+        channel = ctx.guild.get_channel(channel_id)
+        if not channel:
+            return await ctx.send(
+                f"The configured channel (<#{channel_id}>) was not found. Please set a valid channel.")
+
+        # Acquire a lock for this guild to prevent race conditions with the background task
+        if guild_id not in self._update_locks:
+            self._update_locks[guild_id] = asyncio.Lock()
+
+        async with self._update_locks[guild_id]:
+            try:
+                # For manual update, we use a snapshot for bandwidth as it's not part of the continuous loop
+                stats = await self._get_system_stats(show_full_disk,
+                                                     None)  # Pass None for guild_id to use snapshot bandwidth
+                embed = await self._build_embed(stats, show_full_disk)
+
+                message = None
+                if message_id:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                    except discord.NotFound:
+                        await ctx.send("The existing message was not found. Sending a new one.")
+                        message = None
+                    except discord.Forbidden:
+                        return await ctx.send("I don't have permissions to fetch the message in that channel.")
+                    except Exception as e:
+                        log.error(f"Error fetching message during manual update: {e}")
+                        return await ctx.send(f"An error occurred while fetching the message: {e}")
+
+                if message:
+                    await message.edit(embed=embed)
+                    await ctx.send("System usage message updated manually.")
+                else:
+                    new_message = await channel.send(embed=embed)
+                    await self.config.guild(ctx.guild).message_id.set(new_message.id)
+                    await ctx.send("New system usage message sent and configured for updates.")
+                    log.info(
+                        f"Manual update sent new message {new_message.id} in {channel.name} for guild {ctx.guild.name}.")
+
+            except discord.Forbidden:
+                await ctx.send("I don't have permissions to send messages in that channel.")
+            except Exception as e:
+                log.error(f"Error during manual SystemMonitor update for guild {ctx.guild.name}: {e}", exc_info=True)
+                await ctx.send(f"An unexpected error occurred during manual update: {e}")
+
