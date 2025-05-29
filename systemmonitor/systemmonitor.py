@@ -3,9 +3,8 @@ import psutil
 import asyncio
 from datetime import datetime, timedelta
 from redbot.core import commands, app_commands, Config
-# Removed: from redbot.core.utils.chat_formatting import humanize_timedelta # No longer needed/used for uptime
-from redbot.core.bot import Red  # Ensure this import is present and correct
 import humanize  # Import the humanize library
+from redbot.core.bot import Red  # Ensure this import is present and correct
 import logging
 
 log = logging.getLogger("red.systemmonitor")
@@ -126,12 +125,11 @@ class SystemMonitor(commands.Cog):
                     upload_speed_mbps = (bytes_sent_diff * 8) / (1024 ** 2 * time_diff_seconds)
 
             # Update config with current network stats for the next iteration
+            # Changed to individual set() calls to prevent potential overwrites
             try:
-                await self.config.guild(discord.Object(id=guild_id)).set({
-                    "last_net_io_sent": current_net_io.bytes_sent,
-                    "last_net_io_recv": current_net_io.bytes_recv,
-                    "last_net_time": current_timestamp
-                })
+                await self.config.guild(discord.Object(id=guild_id)).last_net_io_sent.set(current_net_io.bytes_sent)
+                await self.config.guild(discord.Object(id=guild_id)).last_net_io_recv.set(current_net_io.bytes_recv)
+                await self.config.guild(discord.Object(id=guild_id)).last_net_time.set(current_timestamp)
                 log.debug(f"Updated network stats in config for guild {guild_id}.")
             except Exception as e:
                 log.error(f"Failed to save network stats to config for guild {guild_id}: {e}", exc_info=True)
@@ -383,11 +381,11 @@ class SystemMonitor(commands.Cog):
             if new_status:
                 # When enabling, reset network stats to get accurate bandwidth from now on
                 current_net_io = psutil.net_io_counters()
-                await self.config.guild(ctx.guild).set({
-                    "last_net_io_sent": current_net_io.bytes_sent,
-                    "last_net_io_recv": current_net_io.bytes_recv,
-                    "last_net_time": datetime.now().timestamp()
-                })
+                # Changed to individual set() calls to prevent potential overwrites
+                await self.config.guild(ctx.guild).last_net_io_sent.set(current_net_io.bytes_sent)
+                await self.config.guild(ctx.guild).last_net_io_recv.set(current_net_io.bytes_recv)
+                await self.config.guild(ctx.guild).last_net_time.set(datetime.now().timestamp())
+
                 await ctx.send("System usage auto-updates have been **enabled**.")
                 log.info(f"SystemMonitor enabled for guild {ctx.guild.name}.")
             else:
