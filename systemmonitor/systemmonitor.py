@@ -3,6 +3,8 @@ import psutil
 import asyncio
 from datetime import datetime, timedelta
 from redbot.core import commands, app_commands, Config
+# Removed: from redbot.core.utils.chat_formatting import humanize_timedelta # No longer needed/used for uptime
+from redbot.core.bot import Red  # Ensure this import is present and correct
 import humanize  # Import the humanize library
 import logging
 
@@ -142,7 +144,7 @@ class SystemMonitor(commands.Cog):
             final_net_io = psutil.net_io_counters()
 
             download_bytes_diff = final_net_io.bytes_recv - initial_net_io.bytes_recv
-            upload_bytes_diff = final_net_io.bytes_sent - initial_net_io.bytes_sent  # Corrected: was final_net_io.bytes_sent
+            upload_bytes_diff = final_net_io.bytes_sent - initial_net_io.bytes_sent
 
             download_speed_mbps = (download_bytes_diff * 8) / (1024 ** 2 * 0.5)
             upload_speed_mbps = (upload_bytes_diff * 8) / (1024 ** 2 * 0.5)
