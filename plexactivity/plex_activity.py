@@ -218,7 +218,7 @@ class PlexActivity(commands.Cog):
 
                 field_name = f"**{user}**"
                 field_value = (
-                    f"Content: **{title}** ({media_type.capitalize()})"
+                    f"Content: `**{title}** ({media_type.capitalize()})`"
                     f"Progress: `{current_time} / {total_duration}`\n"
                     f"Device: `{device}`"
                 )
