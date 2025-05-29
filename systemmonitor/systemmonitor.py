@@ -22,7 +22,7 @@ class SystemMonitor(commands.Cog):
         "channel_id": None,
         "message_id": None,
         "enabled": False,
-        "show_full_disk": False,
+        "show_full_disk": True,  # Changed default to True to show total storage
         "last_net_io_sent": 0,
         "last_net_io_recv": 0,
         "last_net_time": 0.0  # Unix timestamp
@@ -193,7 +193,9 @@ class SystemMonitor(commands.Cog):
 
         # Storage
         if total_total_disk > 0:
-            disk_name = "Storage (Total)" if show_full_disk else "Storage (Root)"
+            # The label will now always be "Storage (Total)" regardless of show_full_disk setting
+            # The actual data (root vs. aggregated) is still controlled by show_full_disk in _get_system_stats
+            disk_name = "Storage (Total)"
             disk_percentage = (used_disk_gb / total_disk_gb) * 100 if total_disk_gb > 0 else 0
             disk_bar = self._get_bar_chart(disk_percentage)
             embed.add_field(name=f":file_folder: {disk_name}",
