@@ -3,9 +3,9 @@ import psutil
 import asyncio
 from datetime import datetime, timedelta
 from redbot.core import commands, app_commands, Config
-from redbot.core.utils.chat_formatting import humanize_timedelta
+from redbot.core.utils.chat_formatting import humanize_timedelta  # Keep for now, but not used for uptime
 from redbot.core.bot import Red
-# from redbot.core.errors import MissingRequiredArguments # This import is causing the error and is not used
+import humanize  # Import the humanize library
 import logging
 
 log = logging.getLogger("red.systemmonitor")
@@ -147,8 +147,8 @@ class SystemMonitor(commands.Cog):
         # Uptime
         boot_time_timestamp = psutil.boot_time()
         uptime_seconds = datetime.now().timestamp() - boot_time_timestamp
-        # Corrected: Pass timedelta object as positional argument
-        uptime_string = humanize_timedelta(timedelta(seconds=int(uptime_seconds)))
+        # Corrected: Use humanize.naturaldelta for uptime string
+        uptime_string = humanize.naturaldelta(timedelta(seconds=int(uptime_seconds)))
 
         # Last Updated Time
         last_updated = datetime.now()
