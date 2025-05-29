@@ -166,6 +166,8 @@ class SystemMonitor(commands.Cog):
         """
         Generates a text-based bar chart using Unicode block characters.
         """
+        # Ensure percentage is clamped between 0 and 100
+        percentage = max(0, min(100, percentage))
         filled_blocks = int(length * (percentage / 100))
         empty_blocks = length - filled_blocks
         return "█" * filled_blocks + "░" * empty_blocks
@@ -201,9 +203,19 @@ class SystemMonitor(commands.Cog):
             embed.add_field(name=f":file_folder: {disk_name}",
                             value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB\n`{disk_bar}`", inline=False)
 
-        embed.add_field(name=":arrow_double_down: Bandwidth (DL)", value=f"{download_speed_mbps:.2f} Mbps",
+        # Bandwidth (Download)
+        total_bandwidth_mbps = 1024  # Assuming 1024 Mbps as total for display
+        download_percentage = (download_speed_mbps / total_bandwidth_mbps) * 100 if total_bandwidth_mbps > 0 else 0
+        download_bar = self._get_bar_chart(download_percentage)
+        embed.add_field(name=":arrow_double_down: Bandwidth (DL)",
+                        value=f"{download_speed_mbps:.2f} Mbps\n`{download_bar}`", inline=False)
+
+        # Bandwidth (Upload)
+        upload_percentage = (upload_speed_mbps / total_bandwidth_mbps) * 100 if total_bandwidth_mbps > 0 else 0
+        upload_bar = self._get_bar_chart(upload_percentage)
+        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps\n`{upload_bar}`",
                         inline=False)
-        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps", inline=False)
+
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
         embed.set_footer(text=f"Last Updated: {last_updated_human_format}")  # Use the human-formatted string
         return embed
