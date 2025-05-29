@@ -139,7 +139,7 @@ class SystemMonitor(commands.Cog):
             final_net_io = psutil.net_io_counters()
 
             download_bytes_diff = final_net_io.bytes_recv - initial_net_io.bytes_recv
-            upload_bytes_diff = final_net_io.bytes_sent - initial_net_io.bytes_sent  # Corrected: was final_net_io.bytes_sent
+            upload_bytes_diff = final_net_io.bytes_sent - initial_net_io.bytes_sent
 
             download_speed_mbps = (download_bytes_diff * 8) / (1024 ** 2 * 0.5)
             upload_speed_mbps = (upload_bytes_diff * 8) / (1024 ** 2 * 0.5)
@@ -147,7 +147,8 @@ class SystemMonitor(commands.Cog):
         # Uptime
         boot_time_timestamp = psutil.boot_time()
         uptime_seconds = datetime.now().timestamp() - boot_time_timestamp
-        uptime_string = humanize_timedelta(timedelta(seconds=int(uptime_seconds)))
+        # Corrected: Pass timedelta object as keyword argument 'delta'
+        uptime_string = humanize_timedelta(delta=timedelta(seconds=int(uptime_seconds)))
 
         # Last Updated Time
         last_updated = datetime.now()
