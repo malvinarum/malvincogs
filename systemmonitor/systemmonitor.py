@@ -3,7 +3,7 @@ import psutil
 import asyncio
 from datetime import datetime, timedelta
 from redbot.core import commands, app_commands, Config
-from redbot.core.utils.chat_formatting import humanize_timedelta  # Keep for now, but not used for uptime
+# from redbot.core.utils.chat_formatting import humanize_timedelta # No longer needed/used for uptime
 from redbot.core.bot import Red
 import humanize  # Import the humanize library
 import logging
@@ -64,7 +64,7 @@ class SystemMonitor(commands.Cog):
         Gathers system usage statistics.
         Returns a tuple: (cpu_usage, used_memory_gb, total_memory_gb,
                           used_disk_gb, total_disk_gb, download_speed_mbps,
-                          upload_speed_mbps, uptime_string, last_updated_discord_format)
+                          upload_speed_mbps, uptime_string, last_updated_human_format)
         """
         # CPU Usage
         cpu_usage = psutil.cpu_percent(interval=0.5)  # Measure over 0.5 seconds
@@ -147,17 +147,17 @@ class SystemMonitor(commands.Cog):
         # Uptime
         boot_time_timestamp = psutil.boot_time()
         uptime_seconds = datetime.now().timestamp() - boot_time_timestamp
-        # Corrected: Use humanize.naturaldelta for uptime string
         uptime_string = humanize.naturaldelta(timedelta(seconds=int(uptime_seconds)))
 
         # Last Updated Time
         last_updated = datetime.now()
-        last_updated_discord_format = discord.utils.format_dt(last_updated, style='T')
+        # Format the datetime object directly into a human-readable string
+        last_updated_human_format = last_updated.strftime("%Y-%m-%d %H:%M:%S %Z")  # Example: 2023-10-27 15:30:00 UTC
 
         return (cpu_usage, used_memory_gb, total_memory_gb,
                 used_disk_gb, total_disk_gb, total_total_disk,  # Pass total_total_disk for the check
                 download_speed_mbps, upload_speed_mbps,
-                uptime_string, last_updated_discord_format)
+                uptime_string, last_updated_human_format)
 
     def _get_bar_chart(self, percentage: float, length: int = 10):
         """
@@ -174,7 +174,7 @@ class SystemMonitor(commands.Cog):
         (cpu_usage, used_memory_gb, total_memory_gb,
          used_disk_gb, total_disk_gb, total_total_disk,
          download_speed_mbps, upload_speed_mbps,
-         uptime_string, last_updated_discord_format) = stats
+         uptime_string, last_updated_human_format) = stats
 
         embed = discord.Embed(title=":pushpin: System Usage", color=discord.Color.blue())
 
@@ -200,7 +200,7 @@ class SystemMonitor(commands.Cog):
                         inline=False)
         embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps", inline=False)
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
-        embed.set_footer(text=f"Last Updated: {last_updated_discord_format}")
+        embed.set_footer(text=f"Last Updated: {last_updated_human_format}")  # Use the human-formatted string
         return embed
 
     async def _update_loop(self):
