@@ -216,8 +216,9 @@ class PlexActivity(commands.Cog):
                 total_duration = session.get("total_duration", "00:00")
                 device = session.get("device", "Unknown Device")
 
-                field_name = f"**{user}** is watching **{title}** ({media_type.capitalize()})"
+                field_name = f"**{user}**"
                 field_value = (
+                    f"Content: **{title}** ({media_type.capitalize()})"
                     f"Progress: `{current_time} / {total_duration}`\n"
                     f"Device: `{device}`"
                 )
