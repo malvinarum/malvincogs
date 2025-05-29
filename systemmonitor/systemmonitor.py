@@ -208,12 +208,12 @@ class SystemMonitor(commands.Cog):
         download_percentage = (download_speed_mbps / total_bandwidth_mbps) * 100 if total_bandwidth_mbps > 0 else 0
         download_bar = self._get_bar_chart(download_percentage)
         embed.add_field(name=":arrow_double_down: Bandwidth (DL)",
-                        value=f"{download_speed_mbps:.2f} Mbps\n`{download_bar}`", inline=False)
+                        value=f"{download_speed_mbps:.2f} of 1024 Mbps\n`{download_bar}`", inline=False)
 
         # Bandwidth (Upload)
         upload_percentage = (upload_speed_mbps / total_bandwidth_mbps) * 100 if total_bandwidth_mbps > 0 else 0
         upload_bar = self._get_bar_chart(upload_percentage)
-        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} Mbps\n`{upload_bar}`",
+        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps\n`{upload_bar}`",
                         inline=False)
 
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
