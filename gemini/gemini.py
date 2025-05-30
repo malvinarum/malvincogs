@@ -15,12 +15,13 @@ log = logging.getLogger("red.gemini")
 
 # Define the default settings for the cog's configuration
 # This will store the API key, allowed channels for commands,
-# and settings for the conversational mode.
+# settings for the conversational mode, and the personality prompt.
 DEFAULT_GUILD_SETTINGS = {
     "api_key": None,
     "allowed_channels": [], # Channels where `[p]gemini ask` command is allowed
-    "conversation_enabled": False, # New: Whether conversational mode is active
-    "listen_channel_id": None, # New: The channel ID where the bot will listen for conversations
+    "conversation_enabled": False, # Whether conversational mode is active
+    "listen_channel_id": None, # The channel ID where the bot will listen for conversations
+    "personality_prompt": None, # New: Stores the personality string for the AI
 }
 
 class Gemini(commands.Cog):
@@ -29,7 +30,8 @@ class Gemini(commands.Cog):
 
     This cog allows users to send prompts to a Gemini large language model
     and receive responses directly in Discord, either via a command or
-    through a designated conversational channel.
+    through a designated conversational channel. It also supports setting
+    a personality for the AI.
     """
 
     def __init__(self, bot):
@@ -70,8 +72,10 @@ class Gemini(commands.Cog):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
+        Includes the personality prompt if set.
         """
         api_key = await self.config.guild(ctx.guild).api_key()
+        personality_prompt = await self.config.guild(ctx.guild).personality_prompt() # Fetch personality
 
         if not api_key:
             await ctx.send(
@@ -80,12 +84,15 @@ class Gemini(commands.Cog):
             )
             return None # Indicate failure
 
+        # Prepend personality to the prompt if it exists
+        full_prompt = f"{personality_prompt}\n\n{prompt}" if personality_prompt else prompt
+
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         payload = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [{"text": prompt}]
+                    "parts": [{"text": full_prompt}] # Use the full_prompt here
                 }
             ]
         }
@@ -143,6 +150,9 @@ class Gemini(commands.Cog):
         Use `[p]gemini setconversationchannel #channel` to set a channel for conversational AI.
         Use `[p]gemini enableconversation` to enable conversational mode.
         Use `[p]gemini disableconversation` to disable conversational mode.
+        Use `[p]gemini setpersonality <text>` to set the AI's personality.
+        Use `[p]gemini clearpersonality` to clear the AI's personality.
+        Use `[p]gemini showpersonality` to see the current AI personality.
         """
         await ctx.send_help(self._gemini)
 
@@ -161,7 +171,7 @@ class Gemini(commands.Cog):
 
     @_gemini.command(name="addchannel")
     @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
-    async def _gemini_addchannel(self, ctx: commands.Context, channel: discord.TextChannel): # Changed to discord.TextChannel
+    async def _gemini_addchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Adds a channel to the list of allowed channels for `[p]gemini ask` command interactions.
 
@@ -179,7 +189,7 @@ class Gemini(commands.Cog):
 
     @_gemini.command(name="removechannel")
     @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
-    async def _gemini_removechannel(self, ctx: commands.Context, channel: discord.TextChannel): # Changed to discord.TextChannel
+    async def _gemini_removechannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Removes a channel from the list of allowed channels for `[p]gemini ask` command interactions.
         """
@@ -219,7 +229,7 @@ class Gemini(commands.Cog):
 
     @_gemini.command(name="setconversationchannel")
     @commands.admin_or_permissions(manage_channels=True)
-    async def _gemini_setconversationchannel(self, ctx: commands.Context, channel: discord.TextChannel): # Changed to discord.TextChannel
+    async def _gemini_setconversationchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Sets the channel where Gemini will listen for conversational interactions.
         """
@@ -257,6 +267,41 @@ class Gemini(commands.Cog):
         await self.config.guild(ctx.guild).conversation_enabled.set(False)
         await ctx.send("Conversational mode disabled.")
         log.info(f"Conversational mode disabled for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="setpersonality")
+    @commands.admin_or_permissions(manage_guild=True) # Server admins can set personality
+    async def _gemini_setpersonality(self, ctx: commands.Context, *, personality_text: str):
+        """
+        Sets the personality for the Gemini AI.
+        This text will be prepended to every prompt sent to Gemini.
+
+        Example: `[p]gemini setpersonality You are a helpful, friendly assistant.`
+        """
+        await self.config.guild(ctx.guild).personality_prompt.set(personality_text)
+        await ctx.send("Gemini AI personality has been set.")
+        log.info(f"Gemini personality set for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="cleapersonality")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_cleapersonality(self, ctx: commands.Context):
+        """
+        Clears the current personality set for the Gemini AI.
+        """
+        await self.config.guild(ctx.guild).personality_prompt.set(None)
+        await ctx.send("Gemini AI personality has been cleared.")
+        log.info(f"Gemini personality cleared for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="showpersonality")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_showpersonality(self, ctx: commands.Context):
+        """
+        Shows the current personality set for the Gemini AI.
+        """
+        personality_text = await self.config.guild(ctx.guild).personality_prompt()
+        if personality_text:
+            await ctx.send(f"Current Gemini AI personality: ```{personality_text}```")
+        else:
+            await ctx.send("No personality is currently set for the Gemini AI.")
 
     @_gemini.command(name="ask")
     @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
@@ -310,16 +355,9 @@ class Gemini(commands.Cog):
             return
 
         # Check if the message is a command to avoid processing commands as prompts
-        # This is crucial to prevent the bot from responding to its own commands
         ctx = await self.bot.get_context(message)
         if ctx.valid: # If ctx.valid is True, it means the message is a command
             return
 
         # If all checks pass, send the message content to Gemini
-        # We create a dummy context for the helper function
-        # The message object itself can act as a rudimentary context for sending replies
-        # For full context features, you might need to build a more complete ctx object
-        # but for simple replies, message.channel.send is sufficient.
-        # However, _get_gemini_response expects a commands.Context object.
-        # So, we'll use the ctx object we just created, knowing it's not a command.
         await self._get_gemini_response(ctx, message.content)
