@@ -461,7 +461,14 @@ class Gemini(commands.Cog):
         mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
         personality_text = mood_prompts.get("normal", "No 'normal' personality set, using default.")
 
-        await ctx.send(f"Current Gemini AI's core personality: ```{personality_text}```")
+        # FIX: Use pagify to send the personality text in chunks
+        header = "Current Gemini AI's core personality:\n"
+        for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True, prefix="```", suffix="```"):
+            await ctx.send(f"{header}{page}")
+            header = ""  # Only send the header for the first page
+
+        if not personality_text:  # Handle case where it might be empty or default
+            await ctx.send("No 'normal' personality set, using default.")
 
     @_gemini.command(name="clearconversation")
     @commands.admin_or_permissions(manage_channels=True)
