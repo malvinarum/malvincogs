@@ -3,8 +3,8 @@ import json
 import logging
 
 # Third-party imports
-import aiohttp # For making asynchronous HTTP requests
-import discord # For discord.Message type hinting
+import aiohttp  # For making asynchronous HTTP requests
+import discord  # For discord.Message type hinting
 
 # Redbot imports
 from redbot.core import commands, Config, app_commands
@@ -18,11 +18,15 @@ log = logging.getLogger("red.gemini")
 # settings for the conversational mode, and the personality prompt.
 DEFAULT_GUILD_SETTINGS = {
     "api_key": None,
-    "allowed_channels": [], # Channels where `[p]gemini ask` command is allowed
-    "conversation_enabled": False, # Whether conversational mode is active
-    "listen_channel_id": None, # The channel ID where the bot will listen for conversations
-    "personality_prompt": None, # New: Stores the personality string for the AI
+    "allowed_channels": [],  # Channels where `[p]gemini ask` command is allowed
+    "conversation_enabled": False,  # Whether conversational mode is active
+    "listen_channel_id": None,  # The channel ID where the bot will listen for conversations
+    "personality_prompt": None,  # Stores the personality string for the AI
+    "conversation_history": {},
+    # NEW: Stores history per channel {channel_id: [{"role": "user", "parts": [{"text": "..."}]}, ...]}
+    "max_conversation_turns": 10,  # NEW: Max number of full turns (user + model response) to keep in history
 }
+
 
 class Gemini(commands.Cog):
     """
@@ -31,7 +35,7 @@ class Gemini(commands.Cog):
     This cog allows users to send prompts to a Gemini large language model
     and receive responses directly in Discord, either via a command or
     through a designated conversational channel. It also supports setting
-    a personality for the AI.
+    a personality for the AI and maintaining continuous conversations.
     """
 
     def __init__(self, bot):
@@ -68,53 +72,89 @@ class Gemini(commands.Cog):
         self.bot.loop.create_task(self.session.close())
         log.info("Gemini cog unloaded and aiohttp session closed.")
 
-    async def _get_gemini_response(self, ctx: commands.Context, prompt: str):
+    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
-        Includes the personality prompt if set.
+        Includes the personality prompt and manages conversation history.
         """
-        api_key = await self.config.guild(ctx.guild).api_key()
-        personality_prompt = await self.config.guild(ctx.guild).personality_prompt() # Fetch personality
+        guild_settings = await self.config.guild(ctx.guild).all()
+        api_key = guild_settings["api_key"]
+        personality_prompt = guild_settings["personality_prompt"]
+        max_turns = guild_settings["max_conversation_turns"]
+
+        # Get conversation history for the current channel
+        channel_history_key = str(ctx.channel.id)
+        # Retrieve history from config, default to empty list if not found
+        current_history = guild_settings["conversation_history"].get(channel_history_key, [])
 
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}gemini setkey <your_api_key>`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}gemini setkey <your_api_key}>`."
             )
-            return None # Indicate failure
+            return None  # Indicate failure
 
-        # Prepend personality to the prompt if it exists
-        full_prompt = f"{personality_prompt}\n\n{prompt}" if personality_prompt else prompt
+        # Prepare the chat history for the API call payload
+        payload_contents = []
+
+        # If personality is set, add it as the very first user message in the payload.
+        # This way, it acts as a system instruction for the current API call.
+        if personality_prompt:
+            payload_contents.append({"role": "user", "parts": [{"text": personality_prompt}]})
+            # Add a dummy model response to "prime" the model to respond in character.
+            # This helps the model understand it's acknowledged the personality instruction.
+            payload_contents.append(
+                {"role": "model", "parts": [{"text": "Understood. I shall endeavor to respond in kind."}]})
+
+        # Add existing conversation history (truncated to `max_turns` pairs)
+        # Each "turn" consists of a user message and a model response. So, `max_turns * 2` messages.
+        # We take the most recent `max_turns * 2` messages from `current_history`.
+        truncated_history_for_payload = current_history[-(max_turns * 2):]
+        payload_contents.extend(truncated_history_for_payload)
+
+        # Add the current user's prompt to the payload
+        payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": full_prompt}] # Use the full_prompt here
-                }
-            ]
+            "contents": payload_contents  # This is the full context sent to Gemini
         }
         headers = {
             "Content-Type": "application/json"
         }
 
-        message = await ctx.send("Thinking... please wait.") # Provide a loading indicator
+        message = await ctx.send("Thinking... please wait.")  # Provide a loading indicator
 
         try:
             async with self.session.post(api_url, headers=headers, data=json.dumps(payload)) as response:
-                response.raise_for_status()
+                response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
                 result = await response.json()
 
-            if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0]["content"].get("parts"):
+            if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0][
+                "content"].get("parts"):
                 generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
+
+                # Update the stored conversation history with the new user message and model response.
+                # This history does NOT include the personality prompt, only actual chat turns.
+                current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
+                current_history.append({"role": "model", "parts": [{"text": generated_text}]})
+
+                # Truncate the stored history again before saving to config.
+                # This ensures the history doesn't grow indefinitely in storage.
+                current_history = current_history[-(max_turns * 2):]
+
+                # Save the updated history back to config
+                async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
+                    conv_hist[channel_history_key] = current_history
+
                 for page in pagify(generated_text, delims=["\n", " "], escape_mass_mentions=True):
                     await ctx.send(page)
                 log.info(f"Successfully responded to Gemini prompt from guild: {ctx.guild.id}")
-                return generated_text # Return the generated text
+                return generated_text  # Return the generated text
             else:
-                await ctx.send("Could not get a valid response from the Gemini API. The model might not have generated any content.")
+                await ctx.send(
+                    "Could not get a valid response from the Gemini API. The model might not have generated any content.")
                 log.warning(f"Unexpected Gemini API response structure: {result} for guild: {ctx.guild.id}")
                 return None
 
@@ -131,13 +171,14 @@ class Gemini(commands.Cog):
             log.error(f"Unexpected error during Gemini API call for guild {ctx.guild.id}: {e}", exc_info=True)
             return None
         finally:
+            # Attempt to delete the "Thinking..." message regardless of success or failure
             try:
                 await message.delete()
             except Exception:
-                pass
+                pass  # Ignore if message already deleted or couldn't be found
 
     @commands.group(name="gemini", invoke_without_command=True)
-    @commands.guild_only() # Ensure commands are only used in guilds
+    @commands.guild_only()  # Ensure commands are only used in guilds
     async def _gemini(self, ctx: commands.Context):
         """
         Base command for Gemini API interactions.
@@ -153,11 +194,14 @@ class Gemini(commands.Cog):
         Use `[p]gemini setpersonality <text>` to set the AI's personality.
         Use `[p]gemini clearpersonality` to clear the AI's personality.
         Use `[p]gemini showpersonality` to see the current AI personality.
+        Use `[p]gemini clearconversation` to clear the conversation history for a channel.
+        Use `[p]gemini setmaxturns <number>` to set how many turns Skippy remembers.
+        Use `[p]gemini showmaxturns` to see the current memory limit.
         """
         await ctx.send_help(self._gemini)
 
     @_gemini.command(name="setkey")
-    @commands.is_owner() # Only the bot owner can set the API key
+    @commands.is_owner()  # Only the bot owner can set the API key
     async def _gemini_setkey(self, ctx: commands.Context, api_key: str):
         """
         Sets the Gemini API key for this guild.
@@ -170,7 +214,7 @@ class Gemini(commands.Cog):
         log.info(f"Gemini API key set for guild: {ctx.guild.id}")
 
     @_gemini.command(name="addchannel")
-    @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
+    @commands.admin_or_permissions(manage_channels=True)  # Only admins or those with manage_channels can use this
     async def _gemini_addchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Adds a channel to the list of allowed channels for `[p]gemini ask` command interactions.
@@ -188,7 +232,7 @@ class Gemini(commands.Cog):
                 await ctx.send(f"{channel.mention} is already in the allowed list for `ask` command.")
 
     @_gemini.command(name="removechannel")
-    @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
+    @commands.admin_or_permissions(manage_channels=True)  # Only admins or those with manage_channels can use this
     async def _gemini_removechannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Removes a channel from the list of allowed channels for `[p]gemini ask` command interactions.
@@ -197,12 +241,13 @@ class Gemini(commands.Cog):
             if channel.id in allowed_channels:
                 allowed_channels.remove(channel.id)
                 await ctx.send(f"`[p]gemini ask` command interactions are no longer allowed in {channel.mention}.")
-                log.info(f"Removed channel {channel.id} from allowed channels for `ask` command in guild: {ctx.guild.id}")
+                log.info(
+                    f"Removed channel {channel.id} from allowed channels for `ask` command in guild: {ctx.guild.id}")
             else:
                 await ctx.send(f"{channel.mention} was not in the allowed list for `ask` command.")
 
     @_gemini.command(name="listchannels")
-    @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
+    @commands.admin_or_permissions(manage_channels=True)  # Only admins or those with manage_channels can use this
     async def _gemini_listchannels(self, ctx: commands.Context):
         """
         Lists all channels where `[p]gemini ask` command interactions are currently allowed.
@@ -221,7 +266,8 @@ class Gemini(commands.Cog):
                 channel_mentions.append(f"Unknown Channel (ID: {channel_id})")
 
         if channel_mentions:
-            message = "`[p]gemini ask` command interactions are currently allowed in the following channels:\n" + "\n".join(channel_mentions)
+            message = "`[p]gemini ask` command interactions are currently allowed in the following channels:\n" + "\n".join(
+                channel_mentions)
         else:
             message = "No specific channels are set for `[p]gemini ask` command interactions. It can be used anywhere."
 
@@ -253,9 +299,10 @@ class Gemini(commands.Cog):
         await self.config.guild(ctx.guild).conversation_enabled.set(True)
         channel = ctx.guild.get_channel(listen_channel_id)
         if channel:
-            await ctx.send(f"Conversational mode enabled. Gemini will respond to messages in {channel.mention}.")
+            await ctx.send(f"Conversational mode enabled. Skippy will now respond to messages in {channel.mention}.")
         else:
-            await ctx.send("Conversational mode enabled, but the designated channel is invalid. Please set a valid channel.")
+            await ctx.send(
+                "Conversational mode enabled, but the designated channel is invalid. Please set a valid channel.")
         log.info(f"Conversational mode enabled for guild: {ctx.guild.id}")
 
     @_gemini.command(name="disableconversation")
@@ -269,16 +316,16 @@ class Gemini(commands.Cog):
         log.info(f"Conversational mode disabled for guild: {ctx.guild.id}")
 
     @_gemini.command(name="setpersonality")
-    @commands.admin_or_permissions(manage_guild=True) # Server admins can set personality
+    @commands.admin_or_permissions(manage_guild=True)  # Server admins can set personality
     async def _gemini_setpersonality(self, ctx: commands.Context, *, personality_text: str):
         """
-        Sets the personality for the Gemini AI.
+        Sets the personality for the Gemini AI (Skippy).
         This text will be prepended to every prompt sent to Gemini.
 
         Example: `[p]gemini setpersonality You are a helpful, friendly assistant.`
         """
         await self.config.guild(ctx.guild).personality_prompt.set(personality_text)
-        await ctx.send("Gemini AI personality has been set.")
+        await ctx.send("Gemini AI personality (Skippy's essence) has been set.")
         log.info(f"Gemini personality set for guild: {ctx.guild.id}")
 
     @_gemini.command(name="cleapersonality")
@@ -303,6 +350,46 @@ class Gemini(commands.Cog):
         else:
             await ctx.send("No personality is currently set for the Gemini AI.")
 
+    @_gemini.command(name="clearconversation")
+    @commands.admin_or_permissions(manage_channels=True)
+    async def _gemini_clearconversation(self, ctx: commands.Context):
+        """
+        Clears the conversation history for the current channel.
+        Skippy will forget previous turns in this channel.
+        """
+        channel_history_key = str(ctx.channel.id)
+        async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
+            if channel_history_key in conv_hist:
+                del conv_hist[channel_history_key]
+                await ctx.send(
+                    "Conversation history for this channel has been cleared. Skippy's memory is now pristine.")
+                log.info(f"Conversation history cleared for channel {ctx.channel.id} in guild: {ctx.guild.id}")
+            else:
+                await ctx.send("No active conversation history found for this channel to clear.")
+
+    @_gemini.command(name="setmaxturns")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_setmaxturns(self, ctx: commands.Context, turns: int):
+        """
+        Sets the maximum number of conversational turns (user+bot message pairs) Skippy will remember.
+        Default is 10 turns. Each turn is one user message and one bot response.
+        """
+        if turns <= 0:
+            await ctx.send("The maximum number of turns must be a positive integer. Even a wizard needs some limits!")
+            return
+        await self.config.guild(ctx.guild).max_conversation_turns.set(turns)
+        await ctx.send(f"Maximum conversation turns for Skippy set to {turns}. He shall endeavor to remember.")
+        log.info(f"Max conversation turns set to {turns} for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="showmaxturns")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_showmaxturns(self, ctx: commands.Context):
+        """
+        Shows the current maximum number of conversational turns Skippy will remember.
+        """
+        max_turns = await self.config.guild(ctx.guild).max_conversation_turns()
+        await ctx.send(f"Skippy currently remembers up to {max_turns} conversational turns.")
+
     @_gemini.command(name="ask")
     @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
     async def _gemini_ask(self, ctx: commands.Context, *, prompt: str):
@@ -316,7 +403,8 @@ class Gemini(commands.Cog):
         # Check if the current channel is allowed for the command
         allowed_channel_ids = await self.config.guild(ctx.guild).allowed_channels()
         if allowed_channel_ids and ctx.channel.id not in allowed_channel_ids:
-            allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if ctx.guild.get_channel(cid)]
+            allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if
+                                ctx.guild.get_channel(cid)]
             if allowed_mentions:
                 await ctx.send(
                     f"`[p]gemini ask` command interactions are restricted to specific channels. "
@@ -356,7 +444,7 @@ class Gemini(commands.Cog):
 
         # Check if the message is a command to avoid processing commands as prompts
         ctx = await self.bot.get_context(message)
-        if ctx.valid: # If ctx.valid is True, it means the message is a command
+        if ctx.valid:  # If ctx.valid is True, it means the message is a command
             return
 
         # If all checks pass, send the message content to Gemini
