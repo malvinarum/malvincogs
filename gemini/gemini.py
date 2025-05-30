@@ -461,10 +461,11 @@ class Gemini(commands.Cog):
         mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
         personality_text = mood_prompts.get("normal", "No 'normal' personality set, using default.")
 
-        # FIX: Use pagify to send the personality text in chunks
         header = "Current Gemini AI's core personality:\n"
-        for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True, prefix="```", suffix="```"):
-            await ctx.send(f"{header}{page}")
+        # REMOVED 'prefix' and 'suffix' from pagify.
+        # We will add the '```' manually to each page.
+        for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True):
+            await ctx.send(f"{header}```{page}```")  # Manually adding code block formatting
             header = ""  # Only send the header for the first page
 
         if not personality_text:  # Handle case where it might be empty or default
