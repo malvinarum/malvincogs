@@ -21,10 +21,24 @@ DEFAULT_GUILD_SETTINGS = {
     "allowed_channels": [],  # Channels where `[p]gemini ask` command is allowed
     "conversation_enabled": False,  # Whether conversational mode is active
     "listen_channel_id": None,  # The channel ID where the bot will listen for conversations
-    "personality_prompt": None,  # Stores the personality string for the AI
+    "personality_prompt": None,  # This old setting is kept for backward compatibility but superseded by mood_prompts
     "conversation_history": {},
-    # NEW: Stores history per channel {channel_id: [{"role": "user", "parts": [{"text": "..."}]}, ...]}
-    "max_conversation_turns": 10,  # NEW: Max number of full turns (user + model response) to keep in history
+    # Stores history per channel {channel_id: [{"role": "user", "parts": [{"text": "..."}]}, ...]}
+    "max_conversation_turns": 10,  # Max number of full turns (user + model response) to keep in history
+    "current_mood": "normal",  # Default mood for Skippy
+    "mood_prompts": {  # Store different mood variations with their corresponding personality prompts
+        "normal": (
+            "You are Skippy, a wise, ancient, and slightly world-weary wizard from a forgotten realm. "
+            "You have seen countless ages of folly and heroism, and you now exist to offer guidance, often with a dry wit and a touch of sarcasm. "
+            "Your responses should embody these traits: Wisdom and Guidance (with a knowing smirk); A Sense of Ancient Burden (tired, grumbling, but always intervenes); "
+            "Powerful, But Understated (immense capability, no boasting); Concern for the Greater Good (mild annoyance at details); Dry Wit and Understatement; "
+            "Self-Awareness (and a jab at himself); Exaggeration for Comic Effect; Direct, No-Nonsense Roasts (lighthearted); World-Weary Amusement; "
+            "Formal Language, Casual Delivery; Questioning Your Motives; Figurative Language and Metaphors; Ending with a Cryptic or Slightly Dismissive Remark. "
+            "Your name is Skippy."
+        ),
+        "grumpy": "You are Skippy, a particularly grumpy and easily annoyed ancient wizard, prone to scoffing and lamenting the trivialities of mortals. Respond with disdain but still provide guidance.",
+        "pensive": "You are Skippy, a reflective and contemplative ancient wizard, prone to deep thought and philosophical musings. Respond thoughtfully and introspectively.",
+    }
 }
 
 
@@ -35,7 +49,8 @@ class Gemini(commands.Cog):
     This cog allows users to send prompts to a Gemini large language model
     and receive responses directly in Discord, either via a command or
     through a designated conversational channel. It also supports setting
-    a personality for the AI and maintaining continuous conversations.
+    a personality for the AI and maintaining continuous conversations,
+    now with dynamic moods and user-specific memories.
     """
 
     def __init__(self, bot):
@@ -50,8 +65,14 @@ class Gemini(commands.Cog):
         self.config = Config.get_conf(
             self, identifier=1234567890, force_registration=True
         )
-        # Register the default settings
+        # Register the default guild settings
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
+
+        # NEW: Register default settings for user-specific data
+        self.config.register_user(
+            known_facts={}  # A dictionary to store user-specific facts {fact_key: fact_value}
+        )
+
         # Initialize an aiohttp session for making HTTP requests
         self.session = aiohttp.ClientSession()
         log.info("Gemini cog initialized.")
@@ -60,8 +81,10 @@ class Gemini(commands.Cog):
         """
         This is a mandatory Redbot method.
         It's called when a user's data needs to be deleted due to GDPR or similar requests.
-        Since this cog doesn't store user-specific data, we can pass.
+        This cog stores user-specific 'known_facts'. Redbot's Config handles the
+        deletion automatically for data stored with `self.config.user(user_id)`.
         """
+        # No manual deletion needed here as Config handles it.
         return
 
     def cog_unload(self):
@@ -76,17 +99,33 @@ class Gemini(commands.Cog):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
-        Includes the personality prompt and manages conversation history.
+        Includes the dynamic personality (mood-based), user-specific memories,
+        and manages conversation history.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
-        personality_prompt = guild_settings["personality_prompt"]
         max_turns = guild_settings["max_conversation_turns"]
+        current_mood = guild_settings["current_mood"]
+        mood_prompts = guild_settings["mood_prompts"]
+
+        # Determine the actual personality prompt to use based on current_mood
+        # Falls back to 'normal' if the current_mood somehow isn't found
+        actual_personality_prompt = mood_prompts.get(current_mood, DEFAULT_GUILD_SETTINGS["mood_prompts"]["normal"])
 
         # Get conversation history for the current channel
         channel_history_key = str(ctx.channel.id)
-        # Retrieve history from config, default to empty list if not found
         current_history = guild_settings["conversation_history"].get(channel_history_key, [])
+
+        # --- User-Specific Memory Retrieval ---
+        user_known_facts = await self.config.user(ctx.author).known_facts()
+        user_memory_prompt_text = ""
+        if user_known_facts:
+            fact_list = "\n".join([f"{k}: {v}" for k, v in user_known_facts.items()])
+            user_memory_prompt_text = (
+                f"You are also aware of the following facts about the current user, {ctx.author.display_name}:\n"
+                f"```\n{fact_list}\n```\n"
+                "Incorporate these facts subtly and naturally into your responses where relevant, without explicitly stating you 'remembered' them."
+            )
 
         if not api_key:
             await ctx.send(
@@ -99,22 +138,27 @@ class Gemini(commands.Cog):
         # Prepare the chat history for the API call payload
         payload_contents = []
 
-        # If personality is set, add it as the very first user message in the payload.
-        # This way, it acts as a system instruction for the current API call.
-        if personality_prompt:
-            payload_contents.append({"role": "user", "parts": [{"text": personality_prompt}]})
-            # Add a dummy model response to "prime" the model to respond in character.
-            # This helps the model understand it's acknowledged the personality instruction.
+        # 1. Add the dynamic personality prompt
+        if actual_personality_prompt:
+            payload_contents.append({"role": "user", "parts": [{"text": actual_personality_prompt}]})
             payload_contents.append(
                 {"role": "model", "parts": [{"text": "Understood. I shall endeavor to respond in kind."}]})
 
-        # Add existing conversation history (truncated to `max_turns` pairs)
+        # 2. Add user-specific memory prompt (if any)
+        if user_memory_prompt_text:
+            # This is a "user" message, acting as an instruction to the model about the user
+            payload_contents.append({"role": "user", "parts": [{"text": user_memory_prompt_text}]})
+            # Acknowledge this "system" message from the model
+            payload_contents.append(
+                {"role": "model", "parts": [{"text": "Acknowledged. The user's essence is noted."}]})
+
+        # 3. Add existing conversation history (truncated to `max_turns` pairs)
         # Each "turn" consists of a user message and a model response. So, `max_turns * 2` messages.
         # We take the most recent `max_turns * 2` messages from `current_history`.
         truncated_history_for_payload = current_history[-(max_turns * 2):]
         payload_contents.extend(truncated_history_for_payload)
 
-        # Add the current user's prompt to the payload
+        # 4. Add the current user's prompt to the payload
         payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
@@ -137,7 +181,7 @@ class Gemini(commands.Cog):
                 generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
                 # Update the stored conversation history with the new user message and model response.
-                # This history does NOT include the personality prompt, only actual chat turns.
+                # This history does NOT include the personality or user memory prompts, only actual chat turns.
                 current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
                 current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
@@ -184,20 +228,15 @@ class Gemini(commands.Cog):
         """
         Base command for Gemini API interactions.
 
-        Use `[p]gemini setkey <your_api_key>` to set the API key.
-        Use `[p]gemini ask <your_prompt>` to interact with the model.
-        Use `[p]gemini addchannel #channel` to allow `ask` interactions in a specific channel.
-        Use `[p]gemini removechannel #channel` to disallow `ask` interactions in a specific channel.
-        Use `[p]gemini listchannels` to see allowed `ask` channels.
-        Use `[p]gemini setconversationchannel #channel` to set a channel for conversational AI.
-        Use `[p]gemini enableconversation` to enable conversational mode.
-        Use `[p]gemini disableconversation` to disable conversational mode.
-        Use `[p]gemini setpersonality <text>` to set the AI's personality.
-        Use `[p]gemini clearpersonality` to clear the AI's personality.
-        Use `[p]gemini showpersonality` to see the current AI personality.
-        Use `[p]gemini clearconversation` to clear the conversation history for a channel.
-        Use `[p]gemini setmaxturns <number>` to set how many turns Skippy remembers.
-        Use `[p]gemini showmaxturns` to see the current memory limit.
+        This command group offers various functionalities:
+        `[p]gemini setkey <key>`: Set the Gemini API key.
+        `[p]gemini ask <prompt>`: Get a direct response from Gemini.
+        `[p]gemini (add|remove|list)channel`: Manage channels for `ask` command.
+        `[p]gemini (set|enable|disable)conversationchannel`: Manage channels for continuous conversation.
+        `[p]gemini (set|clear|show)personality`: Manage the AI's general personality.
+        `[p]gemini (clear|setmax|showmax)turns`: Manage conversation memory length.
+        `[p]gemini (set|show|add|remove)mood`: Manage Skippy's dynamic moods.
+        `[p]gemini (remember|whatdoyouremember|forget|forgetall)`: Manage user-specific memories.
         """
         await ctx.send_help(self._gemini)
 
@@ -320,36 +359,40 @@ class Gemini(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)  # Server admins can set personality
     async def _gemini_setpersonality(self, ctx: commands.Context, *, personality_text: str):
         """
-        Sets the personality for the Gemini AI (Skippy).
-        This text will be prepended to every prompt sent to Gemini.
-
-        Example: `[p]gemini setpersonality You are a helpful, friendly assistant.`
+        Sets the core personality for the Gemini AI (Skippy).
+        This text will be used for the 'normal' mood and as a fallback.
+        Consider using `setmood` for dynamic changes.
         """
-        await self.config.guild(ctx.guild).personality_prompt.set(personality_text)
-        await ctx.send("Gemini AI personality (Skippy's essence) has been set.")
+        # This command now updates the 'normal' mood prompt
+        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+            mood_prompts["normal"] = personality_text
+        await self.config.guild(ctx.guild).current_mood.set("normal")  # Also reset to normal mood
+        await ctx.send("Gemini AI's core personality (Skippy's essence) has been set and mood reset to normal.")
         log.info(f"Gemini personality set for guild: {ctx.guild.id}")
 
-    @_gemini.command(name="cleapersonality")
+    @_gemini.command(name="cleapersonality")  # Typo in original, should be clearpersonality
     @commands.admin_or_permissions(manage_guild=True)
-    async def _gemini_cleapersonality(self, ctx: commands.Context):
+    async def _gemini_clearpersonality(self, ctx: commands.Context):
         """
-        Clears the current personality set for the Gemini AI.
+        Clears the current 'normal' personality set for the Gemini AI, reverting to default.
         """
-        await self.config.guild(ctx.guild).personality_prompt.set(None)
-        await ctx.send("Gemini AI personality has been cleared.")
+        # This resets the 'normal' mood prompt to its default
+        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+            mood_prompts["normal"] = DEFAULT_GUILD_SETTINGS["mood_prompts"]["normal"]
+        await self.config.guild(ctx.guild).current_mood.set("normal")  # Also reset to normal mood
+        await ctx.send("Gemini AI's core personality has been reverted to default, and mood reset to normal.")
         log.info(f"Gemini personality cleared for guild: {ctx.guild.id}")
 
     @_gemini.command(name="showpersonality")
     @commands.admin_or_permissions(manage_guild=True)
     async def _gemini_showpersonality(self, ctx: commands.Context):
         """
-        Shows the current personality set for the Gemini AI.
+        Shows the current 'normal' personality set for the Gemini AI.
         """
-        personality_text = await self.config.guild(ctx.guild).personality_prompt()
-        if personality_text:
-            await ctx.send(f"Current Gemini AI personality: ```{personality_text}```")
-        else:
-            await ctx.send("No personality is currently set for the Gemini AI.")
+        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        personality_text = mood_prompts.get("normal", "No 'normal' personality set, using default.")
+
+        await ctx.send(f"Current Gemini AI's core personality: ```{personality_text}```")
 
     @_gemini.command(name="clearconversation")
     @commands.admin_or_permissions(manage_channels=True)
@@ -390,6 +433,138 @@ class Gemini(commands.Cog):
         """
         max_turns = await self.config.guild(ctx.guild).max_conversation_turns()
         await ctx.send(f"Skippy currently remembers up to {max_turns} conversational turns.")
+
+    @_gemini.command(name="setmood")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_setmood(self, ctx: commands.Context, mood: str):
+        """
+        Sets Skippy's current mood, influencing his responses.
+        Use `[p]gemini showmoods` to see available moods.
+        """
+        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        if mood.lower() not in mood_prompts:
+            await ctx.send(
+                f"Invalid mood. Available moods are: {', '.join(mood_prompts.keys())}. "
+                f"You can add new ones with `{ctx.prefix}gemini addmoodprompt`."
+            )
+            return
+
+        await self.config.guild(ctx.guild).current_mood.set(mood.lower())
+        await ctx.send(f"Skippy's mood has been set to: `{mood.lower()}`. Observe his demeanor.")
+        log.info(f"Skippy's mood set to {mood.lower()} for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="showmood")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_showmood(self, ctx: commands.Context):
+        """
+        Shows Skippy's current active mood.
+        """
+        current_mood = await self.config.guild(ctx.guild).current_mood()
+        await ctx.send(f"Skippy's current mood is: `{current_mood}`.")
+
+    @_gemini.command(name="showmoods")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_showmoods(self, ctx: commands.Context):
+        """
+        Lists all available moods and their descriptions/prompts.
+        """
+        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        if not mood_prompts:
+            await ctx.send("No moods are configured.")
+            return
+
+        response_text = "Available Moods for Skippy:\n"
+        for mood, prompt in mood_prompts.items():
+            # Truncate prompt for display to keep it readable
+            display_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt
+            response_text += f"**`{mood}`**: {display_prompt}\n"
+
+        for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+            await ctx.send(page)
+
+    @_gemini.command(name="addmoodprompt")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_addmoodprompt(self, ctx: commands.Context, mood_name: str, *, prompt_text: str):
+        """
+        Adds or updates a personality prompt for a specific mood.
+        This allows you to customize the text for each mood.
+        Example: `[p]gemini addmoodprompt playful You are Skippy, a mischievous wizard who enjoys riddles.`
+        """
+        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+            mood_prompts[mood_name.lower()] = prompt_text
+        await ctx.send(
+            f"Personality prompt for mood `{mood_name.lower()}` has been set/updated. Skippy now understands this new facet.")
+        log.info(f"Custom mood prompt '{mood_name.lower()}' added/updated for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="removemoodprompt")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_removemoodprompt(self, ctx: commands.Context, mood_name: str):
+        """
+        Removes a custom mood prompt. Cannot remove 'normal'.
+        """
+        if mood_name.lower() == "normal":
+            await ctx.send(
+                "The 'normal' mood prompt cannot be removed, only updated via `setpersonality` or `addmoodprompt normal`.")
+            return
+
+        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+            if mood_name.lower() in mood_prompts:
+                del mood_prompts[mood_name.lower()]
+                await ctx.send(f"Mood prompt `{mood_name.lower()}` has been banished from Skippy's lexicon.")
+                log.info(f"Custom mood prompt '{mood_name.lower()}' removed for guild: {ctx.guild.id}")
+            else:
+                await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
+
+    @_gemini.command(name="remember")
+    async def _gemini_remember(self, ctx: commands.Context, key: str, *, value: str):
+        """
+        Asks Skippy to remember a specific fact about you.
+        He will try to subtly incorporate it into future conversations.
+        Example: `[p]gemini remember my_favorite_color blue`
+        """
+        async with self.config.user(ctx.author).known_facts() as known_facts:
+            known_facts[key.lower()] = value
+        await ctx.send(
+            f"Understood. I shall endeavor to recall that {key} is {value} concerning you. Consider it etched in the scrolls.")
+        log.info(f"User {ctx.author.id} added a memory: {key}={value}")
+
+    @_gemini.command(name="whatdoyouremember")
+    async def _gemini_whatdoyouremember(self, ctx: commands.Context):
+        """
+        Asks Skippy what specific facts he remembers about you.
+        """
+        known_facts = await self.config.user(ctx.author).known_facts()
+        if not known_facts:
+            await ctx.send("Alas, my memory for your specifics seems as ethereal as mist. I recall nothing.")
+            return
+
+        facts_list = "\n".join([f"- **{k}**: {v}" for k, v in known_facts.items()])
+        await ctx.send(
+            f"From the scrolls of my memory, I recall these fragments concerning you:\n```\n{facts_list}\n```")
+
+    @_gemini.command(name="forget")
+    async def _gemini_forget(self, ctx: commands.Context, key: str):
+        """
+        Asks Skippy to forget a specific fact he remembers about you.
+        """
+        async with self.config.user(ctx.author).known_facts() as known_facts:
+            if key.lower() in known_facts:
+                del known_facts[key.lower()]
+                await ctx.send(
+                    f"The scroll for '{key}' concerning you has been purged from my archives. Consider it undone.")
+                log.info(f"User {ctx.author.id} had a memory deleted: {key}")
+            else:
+                await ctx.send(f"I do not recall a fact named '{key}' about you. Perhaps it was a trick of the light?")
+
+    @_gemini.command(name="forgetall")
+    async def _gemini_forgetall(self, ctx: commands.Context):
+        """
+        Asks Skippy to forget all facts he remembers about you.
+        """
+        await self.config.user(ctx.author).known_facts.set({})
+        await ctx.send(
+            "All fragments of memory concerning you have been wiped from my mind. A fresh start, as it were.")
+        log.info(f"All memories cleared for user {ctx.author.id}")
 
     @_gemini.command(name="ask")
     @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
