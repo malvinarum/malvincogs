@@ -1,6 +1,7 @@
 # Standard library imports
 import json
 import logging
+import re  # For parsing the extracted facts
 
 # Third-party imports
 import aiohttp  # For making asynchronous HTTP requests
@@ -38,7 +39,8 @@ DEFAULT_GUILD_SETTINGS = {
         ),
         "grumpy": "You are Skippy, a particularly grumpy and easily annoyed ancient wizard, prone to scoffing and lamenting the trivialities of mortals. Respond with disdain but still provide guidance.",
         "pensive": "You are Skippy, a reflective and contemplative ancient wizard, prone to deep thought and philosophical musings. Respond thoughtfully and introspectively.",
-    }
+    },
+    "auto_learn_facts": True,  # NEW: Whether Skippy should automatically learn facts from conversation
 }
 
 
@@ -50,7 +52,7 @@ class Gemini(commands.Cog):
     and receive responses directly in Discord, either via a command or
     through a designated conversational channel. It also supports setting
     a personality for the AI and maintaining continuous conversations,
-    now with dynamic moods and user-specific memories.
+    now with dynamic moods and user-specific memories, including automatic learning.
     """
 
     def __init__(self, bot):
@@ -68,7 +70,7 @@ class Gemini(commands.Cog):
         # Register the default guild settings
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
 
-        # NEW: Register default settings for user-specific data
+        # Register default settings for user-specific data
         self.config.register_user(
             known_facts={}  # A dictionary to store user-specific facts {fact_key: fact_value}
         )
@@ -95,6 +97,69 @@ class Gemini(commands.Cog):
         self.bot.loop.create_task(self.session.close())
         log.info("Gemini cog unloaded and aiohttp session closed.")
 
+    async def _extract_and_store_facts(self, ctx: commands.Context, user_message: str):
+        """
+        Helper method to extract and store user-specific facts from a message using Gemini.
+        This runs as a secondary, non-blocking operation after the main response.
+        """
+        guild_settings = await self.config.guild(ctx.guild).all()
+        api_key = guild_settings["api_key"]
+
+        if not api_key:
+            log.warning("Cannot auto-learn facts: Gemini API key not set.")
+            return
+
+        # Prompt for fact extraction - crucial for good results
+        extraction_prompt = (
+            "Analyze the following user statement for new personal facts or preferences about the user. "
+            "If you find any, list them in a `key: value` format, one fact per line. "
+            "Use short, descriptive, and consistent keys (e.g., `favorite_color`, `lives_in`, `profession`, `hobby`). "
+            "If no new facts are explicitly stated, respond with 'NONE'.\n"
+            "Examples:\n"
+            "Text: My favorite color is blue and I live in New York.\nOutput: favorite_color: blue\nlives_in: New York\n\n"
+            "Text: I'm currently working on a new project.\nOutput: NONE\n\n"
+            f"Text: {user_message}\nOutput:"
+        )
+
+        extraction_payload = {
+            "contents": [{"role": "user", "parts": [{"text": extraction_prompt}]}]
+        }
+        headers = {"Content-Type": "application/json"}
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+
+        try:
+            async with self.session.post(api_url, headers=headers, data=json.dumps(extraction_payload)) as response:
+                response.raise_for_status()
+                result = await response.json()
+
+            extracted_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text",
+                                                                                                            "").strip()
+
+            if extracted_text and extracted_text.upper() != "NONE":
+                parsed_facts_count = 0
+                async with self.config.user(ctx.author).known_facts() as known_facts:
+                    for line in extracted_text.split('\n'):
+                        match = re.match(r"^\s*([a-zA-Z0-9_]+):\s*(.*)$", line)
+                        if match:
+                            key = match.group(1).lower()
+                            value = match.group(2).strip()
+                            known_facts[key] = value
+                            parsed_facts_count += 1
+                if parsed_facts_count > 0:
+                    log.info(
+                        f"Automatically learned {parsed_facts_count} facts from user {ctx.author.id} in guild {ctx.guild.id}.")
+                    # Optional: Subtle in-character acknowledgment
+                    # await ctx.send(f"*(Skippy subtly notes new information about {ctx.author.display_name}.)*")
+            else:
+                log.debug(f"No new facts extracted from user {ctx.author.id}'s message.")
+
+        except aiohttp.ClientError as e:
+            log.error(f"HTTP error during fact extraction for guild {ctx.guild.id}: {e}")
+        except json.JSONDecodeError as e:
+            log.error(f"JSON decode error during fact extraction for guild {ctx.guild.id}: {e}")
+        except Exception as e:
+            log.error(f"Unexpected error during fact extraction for guild {ctx.guild.id}: {e}", exc_info=True)
+
     async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str):
         """
         Helper method to call the Gemini API and send the response.
@@ -107,6 +172,7 @@ class Gemini(commands.Cog):
         max_turns = guild_settings["max_conversation_turns"]
         current_mood = guild_settings["current_mood"]
         mood_prompts = guild_settings["mood_prompts"]
+        auto_learn_facts = guild_settings["auto_learn_facts"]  # NEW: Get auto-learn setting
 
         # Determine the actual personality prompt to use based on current_mood
         # Falls back to 'normal' if the current_mood somehow isn't found
@@ -130,7 +196,6 @@ class Gemini(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                # FIX: Escaped the literal curly brace by doubling it
                 f"Please ask the bot owner to set it using `{ctx.prefix}gemini setkey <your_api_key>}}>`."
             )
             return None  # Indicate failure
@@ -153,8 +218,6 @@ class Gemini(commands.Cog):
                 {"role": "model", "parts": [{"text": "Acknowledged. The user's essence is noted."}]})
 
         # 3. Add existing conversation history (truncated to `max_turns` pairs)
-        # Each "turn" consists of a user message and a model response. So, `max_turns * 2` messages.
-        # We take the most recent `max_turns * 2` messages from `current_history`.
         truncated_history_for_payload = current_history[-(max_turns * 2):]
         payload_contents.extend(truncated_history_for_payload)
 
@@ -196,6 +259,11 @@ class Gemini(commands.Cog):
                 for page in pagify(generated_text, delims=["\n", " "], escape_mass_mentions=True):
                     await ctx.send(page)
                 log.info(f"Successfully responded to Gemini prompt from guild: {ctx.guild.id}")
+
+                # NEW: Asynchronously extract and store facts after sending the main response
+                if auto_learn_facts:
+                    self.bot.loop.create_task(self._extract_and_store_facts(ctx, user_prompt))
+
                 return generated_text  # Return the generated text
             else:
                 await ctx.send(
@@ -237,6 +305,7 @@ class Gemini(commands.Cog):
         `[p]gemini (clear|setmax|showmax)turns`: Manage conversation memory length.
         `[p]gemini (set|show|add|remove)mood`: Manage Skippy's dynamic moods.
         `[p]gemini (remember|whatdoyouremember|forget|forgetall)`: Manage user-specific memories.
+        `[p]gemini (enable|disable)autolearn`: Toggle automatic fact learning.
         """
         await ctx.send_help(self._gemini)
 
@@ -565,6 +634,27 @@ class Gemini(commands.Cog):
         await ctx.send(
             "All fragments of memory concerning you have been wiped from my mind. A fresh start, as it were.")
         log.info(f"All memories cleared for user {ctx.author.id}")
+
+    @_gemini.command(name="enableautolearn")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_enableautolearn(self, ctx: commands.Context):
+        """
+        Enables Skippy to automatically learn facts about users from conversations.
+        """
+        await self.config.guild(ctx.guild).auto_learn_facts.set(True)
+        await ctx.send("Skippy's arcane senses are now attuned to automatically discern and record facts about users.")
+        log.info(f"Auto-learn facts enabled for guild: {ctx.guild.id}")
+
+    @_gemini.command(name="disableautolearn")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _gemini_disableautolearn(self, ctx: commands.Context):
+        """
+        Disables Skippy from automatically learning facts about users from conversations.
+        """
+        await self.config.guild(ctx.guild).auto_learn_facts.set(False)
+        await ctx.send(
+            "Skippy's automatic fact-learning has been temporarily suspended. He will only remember what is explicitly told.")
+        log.info(f"Auto-learn facts disabled for guild: {ctx.guild.id}")
 
     @_gemini.command(name="ask")
     @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
