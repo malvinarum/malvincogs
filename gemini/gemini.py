@@ -461,12 +461,20 @@ class Gemini(commands.Cog):
         mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
         personality_text = mood_prompts.get("normal", "No 'normal' personality set, using default.")
 
-        header = "Current Gemini AI's core personality:\n"
-        # REMOVED 'prefix' and 'suffix' from pagify.
-        # We will add the '```' manually to each page.
-        for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True):
-            await ctx.send(f"{header}```{page}```")  # Manually adding code block formatting
-            header = ""  # Only send the header for the first page
+        initial_header = "Current Gemini AI's core personality:\n"
+        # Calculate safe page length for pagify
+        # Discord limit is 2000. Need space for ``` (6 chars) + header (approx 40 chars for first page).
+        # Let's set a safe page_length like 1950.
+        safe_page_length = 1950
+
+        # We need to ensure the pagify function is correctly imported and used.
+        # This will iterate through the pages.
+        first_page = True
+        for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True,
+                           page_length=safe_page_length):
+            current_header = initial_header if first_page else ""
+            await ctx.send(f"{current_header}```{page}```")
+            first_page = False  # Ensure header is only sent once
 
         if not personality_text:  # Handle case where it might be empty or default
             await ctx.send("No 'normal' personality set, using default.")
