@@ -161,7 +161,7 @@ class Gemini(commands.Cog):
 
     @_gemini.command(name="addchannel")
     @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
-    async def _gemini_addchannel(self, ctx: commands.Context, channel: commands.TextChannel):
+    async def _gemini_addchannel(self, ctx: commands.Context, channel: discord.TextChannel): # Changed to discord.TextChannel
         """
         Adds a channel to the list of allowed channels for `[p]gemini ask` command interactions.
 
@@ -179,7 +179,7 @@ class Gemini(commands.Cog):
 
     @_gemini.command(name="removechannel")
     @commands.admin_or_permissions(manage_channels=True) # Only admins or those with manage_channels can use this
-    async def _gemini_removechannel(self, ctx: commands.Context, channel: commands.TextChannel):
+    async def _gemini_removechannel(self, ctx: commands.Context, channel: discord.TextChannel): # Changed to discord.TextChannel
         """
         Removes a channel from the list of allowed channels for `[p]gemini ask` command interactions.
         """
@@ -219,7 +219,7 @@ class Gemini(commands.Cog):
 
     @_gemini.command(name="setconversationchannel")
     @commands.admin_or_permissions(manage_channels=True)
-    async def _gemini_setconversationchannel(self, ctx: commands.Context, channel: commands.TextChannel):
+    async def _gemini_setconversationchannel(self, ctx: commands.Context, channel: discord.TextChannel): # Changed to discord.TextChannel
         """
         Sets the channel where Gemini will listen for conversational interactions.
         """
@@ -323,4 +323,3 @@ class Gemini(commands.Cog):
         # However, _get_gemini_response expects a commands.Context object.
         # So, we'll use the ctx object we just created, knowing it's not a command.
         await self._get_gemini_response(ctx, message.content)
-
