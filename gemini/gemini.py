@@ -91,7 +91,8 @@ class Gemini(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}gemini setkey <your_api_key}>`."
+                # FIX: Escaped the literal curly brace by doubling it
+                f"Please ask the bot owner to set it using `{ctx.prefix}gemini setkey <your_api_key>}}>`."
             )
             return None  # Indicate failure
 
