@@ -1,4 +1,3 @@
-# plex_activity/plex_activity.py
 import asyncio
 import aiohttp
 import logging
@@ -141,31 +140,37 @@ class PlexActivity(commands.Cog):
 
                         device = player_elem.get("product", "Unknown Device")
 
-                        # Construct full title: "Series Name - Episode Title" or "Movie Title"
-                        if media_type == "episode" and series_title:
-                            full_title = f"{series_title} - {media_title}"
-                        else:
-                            full_title = media_title
-
-                        # Get image URL (thumbnail or art)
+                        # Construct the full URL for the image, including the Plex token
                         image_url = None
-                        # Prioritize 'art' as it's often a larger poster, then 'thumb'
                         thumb_path = session_elem.get("art") or session_elem.get("thumb")
                         if thumb_path:
-                            # Construct the full URL for the image, including the Plex token
-                            # Ensure the base Plex URL is used, and the token is appended correctly
                             base_plex_url = plex_url.rstrip('/')
                             image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
-                        sessions.append({
+                        # Initialize session_data with common fields
+                        session_data = {
                             "user": username,
-                            "title": full_title,
                             "type": media_type,
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
                             "device": device,
-                            "image_url": image_url  # Add image URL to session data
-                        })
+                            "image_url": image_url
+                        }
+
+                        # Add specific fields based on media type for detailed formatting
+                        if media_type == "episode":
+                            session_data["series_title"] = series_title
+                            session_data["episode_title"] = media_title # This is the specific episode's title
+                            session_data["season_num"] = int(session_elem.get("parentIndex", "0"))
+                            session_data["episode_num"] = int(session_elem.get("index", "0"))
+                            # The 'title' field will be constructed in _format_sessions_embed for episodes
+                            # For consistency, store a general title here too if needed elsewhere
+                            session_data["title"] = f"{series_title} - {media_title}"
+                        else:
+                            # For movies, photos, tracks, etc., media_title is the main title
+                            session_data["title"] = media_title
+
+                        sessions.append(session_data)
                 except ET.ParseError as e:
                     log.error(
                         f"Failed to parse Plex API XML response for guild {guild_id}: {e}\nResponse: {data[:500]}...")
@@ -210,18 +215,43 @@ class PlexActivity(commands.Cog):
 
             for session in sessions:
                 user = session.get("user", "Unknown User")
-                title = session.get("title", "Unknown Title")
                 media_type = session.get("type", "media")
                 current_time = session.get("current_time", "00:00")
                 total_duration = session.get("total_duration", "00:00")
                 device = session.get("device", "Unknown Device")
 
                 field_name = f"**{user}**"
-                field_value = (
-                    f"Content: `{title} ({media_type.capitalize()})`\n"
-                    f"Progress: `{current_time} / {total_duration}`\n"
-                    f"Device: `{device}`"
-                )
+                field_value = ""
+
+                if media_type == "episode":
+                    series_title = session.get("series_title", "Unknown Series")
+                    episode_title = session.get("episode_title", "Unknown Episode")
+                    season_num = session.get("season_num")
+                    episode_num = session.get("episode_num")
+
+                    # Format season and episode numbers if available
+                    season_episode_format = ""
+                    if season_num is not None and episode_num is not None:
+                        season_episode_format = f"S{season_num:02}E{episode_num:02}"
+                        # Combine series title, SxxExx, and episode title
+                        content_title = f"{series_title} - {season_episode_format} {episode_title}"
+                    else:
+                        # Fallback if season/episode numbers are missing
+                        content_title = f"{series_title} - {episode_title}"
+
+                    field_value = (
+                        f"Content: `{content_title} (Episode)`\n"
+                        f"Progress: `{current_time} / {total_duration}`\n"
+                        f"Device: `{device}`"
+                    )
+                else:
+                    # For movies, photos, tracks, etc.
+                    title = session.get("title", "Unknown Title")
+                    field_value = (
+                        f"Content: `{title} ({media_type.capitalize()})`\n"
+                        f"Progress: `{current_time} / {total_duration}`\n"
+                        f"Device: `{device}`"
+                    )
                 embed.add_field(name=field_name, value=field_value, inline=False)
 
         return embed
@@ -278,7 +308,7 @@ class PlexActivity(commands.Cog):
                 else:
                     # Send a new message if no message ID is stored
                     message = await channel.send(embed=embed)
-                    await self.config.guild(guild).activity_message_id.set(message.id)
+                    await self.config.guild(ctx.guild).activity_message_id.set(message.id) # Corrected ctx to guild
                     log.info(f"Sent new Plex activity message in {channel.name} ({guild.name}).")
             except discord.Forbidden:
                 log.error(f"Bot does not have permissions to send messages in {channel.name} ({guild.name}).")
