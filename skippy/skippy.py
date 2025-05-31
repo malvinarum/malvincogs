@@ -1087,7 +1087,8 @@ class Skippy(commands.Cog):
             if allowed_mentions:
                 await ctx.send(
                     f"`[p]skippy ask` command interactions are restricted to specific channels. "
-                    f"Please use this command in one of the following channels: {', '.join(allowed_mentions)}."
+                    # Fix: Escaping curly braces to display them literally in the output
+                    f"Please use this command in one of the following channels: {{{', '.join(allowed_mentions)}}}."
                 )
             else:
                 await ctx.send(
