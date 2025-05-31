@@ -423,7 +423,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>}`."
+                f"Please ask the bot owner to set it using{ctx.prefix}skippy setkey <your_api_key>}}."
             )
             return None
 
