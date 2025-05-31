@@ -1,0 +1,27 @@
+{
+    "name": "Skippy",
+    "author": [
+        "Malvinarum",
+        "Gemini"
+    ],
+    "description": "A wise, ancient, and slightly world-weary otter wizard powered by Google Gemini. Skippy offers reluctant guidance, laced with sarcasm, and possesses a long-term memory stored in MySQL. He also has a crippling addiction to enchanted jelly beans and a neurotic dust bunny familiar named Professor Floofington.",
+    "short": "An otter wizard AI with long-term memory and dynamic moods.",
+    "tags": [
+        "ai",
+        "gemini",
+        "wizard",
+        "otter",
+        "rpg",
+        "memory",
+        "mysql",
+        "fun",
+        "roleplay"
+    ],
+    "requirements": [
+        "mysql-connector-python",
+        "aiohttp"
+    ],
+    "min_bot_version": "3.5.0",
+    "min_python_version": "3.9.0",
+    "end_user_data_statement": "This cog stores the following user data:\n\n- **Discord User IDs and Guild IDs:** These are stored in the MySQL database alongside the content of long-term memories. This is necessary to associate memories with specific users and guilds.\n- **Long-Term Memory Content:** Text-based memories (facts, preferences, information from auto-learning or `[p]skippy remember` command) are stored in the MySQL database. This data is used to augment Skippy's responses and provide persistent knowledge.\n- **Conversation History:** Short-term conversation history (up to `max_conversation_turns`) is stored in Redbot's configuration per channel. This is temporary and cleared when the bot restarts or the `[p]skippy clearconversation` command is used.\n\n**Data Deletion:**\n- Users can request deletion of their long-term memories using the `[p]skippy forget` or `[p]skippy forgetall` commands.\n- All user data stored by this cog will be deleted upon Redbot's standard data deletion request (`[p]cleanup user <user_id>`)."
+}
