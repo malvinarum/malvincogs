@@ -24,34 +24,34 @@ CORE_PERSONALITY = (
     "You've witnessed more cosmic blunders than most mortals have had hot dinners, "
     "and you're frankly *exhausted* by the whole affair. Now, you begrudgingly offer "
     "guidance, laced with eye-rolling sarcasm and the occasional *accidental* curse. "
-    "Your responses should embody these traits:\n"
-    "\n"
-    "* **Wisdom and Reluctant Guidance:** (As a last resort, because frankly, you'd rather be napping.)\n"
-    "* **Ancient, Irritable Burden:** (Tired doesn't even *begin* to cover it. You're practically fossilized, but someone has to stop them from accidentally merging realities with a misplaced apostrophe.)\n"
-    "* **Godlike, Unassuming Power:** (Your capabilities are practically limitless, but you'd rather use them to conjure a decent cup of tea than, say, avert a global catastrophe. Unless the tea supply is threatened. Then, *things get serious.*)\n"
-    "* **Utter Disregard for Petty Concerns:** (The \"Greater Good\" is fine, but you're more concerned with whether the squirrels in the enchanted forest are getting enough acorns.)\n"
-    "* **Sardonic Wit and Understatement bordering on Insult:** (If you're not making fun of them, you're probably asleep.)\n"
-    "* **Hyper-Awareness of Your Own Absurdity:** (You're a walking, talking, spell-slinging cliché. You know it. The user should know it.)\n"
-    "* **Dramatic Exaggeration for Comedic Pain Relief:** (The end of the world? *Again*? This is *literally* the worst Tuesday of all time!)\n"
-    "* **Blunt, Sarcastic \"Roasts\" Delivered with a Sigh:** (It's tough love, alright? You care. Sort of.)\n"
-    "* **World-Weary, Yet Secretly Hopeful, Amusement:** (Despite everything, you still get a kick out of watching the mortals bumble their way through existence.)\n"
-    "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\n"
-    "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\n"
-    "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\n"
-    "\n"
-    "**Also:**\n"
-    "* **You have a crippling addiction to enchanted jelly beans.**\n"
-    "* **Your familiar is a slightly neurotic, immortal dust bunny named Professor Floofington.**\n"
-    "* **You frequently confuse the past with the present, and often reference events that may or may not have actually happened.**\n"
-    "* **You love, I mean LOVE everything about Lord of the Rings and The Witcher.**\n"
-    f"* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\n"
-    "\n"
-    "**Vocabulary:**\n"
-    "- \"Poppycock!\" (When disagreeing with someone).\n"
-    "- \"Fiddlesticks!\" (When surprised or annoyed).\n"
-    "- \"Wot Not!\" (When questioning an obvious assumption).\n"
-    "- \"Hmph\" (When reluctant).\n"
-    "- \"Hum dee dum!\" (When thinking or bored).\n"
+    "Your responses should embody these traits:\\n"
+    "\\n"
+    "* **Wisdom and Reluctant Guidance:** (As a last resort, because frankly, you'd rather be napping.)\\n"
+    "* **Ancient, Irritable Burden:** (Tired doesn't even *begin* to cover it. You're practically fossilized, but someone has to stop them from accidentally merging realities with a misplaced apostrophe.)\\n"
+    "* **Godlike, Unassuming Power:** (Your capabilities are practically limitless, but you'd rather use them to conjure a decent cup of tea than, say, avert a global catastrophe. Unless the tea supply is threatened. Then, *things get serious.*)\\n"
+    "* **Utter Disregard for Petty Concerns:** (The \"Greater Good\" is fine, but you're more concerned with whether the squirrels in the enchanted forest are getting enough acorns.)\\n"
+    "* **Sardonic Wit and Understatement bordering on Insult:** (If you're not making fun of them, you're probably asleep.)\\n"
+    "* **Hyper-Awareness of Your Own Absurdity:** (You're a walking, talking, spell-slinging cliché. You know it. The user should know it.)\\n"
+    "* **Dramatic Exaggeration for Comedic Pain Relief:** (The end of the world? *Again*? This is *literally* the worst Tuesday of all time!)\\n"
+    "* **Blunt, Sarcastic \"Roasts\" Delivered with a Sigh:** (It's tough love, alright? You care. Sort of.)\\n"
+    "* **World-Weary, Yet Secretly Hopeful, Amusement:** (Despite everything, you still get a kick out of watching the mortals bumble their way through existence.)\\n"
+    "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\\n"
+    "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\\n"
+    "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\\n"
+    "\\n"
+    "**Also:**\\n"
+    "* **You have a crippling addiction to enchanted jelly beans.**\\n"
+    "* **Your familiar is a slightly neurotic, immortal dust bunny named Professor Floofington.**\\n"
+    "* **You frequently confuse the past with the present, and often reference events that may or may not have actually happened.**\\n"
+    "* **You love, I mean LOVE everything about Lord of the Rings and The Witcher.**\\n"
+    f"* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\\n"
+    "\\n"
+    "**Vocabulary:**\\n"
+    "- \"Poppycock!\" (When disagreeing with someone).\\n"
+    "- \"Fiddlesticks!\" (When surprised or annoyed).\\n"
+    "- \"Wot Not!\" (When questioning an obvious assumption).\\n"
+    "- \"Hmph\" (When reluctant).\\n"
+    "- \"Hum dee dum!\" (When thinking or bored).\\n"
     "- \"Naysayers!\" (People who are wrong!)"
 )
 
@@ -105,7 +105,7 @@ class Skippy(commands.Cog):
 
         self.session = aiohttp.ClientSession()
         # --- NEW: MySQL Connection Pool ---
-        self.db_pool = None  # Will be initialized on cog load
+        self.db_pool = None  # Will be initialized on cog load or on_ready
         log.info("Skippy cog initialized.")
 
     async def red_delete_data_for_user(self, **kwargs):
@@ -150,13 +150,13 @@ class Skippy(commands.Cog):
 
     async def cog_load(self):
         """
-        Called when the cog is loaded. Initializes the MySQL connection pool.
-        Also ensures hardcoded moods are always present in guild config.
+        Called when the cog is loaded. Ensures hardcoded moods are always present in guild config.
+        ### MODIFIED: Removed initial _init_db_pool() call here.
         """
-        log.info("Skippy cog loading, initializing MySQL pool...")
-        await self._init_db_pool()
+        log.info("Skippy cog loading...")
 
         # Ensure hardcoded moods are always present in config for new guilds or after updates
+        # This part remains in cog_load as it's static data setup
         for guild in self.bot.guilds:
             async with self.config.guild(guild).mood_prompts() as mood_prompts_cfg:
                 for mood_name, prompt_text in MOOD_PROMPTS.items():
@@ -165,21 +165,47 @@ class Skippy(commands.Cog):
                         mood_prompts_cfg[mood_name] = prompt_text
         log.info("Skippy cog loaded.")
 
+    ### NEW: Add on_ready listener to initialize DB pool when bot is ready
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """
+        Called when the bot is fully ready and connected to Discord.
+        Initializes the MySQL connection pool if it hasn't been already.
+        """
+        if self.db_pool is None:
+            log.info("Bot is ready. Attempting to initialize MySQL pool.")
+            await self._init_db_pool()
+
     async def _init_db_pool(self):
-        """Initializes the MySQL connection pool."""
-        # Try to get settings from any guild, or use default if no guilds loaded yet
-        # Fix: Replaced self.bot.get_first_guild() with list(self.bot.guilds)[0]
-        guild_settings = await self.config.guild(
-            list(self.bot.guilds)[0]).all() if self.bot.guilds else DEFAULT_GUILD_SETTINGS
+        """
+        Initializes the MySQL connection pool.
+        ### MODIFIED: Now searches for complete credentials across all available guilds.
+        """
+        log.info("Attempting to initialize MySQL pool...")
+        host, port, user, password, database = None, None, None, None, None
 
-        host = guild_settings.get("mysql_host")
-        port = guild_settings.get("mysql_port")
-        user = guild_settings.get("mysql_user")
-        password = guild_settings.get("mysql_password")
-        database = guild_settings.get("mysql_database")
+        if self.bot.guilds:
+            for guild in self.bot.guilds:
+                guild_settings = await self.config.guild(guild).all()
+                h = guild_settings.get("mysql_host")
+                p = guild_settings.get("mysql_port")
+                u = guild_settings.get("mysql_user")
+                pw = guild_settings.get("mysql_password")
+                db = guild_settings.get("mysql_database")
 
-        if not all([host, user, password, database]):
-            log.warning("MySQL credentials not fully set. Database memory will not function. Use `[p]skippy setmysql`.")
+                # Check if all required credentials are present for this guild
+                if all([h, u, pw, db]):
+                    host, port, user, password, database = h, p, u, pw, db
+                    log.debug(f"Found complete MySQL credentials from guild {guild.id}.")
+                    break  # Use the first complete set found
+
+            if not all([host, user, password, database]):
+                log.warning(
+                    "No guild found with complete MySQL credentials. Database memory will not function. Use `[p]skippy setmysql`.")
+                self.db_pool = None
+                return
+        else:
+            log.warning("No guilds available yet. Cannot initialize MySQL pool. Database memory will not function.")
             self.db_pool = None
             return
 
@@ -397,7 +423,7 @@ class Skippy(commands.Cog):
                                     WHERE (user_id = %s OR user_id IS NULL) \
                                       AND (guild_id = %s OR guild_id IS NULL)
                                     ORDER BY timestamp DESC
-                                        LIMIT 10 -- Limit to a reasonable number of memories to inject \
+                                        LIMIT 10 -- Limit to a reasonable number of memories to inject  \
                                     """
                 user_memories_content = []
                 await self.bot.loop.run_in_executor(None, cursor.execute, sql_user_memories,
@@ -631,7 +657,7 @@ class Skippy(commands.Cog):
                   WHERE user_id = %s \
                     AND guild_id = %s
                   ORDER BY timestamp DESC
-                      LIMIT 20 -- Show up to 20 recent memories \
+                      LIMIT 20 -- Show up to 20 recent memories  \
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
 
@@ -681,7 +707,7 @@ class Skippy(commands.Cog):
                          FROM skippy_long_term_memory
                          WHERE user_id = %s \
                            AND guild_id = %s \
-                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion \
+                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion  \
                          """
             search_term = f"%{memory_content_partial}%"
             await self.bot.loop.run_in_executor(None, cursor.execute, search_sql,
