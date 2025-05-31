@@ -638,6 +638,7 @@ class Skippy(commands.Cog):
         """
         Asks Skippy what specific long-term memories he has, optionally about a specific user.
         Defaults to memories about yourself.
+        Now also shows the memory ID.
         """
         if self.db_pool is None:
             await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories.")
@@ -651,13 +652,14 @@ class Skippy(commands.Cog):
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
+            # MODIFIED: Select 'id' along with content and timestamp
             sql = """
-                  SELECT content, timestamp \
+                  SELECT id, content, timestamp
                   FROM skippy_long_term_memory
-                  WHERE user_id = %s \
+                  WHERE user_id = %s
                     AND guild_id = %s
                   ORDER BY timestamp DESC
-                      LIMIT 20 -- Show up to 20 recent memories  \
+                      LIMIT 20 -- Show up to 20 recent memories
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
 
@@ -667,10 +669,15 @@ class Skippy(commands.Cog):
                     f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them.")
                 return
 
-            memories_list = [f"- '{content}' (etched on {timestamp.strftime('%Y-%m-%d')})" for content, timestamp in
-                             memories]
-            response_text = f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n```\n" + "\n".join(
-                memories_list) + "\n```"
+            # MODIFIED: Include memory_id in the formatted string
+            memories_list = [
+                f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d')})"
+                for mid, content, timestamp in memories
+            ]
+            response_text = (
+                    f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
+                    f"```\n" + "\n".join(memories_list) + "\n```"
+            )
 
             for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
                 await ctx.send(page)
