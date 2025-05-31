@@ -168,8 +168,9 @@ class Skippy(commands.Cog):
     async def _init_db_pool(self):
         """Initializes the MySQL connection pool."""
         # Try to get settings from any guild, or use default if no guilds loaded yet
+        # Fix: Replaced self.bot.get_first_guild() with list(self.bot.guilds)[0]
         guild_settings = await self.config.guild(
-            self.bot.get_first_guild()).all() if self.bot.guilds else DEFAULT_GUILD_SETTINGS
+            list(self.bot.guilds)[0]).all() if self.bot.guilds else DEFAULT_GUILD_SETTINGS
 
         host = guild_settings.get("mysql_host")
         port = guild_settings.get("mysql_port")
