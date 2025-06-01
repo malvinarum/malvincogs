@@ -1547,6 +1547,22 @@ class Skippy(commands.Cog):
 
         await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
+    @_skippy.command(name="clearconversation")
+    @commands.admin_or_permissions(manage_channels=True)
+    async def _skippy_clearconversation(self, ctx: commands.Context):
+        """
+        Clears the conversation history for the current channel.
+        """
+        channel_history_key = str(ctx.channel.id)
+        async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
+            if channel_history_key in conv_hist:
+                del conv_hist[channel_history_key]
+                await ctx.send("The ethereal echoes of our past conversation in this channel have been swept away.")
+                log.info(f"Conversation history cleared for channel {ctx.channel.id} in guild {ctx.guild.id}.")
+            else:
+                await ctx.send("There is no conversation history to clear in this channel, you silly goose.")
+                log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
