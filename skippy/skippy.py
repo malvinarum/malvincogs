@@ -1429,6 +1429,27 @@ class Skippy(commands.Cog):
             if conn:
                 conn.close()
 
+    @_skippy.command(name="enableautolearn")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_enableautolearn(self, ctx: commands.Context):
+        """
+        Enables Skippy to automatically learn facts about users from conversations.
+        """
+        await self.config.guild(ctx.guild).auto_learn_facts.set(True)
+        await ctx.send(
+            "Skippy's fact-finding senses are now sharpened. He will attempt to learn new details about users.")
+        log.info(f"Auto-learn facts enabled for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="disableautolearn")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_disableautolearn(self, ctx: commands.Context):
+        """
+        Disables Skippy from automatically learning facts about users from conversations.
+        """
+        await self.config.guild(ctx.guild).auto_learn_facts.set(False)
+        await ctx.send("Skippy's fact-finding senses are now dulled. He will only use explicitly provided information.")
+        log.info(f"Auto-learn facts disabled for guild: {ctx.guild.id}")
+
     @_skippy.command(name="enableautolearnrelationships")
     @commands.admin_or_permissions(manage_guild=True)
     async def _skippy_enableautolearnrelationships(self, ctx: commands.Context):
