@@ -271,6 +271,22 @@ class Skippy(commands.Cog):
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_memory_table_sql)
                 log.info("MySQL table 'skippy_long_term_memory' ensured to exist.")
 
+                # Add 'embedding' column if it doesn't exist (for backward compatibility)
+                alter_table_sql = """
+                                  ALTER TABLE skippy_long_term_memory
+                                      ADD COLUMN embedding BLOB AFTER keywords;
+                                  """
+                try:
+                    await self.bot.loop.run_in_executor(None, cursor.execute, alter_table_sql)
+                    log.info("Added 'embedding' column to 'skippy_long_term_memory' table.")
+                except mysql.connector.Error as err:
+                    if err.errno == 1060:  # Error code for "Duplicate column name"
+                        log.info(
+                            "Column 'embedding' already exists in 'skippy_long_term_memory' table. Skipping alter.")
+                    else:
+                        log.error(f"Error altering 'skippy_long_term_memory' table to add 'embedding' column: {err}",
+                                  exc_info=True)
+
                 # Create skippy_relationships table
                 create_relationships_table_sql = """
                                                  CREATE TABLE IF NOT EXISTS skippy_relationships \
@@ -820,7 +836,7 @@ class Skippy(commands.Cog):
                 return ""
 
             formatted_relationships = []
-            for initiator_id, target_id, rel_type, description in relationships:
+            for initiator_id, target_id, rel_type, description, timestamp in relationships:
                 initiator_member = ctx.guild.get_member(initiator_id)
                 target_member = ctx.guild.get_member(target_id)
 
@@ -891,7 +907,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key}`."
             )
             return None
 
@@ -1324,7 +1340,7 @@ class Skippy(commands.Cog):
 
                 rel_desc = f" ({description})" if description else ""
                 relationships_list.append(
-                    f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc} (learned on {timestamp.strftime('%Y-%m-%d')})"
+                    f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
             response_text = (
