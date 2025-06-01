@@ -811,6 +811,7 @@ class Skippy(commands.Cog):
                 conn.close()
 
     @_skippy.command(name="forgetall")
+    @commands.admin_or_permissions(manage_guild=True)  # Added missing decorator
     async def _skippy_forgetall(self, ctx: commands.Context):
         """
         Asks Skippy to forget all long-term memories associated with you.
@@ -1120,13 +1121,13 @@ class Skippy(commands.Cog):
             if allowed_mentions:
                 # Fix: Corrected f-string escaping for literal curly braces
                 await ctx.send(
-                    f"`[p]skippy ask` command interactions are restricted to specific channels. "
-                    f"Please use this command in one of the following channels: {{', '.join(allowed_mentions)}}. "
+                    f"`{ctx.prefix}skippy ask` command interactions are restricted to specific channels. "
+                    f"Please use this command in one of the following channels: {', '.join(allowed_mentions)}. "  # Simplified f-string structure
                     "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
             else:
                 await ctx.send(
-                    "`[p]skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
+                    f"`{ctx.prefix}skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
                     "Please ask an admin to configure allowed channels. My patience for unconfigured chaos is thin."
                 )
             return
@@ -1224,4 +1225,3 @@ class Skippy(commands.Cog):
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-
