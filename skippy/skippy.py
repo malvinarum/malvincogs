@@ -367,45 +367,40 @@ class Skippy(commands.Cog):
             if conn:
                 conn.close()
 
-    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str):
+    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
         Includes the dynamic personality (mood-based), user-specific memories (from MySQL),
         and manages conversation history.
+
+        Args:
+            ctx (commands.Context): The context object.
+            user_prompt (str): The user's message or prompt.
+            mentioned_users (list, optional): A list of discord.Member objects mentioned in the message.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
         max_turns = guild_settings["max_conversation_turns"]
         current_mood = guild_settings["current_mood"]
-        # Mood prompts are now primarily from the hardcoded MOOD_PROMPTS,
-        # but can be overridden by guild-specific custom moods.
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
 
-        # Always get the core 'normal' personality prompt
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
-
-        # Initialize the actual personality prompt with the core
         actual_personality_prompt = core_personality_prompt
 
-        # If a specific mood is set and it's not 'normal', append its prompt
         if current_mood != "normal":
-            # Prefer guild-specific custom mood if it exists, otherwise use hardcoded
             chosen_mood_prompt = guild_mood_prompts.get(current_mood, MOOD_PROMPTS.get(current_mood))
-            if chosen_mood_prompt and chosen_mood_prompt != CORE_PERSONALITY:  # Avoid double-appending if mood is same as core
-                # Combine the core personality with the chosen mood's prompt
-                # Instruct the model to adopt the core AND THEN layer the mood
+            if chosen_mood_prompt and chosen_mood_prompt != CORE_PERSONALITY:
                 actual_personality_prompt = (
                     f"{core_personality_prompt}\n\n"
                     f"Additionally, for this response, adopt a **{current_mood}** demeanor: "
                     f"{chosen_mood_prompt}"
                 )
 
-        # Get conversation history for the current channel
         channel_history_key = str(ctx.channel.id)
         current_history = guild_settings["conversation_history"].get(channel_history_key, [])
 
-        # --- NEW: User-Specific & Guild-Specific Memory Retrieval from MySQL ---
+        # --- MODIFIED: User-Specific & Mentioned User Memory Retrieval from MySQL ---
         memory_retrieval_prompt = ""
         if self.db_pool is None:
             log.warning("MySQL database not connected. Cannot retrieve long-term memories.")
@@ -416,27 +411,39 @@ class Skippy(commands.Cog):
                 conn = await self._get_db_connection()
                 cursor = conn.cursor()
 
-                # Retrieve user-specific memories for the current user and guild
-                # This is a basic keyword search for relevant memories.
-                # For more advanced RAG, this would involve embeddings and vector search.
-                sql_user_memories = """
-                                    SELECT content \
-                                    FROM skippy_long_term_memory
-                                    WHERE (user_id = %s OR user_id IS NULL) \
-                                      AND (guild_id = %s OR guild_id IS NULL)
-                                    ORDER BY timestamp DESC
-                                        LIMIT 10 -- Limit to a reasonable number of memories to inject   \
-                                    """
-                user_memories_content = []
-                await self.bot.loop.run_in_executor(None, cursor.execute, sql_user_memories,
-                                                    (ctx.author.id, ctx.guild.id))
-                for (content,) in cursor:
-                    user_memories_content.append(content)
+                # Collect user IDs for whom to retrieve memories
+                user_ids_to_fetch = {ctx.author.id}  # Always include the author
+                if mentioned_users:
+                    for member in mentioned_users:
+                        user_ids_to_fetch.add(member.id)
 
-                if user_memories_content:
+                all_memories_content = []
+                for user_id in user_ids_to_fetch:
+                    # Retrieve memories for each user ID
+                    sql_memories = """
+                                   SELECT content
+                                   FROM skippy_long_term_memory
+                                   WHERE user_id = %s
+                                     AND (guild_id = %s OR guild_id IS NULL)
+                                   ORDER BY timestamp DESC
+                                       LIMIT 5 -- Limit per user to prevent overwhelming the prompt
+                                   """
+                    await self.bot.loop.run_in_executor(None, cursor.execute, sql_memories,
+                                                        (user_id, ctx.guild.id))
+
+                    user_display_name = ctx.guild.get_member(user_id).display_name if ctx.guild.get_member(
+                        user_id) else f"User ID: {user_id}"
+
+                    user_specific_memories = [content for (content,) in cursor]
+                    if user_specific_memories:
+                        all_memories_content.append(
+                            f"Facts about {user_display_name} (Discord ID: {user_id}): {'; '.join(user_specific_memories)}"
+                        )
+
+                if all_memories_content:
                     memory_retrieval_prompt += (
-                        f"You also have the following specific facts and memories about {ctx.author.display_name} (User ID: {ctx.author.id}) and this guild, or general knowledge:\n"
-                        f"```\n{'; '.join(user_memories_content)}\n```\n"
+                        "You have the following specific facts and memories about the users involved in this conversation:\n"
+                        f"```\n{' | '.join(all_memories_content)}\n```\n"
                         "Incorporate these facts subtly and naturally where relevant, without explicitly stating you 'remembered' them from a database."
                     )
 
@@ -452,7 +459,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using{ctx.prefix}skippy setkey <your_api_key>}}."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
             )
             return None
 
@@ -507,9 +514,9 @@ class Skippy(commands.Cog):
 
                 for page in pagify(generated_text, delims=["\n", " "], escape_mass_mentions=True):
                     await ctx.send(page)
-                log.info(f"Successfully responded to Skippy prompt from guild: {ctx.guild.id}")  # Changed log message
+                log.info(f"Successfully responded to Skippy prompt from guild: {ctx.guild.id}")
 
-                auto_learn_facts = await self.config.guild(ctx.guild).auto_learn_facts()  # Get current setting
+                auto_learn_facts = await self.config.guild(ctx.guild).auto_learn_facts()
                 if auto_learn_facts:
                     self.bot.loop.create_task(self._extract_and_store_facts(ctx, user_prompt))
 
@@ -1124,16 +1131,18 @@ class Skippy(commands.Cog):
                 await ctx.send(
                     f"`[p]skippy ask` command interactions are restricted to specific channels. "
                     # Fix: Escaping curly braces to display them literally in the output
-                    f"Please use this command in one of the following channels: {{{', '.join(allowed_mentions)}}}."
+                    f"Please use this command in one of the following channels: {{{', '.join(allowed_mentions)}}}. "
+                    "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
             else:
                 await ctx.send(
                     "`[p]skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
-                    "Please ask an admin to configure allowed channels."
+                    "Please ask an admin to configure allowed channels. My patience for unconfigured chaos is thin."
                 )
             return
 
-        await self._get_gemini_response(ctx, prompt)
+        # Pass mentioned users to the response function
+        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -1230,7 +1239,9 @@ class Skippy(commands.Cog):
                 combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
         if combined_prompt:  # Only call Gemini if there's actual content to send
-            await self._get_gemini_response(ctx, combined_prompt)
+            # Pass mentioned users to the response function
+            await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             # This case shouldn't usually happen with normal message flow, but good for robustness
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
+
