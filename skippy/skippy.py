@@ -811,7 +811,7 @@ class Skippy(commands.Cog):
                 conn.close()
 
     @_skippy.command(name="forgetall")
-    @commands.admin_or_permissions(manage_guild=True)  # Added missing decorator
+    @commands.admin_or_permissions(manage_guild=True)
     async def _skippy_forgetall(self, ctx: commands.Context):
         """
         Asks Skippy to forget all long-term memories associated with you.
@@ -1119,11 +1119,10 @@ class Skippy(commands.Cog):
             allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if
                                 ctx.guild.get_channel(cid)]
             if allowed_mentions:
-                # Fix: Corrected f-string escaping for literal curly braces
-                channels_str = ', '.join(allowed_mentions)  # Moved join outside f-string
+                channels_str = ', '.join(allowed_mentions)
                 await ctx.send(
-                    f"`{ctx.prefix}skippy ask` command interactions are restricted to specific channels. "
-                    f"Please use this command in one of the following channels: {channels_str}. "
+                    "`{}`skippy ask` command interactions are restricted to specific channels. ".format(ctx.prefix) +
+                    "Please use this command in one of the following channels: {}. ".format(channels_str) +
                     "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
             else:
