@@ -2,21 +2,24 @@
 import json
 import logging
 import re
-import mysql.connector  # NEW: Import for MySQL interaction
-from mysql.connector import pooling  # NEW: For database connection pooling
-import io  # NEW: For handling file content in memory
+import mysql.connector
+from mysql.connector import pooling
+import io
+import numpy as np  # NEW: For handling numerical embeddings
 
 # third-party imports
 import aiohttp
 import discord
-import PyPDF2  # NEW: For reading PDF files (requires 'pip install PyPDF2')
+import PyPDF2
+from sentence_transformers import SentenceTransformer  # NEW: For generating text embeddings
+from sklearn.metrics.pairwise import cosine_similarity  # NEW: For calculating similarity between embeddings
 
 # Redbot imports
 from redbot.core import commands, Config, app_commands
 from redbot.core.utils.chat_formatting import pagify
 
 # Set up logging for the cog
-log = logging.getLogger("red.skippy")  # Changed logger name to 'red.skippy'
+log = logging.getLogger("red.skippy")
 
 # --- SKIPPYS CORE PERSONALITY ---
 # This is Skippy's unchanging essence.
@@ -108,6 +111,9 @@ class Skippy(commands.Cog):
         self.session = aiohttp.ClientSession()
         # --- NEW: MySQL Connection Pool ---
         self.db_pool = None  # Will be initialized on cog load or on_ready
+        # NEW: Initialize the SentenceTransformer model for embeddings
+        # Using a small, efficient model. This will download on first run if not cached.
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         log.info("Skippy cog initialized.")
 
     async def red_delete_data_for_user(self, **kwargs):
@@ -233,6 +239,7 @@ class Skippy(commands.Cog):
             cursor = None
             try:
                 cursor = conn.cursor()
+                # Ensure the 'embedding' column is BLOB for binary data storage
                 create_table_sql = """
                                    CREATE TABLE IF NOT EXISTS skippy_long_term_memory \
                                    ( \
@@ -254,7 +261,7 @@ class Skippy(commands.Cog):
                                    ( \
                                        255 \
                                    ),
-                                       embedding BLOB, -- To store binary embedding data if we add RAG later
+                                       embedding BLOB, -- To store binary embedding data for RAG
                                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci; \
                                    """
@@ -282,10 +289,17 @@ class Skippy(commands.Cog):
         # Run blocking pool.get_connection() in a thread pool executor
         return await self.bot.loop.run_in_executor(None, self.db_pool.get_connection)
 
+    async def _get_embeddings(self, text: str) -> np.ndarray:
+        """
+        Generates a numerical embedding (vector) for the given text using the SentenceTransformer model.
+        """
+        # The encode method returns a numpy array
+        return await self.bot.loop.run_in_executor(None, self.embedding_model.encode, text)
+
     async def _extract_and_store_facts(self, ctx: commands.Context, user_message: str):
         """
         Helper method to extract and store user-specific facts from a message using Gemini
-        and store them in MySQL.
+        and store them in MySQL, including their embeddings.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
@@ -336,13 +350,20 @@ class Skippy(commands.Cog):
                         value = match.group(2).strip()
                         # Store as a combined memory for now, with user_id and keyword
                         memory_content = f"{key}: {value}"
+
+                        # NEW: Generate embedding for the memory content
+                        embedding = await self._get_embeddings(memory_content)
+                        # Convert numpy array to bytes for BLOB storage
+                        embedding_bytes = embedding.tobytes()
+
                         insert_sql = """
-                                     INSERT INTO skippy_long_term_memory (user_id, guild_id, content, keywords)
-                                     VALUES (%s, %s, %s, %s) \
+                                     INSERT INTO skippy_long_term_memory (user_id, guild_id, content, keywords, embedding)
+                                     VALUES (%s, %s, %s, %s, %s) \
                                      """
                         # For simplicity, let's make the keyword the key
                         await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
-                                                            (ctx.author.id, ctx.guild.id, memory_content, key))
+                                                            (ctx.author.id, ctx.guild.id, memory_content, key,
+                                                             embedding_bytes))
                         parsed_facts_count += 1
                 conn.commit()
                 if parsed_facts_count > 0:
@@ -367,11 +388,108 @@ class Skippy(commands.Cog):
             if conn:
                 conn.close()
 
+    async def _retrieve_relevant_memories(self, user_prompt: str, user_id: int, guild_id: int,
+                                          mentioned_users: list = None) -> str:
+        """
+        Retrieves relevant long-term memories from MySQL based on the user's prompt
+        using embedding similarity (RAG).
+        Returns a formatted string of relevant memories to be included in the Gemini prompt.
+        """
+        if self.db_pool is None:
+            log.warning("MySQL database not connected. Cannot retrieve long-term memories.")
+            return ""
+
+        conn = None
+        cursor = None
+        try:
+            conn = await self._get_db_connection()
+            cursor = conn.cursor()
+
+            # Generate embedding for the current user prompt
+            query_embedding = await self._get_embeddings(user_prompt)
+
+            # Collect user IDs for whom to retrieve memories
+            user_ids_to_fetch = {user_id}  # Always include the author
+            if mentioned_users:
+                for member in mentioned_users:
+                    user_ids_to_fetch.add(member.id)
+
+            all_memories_for_users = []
+            for uid in user_ids_to_fetch:
+                # Retrieve all memories for the user(s) to compare against
+                # Limiting the initial fetch to prevent overwhelming the bot if a user has thousands of memories
+                sql_fetch_memories = """
+                                     SELECT content, embedding
+                                     FROM skippy_long_term_memory
+                                     WHERE user_id = %s \
+                                       AND guild_id = %s
+                                     ORDER BY timestamp DESC LIMIT 200
+                                     """
+                await self.bot.loop.run_in_executor(None, cursor.execute, sql_fetch_memories, (uid, guild_id))
+
+                # Fetch all results from the cursor
+                memories_for_user = cursor.fetchall()
+
+                # Append to the collective list
+                all_memories_for_users.extend(
+                    [(content, embedding_blob, uid) for content, embedding_blob in memories_for_user])
+
+            if not all_memories_for_users:
+                return ""
+
+            # Calculate cosine similarity and find top N relevant memories
+            scored_memories = []
+            for content, embedding_blob, uid in all_memories_for_users:
+                try:
+                    # Convert BLOB back to numpy array
+                    stored_embedding = np.frombuffer(embedding_blob, dtype=np.float32)  # Assuming float32 was used
+
+                    # Reshape for cosine_similarity: (1, n_features)
+                    similarity = cosine_similarity(query_embedding.reshape(1, -1), stored_embedding.reshape(1, -1))[0][
+                        0]
+                    scored_memories.append((content, similarity, uid))
+                except Exception as e:
+                    log.error(f"Error processing embedding for memory: {content[:50]}... Error: {e}")
+                    continue
+
+            # Sort by similarity in descending order
+            scored_memories.sort(key=lambda x: x[1], reverse=True)
+
+            # Take the top 5 most relevant memories (adjust as needed)
+            top_relevant_memories = scored_memories[:5]
+
+            if not top_relevant_memories:
+                return ""
+
+            formatted_memories = []
+            for content, similarity, uid in top_relevant_memories:
+                member = ctx.guild.get_member(uid)
+                user_display_name = member.display_name if member else f"User ID: {uid}"
+                formatted_memories.append(f"Fact about {user_display_name}: {content}")
+
+            return (
+                "You have the following specific facts and memories about the users involved in this conversation:\n"
+                f"```\n{' | '.join(formatted_memories)}\n```\n"
+                "Incorporate these facts subtly and naturally where relevant, without explicitly stating you 'remembered' them from a database."
+            )
+
+        except mysql.connector.Error as err:
+            log.error(f"Error retrieving long-term memories from MySQL for RAG: {err}", exc_info=True)
+            return ""
+        except Exception as e:
+            log.error(f"Unexpected error during RAG memory retrieval: {e}", exc_info=True)
+            return ""
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
     async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
-        Includes the dynamic personality (mood-based), user-specific memories (from MySQL),
+        Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
         and manages conversation history.
 
         Args:
@@ -400,61 +518,9 @@ class Skippy(commands.Cog):
         channel_history_key = str(ctx.channel.id)
         current_history = guild_settings["conversation_history"].get(channel_history_key, [])
 
-        # --- MODIFIED: User-Specific & Mentioned User Memory Retrieval from MySQL ---
-        memory_retrieval_prompt = ""
-        if self.db_pool is None:
-            log.warning("MySQL database not connected. Cannot retrieve long-term memories.")
-        else:
-            conn = None
-            cursor = None
-            try:
-                conn = await self._get_db_connection()
-                cursor = conn.cursor()
-
-                # Collect user IDs for whom to retrieve memories
-                user_ids_to_fetch = {ctx.author.id}  # Always include the author
-                if mentioned_users:
-                    for member in mentioned_users:
-                        user_ids_to_fetch.add(member.id)
-
-                all_memories_content = []
-                for user_id in user_ids_to_fetch:
-                    # Retrieve memories for each user ID
-                    sql_memories = """
-                                   SELECT content
-                                   FROM skippy_long_term_memory
-                                   WHERE user_id = %s
-                                     AND (guild_id = %s OR guild_id IS NULL)
-                                   ORDER BY timestamp DESC
-                                       LIMIT 5 -- Limit per user to prevent overwhelming the prompt
-                                   """
-                    await self.bot.loop.run_in_executor(None, cursor.execute, sql_memories,
-                                                        (user_id, ctx.guild.id))
-
-                    user_display_name = ctx.guild.get_member(user_id).display_name if ctx.guild.get_member(
-                        user_id) else f"User ID: {user_id}"
-
-                    user_specific_memories = [content for (content,) in cursor]
-                    if user_specific_memories:
-                        all_memories_content.append(
-                            f"Facts about {user_display_name} (Discord ID: {user_id}): {'; '.join(user_specific_memories)}"
-                        )
-
-                if all_memories_content:
-                    memory_retrieval_prompt += (
-                        "You have the following specific facts and memories about the users involved in this conversation:\n"
-                        f"```\n{' | '.join(all_memories_content)}\n```\n"
-                        "Incorporate these facts subtly and naturally where relevant, without explicitly stating you 'remembered' them from a database."
-                    )
-
-            except mysql.connector.Error as err:
-                log.error(f"Error retrieving long-term memories from MySQL: {err}", exc_info=True)
-                memory_retrieval_prompt = ""  # Clear if error
-            finally:
-                if cursor:
-                    cursor.close()
-                if conn:
-                    conn.close()
+        # --- MODIFIED: Use RAG for User-Specific & Mentioned User Memory Retrieval from MySQL ---
+        memory_retrieval_prompt = await self._retrieve_relevant_memories(user_prompt, ctx.author.id, ctx.guild.id,
+                                                                         mentioned_users)
 
         if not api_key:
             await ctx.send(
@@ -472,7 +538,7 @@ class Skippy(commands.Cog):
             payload_contents.append(
                 {"role": "model", "parts": [{"text": "Understood. I shall endeavor to respond in kind."}]})
 
-        # 2. Add retrieved long-term memories (if any)
+        # 2. Add retrieved long-term memories (if any) from RAG
         if memory_retrieval_prompt:
             payload_contents.append({"role": "user", "parts": [{"text": memory_retrieval_prompt}]})
             payload_contents.append(
@@ -610,7 +676,7 @@ class Skippy(commands.Cog):
     async def _skippy_remember(self, ctx: commands.Context, *, memory_content: str):
         """
         Asks Skippy to remember a specific piece of information for long-term recall.
-        This will be stored in MySQL.
+        This will be stored in MySQL with an associated embedding.
         Example: `[p]skippy remember I enjoy long walks on the beach.`
         """
         if self.db_pool is None:
@@ -622,12 +688,17 @@ class Skippy(commands.Cog):
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
+
+            # Generate embedding for the memory content
+            embedding = await self._get_embeddings(memory_content)
+            embedding_bytes = embedding.tobytes()  # Convert numpy array to bytes
+
             sql = """
-                  INSERT INTO skippy_long_term_memory (user_id, guild_id, content)
-                  VALUES (%s, %s, %s) \
+                  INSERT INTO skippy_long_term_memory (user_id, guild_id, content, embedding)
+                  VALUES (%s, %s, %s, %s) \
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql,
-                                                (ctx.author.id, ctx.guild.id, memory_content))
+                                                (ctx.author.id, ctx.guild.id, memory_content, embedding_bytes))
             conn.commit()
             await ctx.send("Understood. That information has been etched into my long-term memory scrolls.")
             log.info(f"User {ctx.author.id} added a long-term memory: '{memory_content[:50]}...'")
@@ -636,6 +707,9 @@ class Skippy(commands.Cog):
             log.error(f"Error remembering for user {ctx.author.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
+        except Exception as e:
+            await ctx.send(f"An unexpected error occurred while generating embedding or storing memory: {e}")
+            log.error(f"Error during remember command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
                 cursor.close()
@@ -723,7 +797,7 @@ class Skippy(commands.Cog):
                          FROM skippy_long_term_memory
                          WHERE user_id = %s \
                            AND guild_id = %s \
-                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion   \
+                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion    \
                          """
             search_term = f"%{memory_content_partial}%"
             await self.bot.loop.run_in_executor(None, cursor.execute, search_sql,
@@ -1244,4 +1318,3 @@ class Skippy(commands.Cog):
         elif not message.attachments and not message.content:
             # This case shouldn't usually happen with normal message flow, but good for robustness
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-
