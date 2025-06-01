@@ -1120,9 +1120,10 @@ class Skippy(commands.Cog):
                                 ctx.guild.get_channel(cid)]
             if allowed_mentions:
                 # Fix: Corrected f-string escaping for literal curly braces
+                channels_str = ', '.join(allowed_mentions)  # Moved join outside f-string
                 await ctx.send(
                     f"`{ctx.prefix}skippy ask` command interactions are restricted to specific channels. "
-                    f"Please use this command in one of the following channels: {', '.join(allowed_mentions)}. "  # Simplified f-string structure
+                    f"Please use this command in one of the following channels: {channels_str}. "
                     "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
             else:
@@ -1225,3 +1226,4 @@ class Skippy(commands.Cog):
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
+
