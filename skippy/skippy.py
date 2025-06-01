@@ -4,10 +4,12 @@ import logging
 import re
 import mysql.connector  # NEW: Import for MySQL interaction
 from mysql.connector import pooling  # NEW: For database connection pooling
+import io  # NEW: For handling file content in memory
 
 # third-party imports
 import aiohttp
 import discord
+import PyPDF2  # NEW: For reading PDF files (requires 'pip install PyPDF2')
 
 # Redbot imports
 from redbot.core import commands, Config, app_commands
@@ -423,7 +425,7 @@ class Skippy(commands.Cog):
                                     WHERE (user_id = %s OR user_id IS NULL) \
                                       AND (guild_id = %s OR guild_id IS NULL)
                                     ORDER BY timestamp DESC
-                                        LIMIT 10 -- Limit to a reasonable number of memories to inject  \
+                                        LIMIT 10 -- Limit to a reasonable number of memories to inject   \
                                     """
                 user_memories_content = []
                 await self.bot.loop.run_in_executor(None, cursor.execute, sql_user_memories,
@@ -638,7 +640,7 @@ class Skippy(commands.Cog):
         """
         Asks Skippy what specific long-term memories he has, optionally about a specific user.
         Defaults to memories about yourself.
-        Now also shows the memory ID.
+        Now also shows the memory ID and shows up to 50 recent memories.
         """
         if self.db_pool is None:
             await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories.")
@@ -659,7 +661,7 @@ class Skippy(commands.Cog):
                   WHERE user_id = %s
                     AND guild_id = %s
                   ORDER BY timestamp DESC
-                      LIMIT 20 -- Show up to 20 recent memories
+                      LIMIT 50 -- Changed from 20 to 50 recent memories
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
 
@@ -714,7 +716,7 @@ class Skippy(commands.Cog):
                          FROM skippy_long_term_memory
                          WHERE user_id = %s \
                            AND guild_id = %s \
-                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion  \
+                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion   \
                          """
             search_term = f"%{memory_content_partial}%"
             await self.bot.loop.run_in_executor(None, cursor.execute, search_sql,
@@ -1137,6 +1139,7 @@ class Skippy(commands.Cog):
     async def on_message(self, message: discord.Message):
         """
         Listens for messages to enable conversational interaction with Skippy.
+        Also attempts to read content from attached .txt and .pdf files.
         """
         if message.author.bot:
             return
@@ -1154,6 +1157,80 @@ class Skippy(commands.Cog):
 
         ctx = await self.bot.get_context(message)
         if ctx.valid:
+            # If it's a valid command, let Redbot handle it.
             return
 
-        await self._get_gemini_response(ctx, message.content)
+        # NEW: Handle attachments
+        processed_attachment_content = ""
+        if message.attachments:
+            for attachment in message.attachments:
+                file_extension = attachment.filename.lower().split('.')[-1]
+
+                if file_extension == "txt":
+                    try:
+                        file_content = await attachment.read()
+                        decoded_content = file_content.decode('utf-8')
+                        processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
+                        log.info(f"Successfully read .txt attachment: {attachment.filename}")
+                    except Exception as e:
+                        log.error(f"Error reading .txt attachment '{attachment.filename}': {e}")
+                        await message.channel.send(
+                            f"Alas, Skippy had trouble deciphering the ancient runes in '{attachment.filename}'. Error: {e}",
+                            delete_after=10)
+                        continue  # Try next attachment
+
+                elif file_extension == "pdf":
+                    try:
+                        # Ensure PyPDF2 is installed: pip install PyPDF2
+                        pdf_bytes = await attachment.read()
+                        pdf_file = io.BytesIO(pdf_bytes)
+                        reader = PyPDF2.PdfReader(pdf_file)
+                        pdf_text = ""
+                        for page_num in range(len(reader.pages)):
+                            pdf_text += reader.pages[page_num].extract_text() or ""  # extract_text can return None
+
+                        if pdf_text:
+                            processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{pdf_text}\n--- End of {attachment.filename} Content ---\n"
+                            log.info(f"Successfully read .pdf attachment: {attachment.filename}")
+                        else:
+                            await message.channel.send(
+                                f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells?",
+                                delete_after=10)
+
+                    except PyPDF2.errors.PdfReadError as e:
+                        log.error(f"Error reading PDF '{attachment.filename}': {e}")
+                        await message.channel.send(
+                            f"Skippy encountered an arcane glyph in '{attachment.filename}' and couldn't decipher it (PDF Read Error: {e}).",
+                            delete_after=10)
+                        continue
+                    except ImportError:
+                        await message.channel.send(
+                            "Skippy needs the 'PyPDF2' incantation to read PDFs. Tell my master to cast `pip install PyPDF2`!",
+                            delete_after=15)
+                        log.error("PyPDF2 not installed. Cannot read PDF files.")
+                        continue
+                    except Exception as e:
+                        log.error(f"Unexpected error processing PDF '{attachment.filename}': {e}")
+                        await message.channel.send(
+                            f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}",
+                            delete_after=10)
+                        continue
+                else:
+                    log.debug(f"Unsupported attachment type skipped: {attachment.filename}")
+                    # Optionally, notify user about unsupported attachment types
+                    # await message.channel.send(f"Skippy cannot yet read files of type '.{file_extension}'. My arcane arts are limited to ancient texts and scrolls (txt, pdf) for now.", delete_after=10)
+
+        # Combine user's text message with attachment content
+        combined_prompt = message.content
+        if processed_attachment_content:
+            # If user has a message content, prepend a clear instruction for Gemini.
+            if combined_prompt:
+                combined_prompt = f"Here is some context from an attached file: {processed_attachment_content}\n\nUser message: {message.content}"
+            else:  # If only an attachment was sent
+                combined_prompt = f"Please analyze this document: {processed_attachment_content}"
+
+        if combined_prompt:  # Only call Gemini if there's actual content to send
+            await self._get_gemini_response(ctx, combined_prompt)
+        elif not message.attachments and not message.content:
+            # This case shouldn't usually happen with normal message flow, but good for robustness
+            log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
