@@ -588,7 +588,7 @@ class Skippy(commands.Cog):
                         other_names = [n for n in names if n != member.display_name]
                         if other_names:
                             # Fix: Changed f\"'{n}'\" to f"'{n}'" to avoid SyntaxError
-                            name_str += f" (also known as {', '.join([f"'{n}'" for n in other_names])})"
+                            name_str += f""" (also known as {', '.join([f"'{n}'" for n in other_names])})"""  # Corrected f-string syntax
                     known_users_info.append(f"ID:{user_id} is {name_str}")
             if known_users_info:
                 known_users_prompt_part = "Here is a list of known users and their associated Discord IDs and names:\n" + \
