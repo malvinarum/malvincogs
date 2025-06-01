@@ -853,8 +853,7 @@ class Skippy(commands.Cog):
 
     @_skippy.command(name="addchannel")
     @commands.admin_or_permissions(manage_channels=True)
-    async def _skippy_addchannel(self, ctx: discord.ext.commands.Context,
-                                 channel: discord.TextChannel):  # Changed ctx type hint
+    async def _skippy_addchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Adds a channel to the list of allowed channels for `[p]skippy ask` command interactions.
         """
@@ -1119,9 +1118,10 @@ class Skippy(commands.Cog):
             allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if
                                 ctx.guild.get_channel(cid)]
             if allowed_mentions:
+                # Fix: Corrected f-string escaping for literal curly braces
                 await ctx.send(
                     f"`[p]skippy ask` command interactions are restricted to specific channels. "
-                    f"Please use this command in one of the following channels: {{{', '.join(allowed_mentions)}}}. "
+                    f"Please use this command in one of the following channels: {{', '.join(allowed_mentions)}}. "
                     "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
             else:
