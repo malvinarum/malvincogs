@@ -844,7 +844,7 @@ class Skippy(commands.Cog):
                 target_name = target_member.display_name if target_member else f"User ID: {target_id}"
 
                 rel_desc = f" ({description})" if description else ""
-                formatted_relationships.append(
+                relationships_list.append(
                     f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
@@ -907,7 +907,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key}`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
             )
             return None
 
@@ -1535,8 +1535,7 @@ class Skippy(commands.Cog):
                                 ctx.guild.get_channel(cid)]
             if allowed_mentions:
                 await ctx.send(
-                    f"`[p]skippy ask` command interactions are restricted to specific channels. "
-                    f"Please use this command in one of the following channels: {{{', '.join(allowed_mentions)}}}. "
+                    f"Please use this command in one of the following channels: {{ {', '.join(allowed_mentions)} }}. "  # Corrected f-string syntax
                     "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
             else:
