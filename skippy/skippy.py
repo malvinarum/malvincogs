@@ -587,41 +587,42 @@ class Skippy(commands.Cog):
                     if len(names) > 1:
                         other_names = [n for n in names if n != member.display_name]
                         if other_names:
-                            name_str += f" (also known as {', '.join([f\"'{n}'\" for n in other_names])})"
-                            known_users_info.append(f"ID:{user_id} is {name_str}")
-                            if known_users_info:
-                                known_users_prompt_part = "Here is a list of known users and their associated Discord IDs and names:\n" + \
-                                                          "```\n" + "\n".join(known_users_info) + "\n```\n" + \
-                                                          "When identifying users in relationships, ALWAYS use their Discord User ID from this list if available. " + \
-                                                          "If a name is mentioned but no ID is given, try to infer the ID from this list.\n\n"
+                            # Fix: Changed f\"'{n}'\" to f"'{n}'" to avoid SyntaxError
+                            name_str += f" (also known as {', '.join([f"'{n}'" for n in other_names])})"
+                    known_users_info.append(f"ID:{user_id} is {name_str}")
+            if known_users_info:
+                known_users_prompt_part = "Here is a list of known users and their associated Discord IDs and names:\n" + \
+                                          "```\n" + "\n".join(known_users_info) + "\n```\n" + \
+                                          "When identifying users in relationships, ALWAYS use their Discord User ID from this list if available. " + \
+                                          "If a name is mentioned but no ID is given, try to infer the ID from this list.\n\n"
 
-                            relationship_prompt = (
-                                f"{known_users_prompt_part}"  # Include known users context
-                                "Analyze the following message for stated or strongly implied relationships between users. "
-                                "Identify two distinct users from the message (either the author or a mentioned user, or inferred by name) "
-                                "and their relationship type. Output each identified relationship on a new line "
-                                "in the exact format: `RELATIONSHIP: User1_ID:<user_id_1>; User2_ID:<user_id_2>; Type:<relationship_type>; Description:<concise context>`. "
-                                "For `User1_ID`, use the ID of the person stating the relationship (often the author) or the primary subject. "
-                                "For `User2_ID`, use the ID of the person being described in the relationship. "
-                                "For `Type`, use a simple descriptor like 'sibling', 'friend', 'spouse', 'colleague', 'parent', 'child', 'partner', 'mentor', 'student'. "
-                                "If no clear relationships are found, output 'NONE'.\n\n"
-                                "Example:\n"
-                                "Message: My brother <@12345> and I are going to the store. (Author: <@98765>)\n"
-                                "Output: RELATIONSHIP: User1_ID:98765; User2_ID:12345; Type:sibling; Description:going to the store with brother.\n\n"
-                                "Example:\n"
-                                "Message: Jane is my best friend. (Author: <@33445>, Known Users: ID:11122 is 'Jane')\n"
-                                "Output: RELATIONSHIP: User1_ID:33445; User2_ID:11122; Type:friend; Description:is my best friend.\n\n"
-                                f"Message: {user_message}\nOutput:"
-                            )
+        relationship_prompt = (
+            f"{known_users_prompt_part}"  # Include known users context
+            "Analyze the following message for stated or strongly implied relationships between users. "
+            "Identify two distinct users from the message (either the author or a mentioned user, or inferred by name) "
+            "and their relationship type. Output each identified relationship on a new line "
+            "in the exact format: `RELATIONSHIP: User1_ID:<user_id_1>; User2_ID:<user_id_2>; Type:<relationship_type>; Description:<concise context>`. "
+            "For `User1_ID`, use the ID of the person stating the relationship (often the author) or the primary subject. "
+            "For `User2_ID`, use the ID of the person being described in the relationship. "
+            "For `Type`, use a simple descriptor like 'sibling', 'friend', 'spouse', 'colleague', 'parent', 'child', 'partner', 'mentor', 'student'. "
+            "If no clear relationships are found, output 'NONE'.\n\n"
+            "Example:\n"
+            "Message: My brother <@12345> and I are going to the store. (Author: <@98765>)\n"
+            "Output: RELATIONSHIP: User1_ID:98765; User2_ID:12345; Type:sibling; Description:going to the store with brother.\n\n"
+            "Example:\n"
+            "Message: Jane is my best friend. (Author: <@33445>, Known Users: ID:11122 is 'Jane')\n"
+            "Output: RELATIONSHIP: User1_ID:33445; User2_ID:11122; Type:friend; Description:is my best friend.\n\n"
+            f"Message: {user_message}\nOutput:"
+        )
 
-                            extraction_payload = {
-                                "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
-                            }
-                            headers = {"Content-Type": "application/json"}
-                            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        extraction_payload = {
+            "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
+        }
+        headers = {"Content-Type": "application/json"}
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
-                            conn = None
-                            cursor = None
+        conn = None
+        cursor = None
         try:
             async with self.session.post(api_url, headers=headers, data=json.dumps(extraction_payload)) as response:
                 response.raise_for_status()
@@ -828,7 +829,7 @@ class Skippy(commands.Cog):
 
                 rel_desc = f" ({description})" if description else ""
                 formatted_relationships.append(
-                    f"{initiator_name} has a '{rel_type}' relationship with {target_name} {rel_desc}"
+                    f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
             formatted_relationships = list(set(formatted_relationships))
@@ -890,7 +891,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key}`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
             )
             return None
 
@@ -1606,4 +1607,3 @@ class Skippy(commands.Cog):
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-
