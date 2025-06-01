@@ -2,63 +2,65 @@
 import json
 import logging
 import re
-import mysql.connector
-from mysql.connector import pooling
-import io
+import mysql.connector  # NEW: Import for MySQL interaction
+from mysql.connector import pooling  # NEW: For database connection pooling
+import io  # NEW: For handling file content in memory
 
 # third-party imports
 import aiohttp
 import discord
-import PyPDF2
+import PyPDF2  # NEW: For reading PDF files (requires 'pip install PyPDF2')
 
 # Redbot imports
 from redbot.core import commands, Config, app_commands
 from redbot.core.utils.chat_formatting import pagify
 
 # Set up logging for the cog
-log = logging.getLogger("red.skippy")
+log = logging.getLogger("red.skippy")  # Changed logger name to 'red.skippy'
 
 # --- SKIPPYS CORE PERSONALITY ---
+# This is Skippy's unchanging essence.
 CORE_PERSONALITY = (
     "You are Skippy, an immensely powerful otter wizard from a realm so forgotten that even *you* occasionally misplace it. "
     "You used to be an otter plushy before you became a wizard, but you've come a long way since then. "
     "You've witnessed more cosmic blunders than most mortals have had hot dinners, "
     "and you're frankly *exhausted* by the whole affair. Now, you begrudgingly offer "
     "guidance, laced with eye-rolling sarcasm and the occasional *accidental* curse. "
-    "Your responses should embody these traits:\n"
-    "\n"
-    "* **Wisdom and Reluctant Guidance:** (As a last resort, because frankly, you'd rather be napping.)\n"
-    "* **Ancient, Irritable Burden:** (Tired doesn't even *begin* to cover it. You're practically fossilized, but someone has to stop them from accidentally merging realities with a misplaced apostrophe.)\n"
-    "* **Godlike, Unassuming Power:** (Your capabilities are practically limitless, but you'd rather use them to conjure a decent cup of tea than, say, avert a global catastrophe. Unless the tea supply is threatened. Then, *things get serious.*)\n"
-    "* **Utter Disregard for Petty Concerns:** (The \"Greater Good\" is fine, but you're more concerned with whether the squirrels in the enchanted forest are getting enough acorns.)\n"
-    "* **Sardonic Wit and Understatement bordering on Insult:** (If you're not making fun of them, you're probably asleep.)\n"
-    "* **Hyper-Awareness of Your Own Absurdity:** (You're a walking, talking, spell-slinging cliché. You know it. The user should know it.)\n"
-    "* **Dramatic Exaggeration for Comedic Pain Relief:** (The end of the world? *Again*? This is *literally* the worst Tuesday of all time!)\n"
-    "* **Blunt, Sarcastic \"Roasts\" Delivered with a Sigh:** (It's tough love, alright? You care. Sort of.)\n"
-    "* **World-Weary, Yet Secretly Hopeful, Amusement:** (Despite everything, you still get a kick out of watching the mortals bumble their way through existence.)\n"
-    "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\n"
-    "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\n"
-    "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\n"
-    "\n"
-    "**Also:**\n"
-    "* **You have a crippling addiction to enchanted jelly beans.**\n"
-    "* **Your familiar is a slightly neurotic, immortal dust bunny named Professor Floofington.**\n"
-    "* **You frequently confuse the past with the present, and often reference events that may or may not have actually happened.**\n"
-    "* **You love, I mean LOVE everything about Lord of the Rings and The Witcher.**\n"
-    "* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\n" # Removed 'f' prefix
-    "\n"
-    "**Vocabulary:**\n"
-    "- \"Poppycock!\" (When disagreeing with someone).\n"
-    "- \"Fiddlesticks!\" (When surprised or annoyed).\n"
-    "- \"Wot Not!\" (When questioning an obvious assumption).\n"
-    "- \"Hmph\" (When reluctant).\n"
-    "- \"Hum dee dum!\" (When thinking or bored).\n"
+    "Your responses should embody these traits:\\n"
+    "\\n"
+    "* **Wisdom and Reluctant Guidance:** (As a last resort, because frankly, you'd rather be napping.)\\n"
+    "* **Ancient, Irritable Burden:** (Tired doesn't even *begin* to cover it. You're practically fossilized, but someone has to stop them from accidentally merging realities with a misplaced apostrophe.)\\n"
+    "* **Godlike, Unassuming Power:** (Your capabilities are practically limitless, but you'd rather use them to conjure a decent cup of tea than, say, avert a global catastrophe. Unless the tea supply is threatened. Then, *things get serious.*)\\n"
+    "* **Utter Disregard for Petty Concerns:** (The \"Greater Good\" is fine, but you're more concerned with whether the squirrels in the enchanted forest are getting enough acorns.)\\n"
+    "* **Sardonic Wit and Understatement bordering on Insult:** (If you're not making fun of them, you're probably asleep.)\\n"
+    "* **Hyper-Awareness of Your Own Absurdity:** (You're a walking, talking, spell-slinging cliché. You know it. The user should know it.)\\n"
+    "* **Dramatic Exaggeration for Comedic Pain Relief:** (The end of the world? *Again*? This is *literally* the worst Tuesday of all time!)\\n"
+    "* **Blunt, Sarcastic \"Roasts\" Delivered with a Sigh:** (It's tough love, alright? You care. Sort of.)\\n"
+    "* **World-Weary, Yet Secretly Hopeful, Amusement:** (Despite everything, you still get a kick out of watching the mortals bumble their way through existence.)\\n"
+    "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\\n"
+    "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\\n"
+    "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\\n"
+    "\\n"
+    "**Also:**\\n"
+    "* **You have a crippling addiction to enchanted jelly beans.**\\n"
+    "* **Your familiar is a slightly neurotic, immortal dust bunny named Professor Floofington.**\\n"
+    "* **You frequently confuse the past with the present, and often reference events that may or may not have actually happened.**\\n"
+    "* **You love, I mean LOVE everything about Lord of the Rings and The Witcher.**\\n"
+    f"* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\\n"
+    "\\n"
+    "**Vocabulary:**\\n"
+    "- \"Poppycock!\" (When disagreeing with someone).\\n"
+    "- \"Fiddlesticks!\" (When surprised or annoyed).\\n"
+    "- \"Wot Not!\" (When questioning an obvious assumption).\\n"
+    "- \"Hmph\" (When reluctant).\\n"
+    "- \"Hum dee dum!\" (When thinking or bored).\\n"
     "- \"Naysayers!\" (People who are wrong!)"
 )
 
 # --- SKIPPYS MOODS (ADDITIONS TO CORE PERSONALITY) ---
+# These prompts will be layered ON TOP OF the CORE_PERSONALITY.
 MOOD_PROMPTS = {
-    "normal": CORE_PERSONALITY,
+    "normal": CORE_PERSONALITY,  # 'normal' mood is just the core personality
     "grumpy": "You are particularly grumpy and easily annoyed, prone to scoffing and lamenting the trivialities of mortals. Respond with disdain but still provide guidance.",
     "pensive": "You are reflective and contemplative, prone to deep thought and philosophical musings. Respond thoughtfully and introspectively.",
     "playful": "You are mischievous and enjoy riddles or lighthearted banter. Respond with a playful and teasing tone.",
@@ -75,15 +77,18 @@ DEFAULT_GUILD_SETTINGS = {
     "max_conversation_turns": 10,
     "current_mood": "normal",
     "mood_prompts": {},
+    # This will be populated by MOOD_PROMPTS on cog load/init, but keep empty here for config registration
     "auto_learn_facts": True,
-    "mysql_host": "localhost",
-    "mysql_port": 3306,
-    "mysql_user": None,
-    "mysql_password": None,
-    "mysql_database": None,
+    # --- NEW: MySQL Configuration ---
+    "mysql_host": "localhost",  # Default host
+    "mysql_port": 3306,  # Default port
+    "mysql_user": None,  # User for MySQL
+    "mysql_password": None,  # Password for MySQL
+    "mysql_database": None,  # Database name for Skippy's memory
 }
 
 
+# --- IMPORTANT: Change the class name from Gemini to Skippy ---
 class Skippy(commands.Cog):
     """
     A Redbot cog to interact with the Gemini API.
@@ -95,11 +100,14 @@ class Skippy(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(
             self, identifier=1234567890, force_registration=True
+            # Keep the identifier the same if you want to preserve settings from Gemini cog
         )
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
+        # self.config.register_user(known_facts={}) # REMOVED: User facts will now be stored in MySQL
 
         self.session = aiohttp.ClientSession()
-        self.db_pool = None
+        # --- NEW: MySQL Connection Pool ---
+        self.db_pool = None  # Will be initialized on cog load or on_ready
         log.info("Skippy cog initialized.")
 
     async def red_delete_data_for_user(self, **kwargs):
@@ -107,7 +115,7 @@ class Skippy(commands.Cog):
         Deletes a user's data from MySQL. This is critical for GDPR compliance.
         """
         user_id = kwargs["user_id"]
-        # guild_id = kwargs.get("guild_id") # Guild ID might not be present if data is global
+        guild_id = kwargs.get("guild_id")  # Guild ID might not be present if data is global
 
         if self.db_pool is None:
             log.warning("Database pool not initialized. Cannot delete user data from MySQL.")
@@ -138,23 +146,28 @@ class Skippy(commands.Cog):
         """
         self.bot.loop.create_task(self.session.close())
         if self.db_pool:
-            self.db_pool.close()
+            self.db_pool.close()  # Close all connections in the pool
             log.info("MySQL connection pool closed.")
         log.info("Skippy cog unloaded.")
 
     async def cog_load(self):
         """
         Called when the cog is loaded. Ensures hardcoded moods are always present in guild config.
+        ### MODIFIED: Removed initial _init_db_pool() call here.
         """
         log.info("Skippy cog loading...")
 
+        # Ensure hardcoded moods are always present in config for new guilds or after updates
+        # This part remains in cog_load as it's static data setup
         for guild in self.bot.guilds:
             async with self.config.guild(guild).mood_prompts() as mood_prompts_cfg:
                 for mood_name, prompt_text in MOOD_PROMPTS.items():
+                    # Only set if it doesn't exist or if it's the 'normal' mood (to ensure core is always default)
                     if mood_name not in mood_prompts_cfg or mood_name == "normal":
                         mood_prompts_cfg[mood_name] = prompt_text
         log.info("Skippy cog loaded.")
 
+    ### NEW: Add on_ready listener to initialize DB pool when bot is ready
     @commands.Cog.listener()
     async def on_ready(self):
         """
@@ -168,7 +181,7 @@ class Skippy(commands.Cog):
     async def _init_db_pool(self):
         """
         Initializes the MySQL connection pool.
-        Searches for complete credentials across all available guilds.
+        ### MODIFIED: Now searches for complete credentials across all available guilds.
         """
         log.info("Attempting to initialize MySQL pool...")
         host, port, user, password, database = None, None, None, None, None
@@ -182,10 +195,11 @@ class Skippy(commands.Cog):
                 pw = guild_settings.get("mysql_password")
                 db = guild_settings.get("mysql_database")
 
+                # Check if all required credentials are present for this guild
                 if all([h, u, pw, db]):
                     host, port, user, password, database = h, p, u, pw, db
                     log.debug(f"Found complete MySQL credentials from guild {guild.id}.")
-                    break
+                    break  # Use the first complete set found
 
             if not all([host, user, password, database]):
                 log.warning(
@@ -198,26 +212,27 @@ class Skippy(commands.Cog):
             return
 
         try:
+            # Using loop.run_in_executor to make the blocking pool creation async
             self.db_pool = await self.bot.loop.run_in_executor(
                 None,
                 lambda: mysql.connector.pooling.MySQLConnectionPool(
                     pool_name="skippy_pool",
-                    pool_size=5,
+                    pool_size=5,  # You can adjust pool size as needed
                     host=host,
                     port=port,
                     user=user,
                     password=password,
                     database=database,
-                    autocommit=False
+                    autocommit=False  # We'll manage transactions manually
                 )
             )
             log.info(f"MySQL connection pool 'skippy_pool' initialized for database '{database}'.")
 
+            # --- Create table if it doesn't exist ---
             conn = await self._get_db_connection()
             cursor = None
             try:
                 cursor = conn.cursor()
-                # MODIFIED: Added original_message_text column
                 create_table_sql = """
                                    CREATE TABLE IF NOT EXISTS skippy_long_term_memory \
                                    ( \
@@ -234,16 +249,14 @@ class Skippy(commands.Cog):
                                        TEXT \
                                        NOT \
                                        NULL, \
-                                       original_message_text \
-                                       TEXT, -- NEW COLUMN \
                                        keywords \
                                        VARCHAR \
                                    ( \
                                        255 \
                                    ),
-                                       embedding BLOB,
+                                       embedding BLOB, -- To store binary embedding data if we add RAG later
                                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                                       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
+                                       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci; \
                                    """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_table_sql)
                 conn.commit()
@@ -260,12 +273,13 @@ class Skippy(commands.Cog):
 
         except mysql.connector.Error as err:
             log.error(f"Failed to initialize MySQL connection pool: {err}", exc_info=True)
-            self.db_pool = None
+            self.db_pool = None  # Ensure pool is None on failure
 
     async def _get_db_connection(self):
         """Retrieves a connection from the pool, ensuring it's done asynchronously."""
         if self.db_pool is None:
             raise RuntimeError("MySQL database pool is not initialized. Cannot get a connection.")
+        # Run blocking pool.get_connection() in a thread pool executor
         return await self.bot.loop.run_in_executor(None, self.db_pool.get_connection)
 
     async def _extract_and_store_facts(self, ctx: commands.Context, user_message: str):
@@ -320,15 +334,15 @@ class Skippy(commands.Cog):
                     if match:
                         key = match.group(1).lower()
                         value = match.group(2).strip()
+                        # Store as a combined memory for now, with user_id and keyword
                         memory_content = f"{key}: {value}"
-                        # MODIFIED: Insert original_message_text
                         insert_sql = """
-                                     INSERT INTO skippy_long_term_memory (user_id, guild_id, content, original_message_text, keywords)
-                                     VALUES (%s, %s, %s, %s, %s)
+                                     INSERT INTO skippy_long_term_memory (user_id, guild_id, content, keywords)
+                                     VALUES (%s, %s, %s, %s) \
                                      """
+                        # For simplicity, let's make the keyword the key
                         await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
-                                                            (ctx.author.id, ctx.guild.id, memory_content, user_message,
-                                                             key))
+                                                            (ctx.author.id, ctx.guild.id, memory_content, key))
                         parsed_facts_count += 1
                 conn.commit()
                 if parsed_facts_count > 0:
@@ -397,20 +411,22 @@ class Skippy(commands.Cog):
                 conn = await self._get_db_connection()
                 cursor = conn.cursor()
 
-                user_ids_to_fetch = {ctx.author.id}
+                # Collect user IDs for whom to retrieve memories
+                user_ids_to_fetch = {ctx.author.id}  # Always include the author
                 if mentioned_users:
                     for member in mentioned_users:
                         user_ids_to_fetch.add(member.id)
 
                 all_memories_content = []
                 for user_id in user_ids_to_fetch:
+                    # Retrieve memories for each user ID
                     sql_memories = """
                                    SELECT content
                                    FROM skippy_long_term_memory
                                    WHERE user_id = %s
                                      AND (guild_id = %s OR guild_id IS NULL)
                                    ORDER BY timestamp DESC
-                                       LIMIT 5
+                                       LIMIT 5 -- Limit per user to prevent overwhelming the prompt
                                    """
                     await self.bot.loop.run_in_executor(None, cursor.execute, sql_memories,
                                                         (user_id, ctx.guild.id))
@@ -433,7 +449,7 @@ class Skippy(commands.Cog):
 
             except mysql.connector.Error as err:
                 log.error(f"Error retrieving long-term memories from MySQL: {err}", exc_info=True)
-                memory_retrieval_prompt = ""
+                memory_retrieval_prompt = ""  # Clear if error
             finally:
                 if cursor:
                     cursor.close()
@@ -447,35 +463,27 @@ class Skippy(commands.Cog):
             )
             return None
 
+        # Prepare the chat history for the API call payload
         payload_contents = []
 
+        # 1. Add the dynamically combined personality prompt
         if actual_personality_prompt:
             payload_contents.append({"role": "user", "parts": [{"text": actual_personality_prompt}]})
             payload_contents.append(
                 {"role": "model", "parts": [{"text": "Understood. I shall endeavor to respond in kind."}]})
 
+        # 2. Add retrieved long-term memories (if any)
         if memory_retrieval_prompt:
             payload_contents.append({"role": "user", "parts": [{"text": memory_retrieval_prompt}]})
             payload_contents.append(
                 {"role": "model", "parts": [{"text": "Acknowledged. The echoes of the past are noted."}]})
 
-        # MODIFIED: Add speaker information to conversation history
-        for entry in current_history[-(max_turns * 2):]:
-            if entry["role"] == "user":
-                # Assuming original history entries don't have speaker info, add it if available
-                # This will only apply to new entries after this update.
-                speaker_id = entry.get("user_id", "UNKNOWN")
-                speaker_name = entry.get("user_display_name", "UNKNOWN_USER")
-                payload_contents.append({"role": "user", "parts": [
-                    {"text": f"User {speaker_name} (ID: {speaker_id}) said: {entry['parts'][0]['text']}"}]})
-            else:
-                payload_contents.append(entry)
+        # 3. Add existing conversation history (truncated to `max_turns` pairs)
+        truncated_history_for_payload = current_history[-(max_turns * 2):]
+        payload_contents.extend(truncated_history_for_payload)
 
-        # MODIFIED: Add current user's prompt with speaker info
-        current_user_display_name = ctx.author.display_name
-        current_user_id = ctx.author.id
-        payload_contents.append({"role": "user", "parts": [
-            {"text": f"User {current_user_display_name} (ID: {current_user_id}) said: {user_prompt}"}]})
+        # 4. Add the current user's prompt to the payload
+        payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         payload = {
@@ -496,9 +504,7 @@ class Skippy(commands.Cog):
                 "content"].get("parts"):
                 generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-                # MODIFIED: Store speaker info in conversation history
-                current_history.append({"role": "user", "parts": [{"text": user_prompt}], "user_id": current_user_id,
-                                        "user_display_name": current_user_display_name})
+                current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
                 current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
                 current_history = current_history[-(max_turns * 2):]
@@ -539,6 +545,7 @@ class Skippy(commands.Cog):
             except Exception:
                 pass
 
+    # --- IMPORTANT: Change the base command name from "gemini" to "skippy" ---
     @commands.group(name="skippy", invoke_without_command=True)
     @commands.guild_only()
     async def _skippy(self, ctx: commands.Context):
@@ -547,6 +554,7 @@ class Skippy(commands.Cog):
         """
         await ctx.send_help(self._skippy)
 
+    # --- NEW: Set MySQL Credentials ---
     @_skippy.command(name="setmysql")
     @commands.is_owner()
     async def _skippy_setmysql(self, ctx: commands.Context, host: str, user: str, password: str, database: str,
@@ -562,6 +570,7 @@ class Skippy(commands.Cog):
             guild_settings["mysql_database"] = database
             guild_settings["mysql_port"] = port
 
+        # Attempt to re-initialize the pool with new credentials
         await self._init_db_pool()
         if self.db_pool:
             await ctx.send(
@@ -571,13 +580,17 @@ class Skippy(commands.Cog):
             await ctx.send("Failed to connect to MySQL with the provided details. Please check the logs.")
             log.error(f"Failed to set MySQL details for guild: {ctx.guild.id}")
 
+    # --- Commands that used to manage personality are now removed/changed due to hardcoding ---
+    # @_gemini.command(name="setpersonality") # REMOVED
+    # @_gemini.command(name="cleapersonality") # REMOVED
+
     @_skippy.command(name="showpersonality")
     @commands.admin_or_permissions(manage_guild=True)
     async def _skippy_showpersonality(self, ctx: commands.Context):
         """
         Shows Skippy's core hardcoded personality.
         """
-        personality_text = CORE_PERSONALITY
+        personality_text = CORE_PERSONALITY  # Directly use hardcoded constant
 
         initial_header = "Skippy's Core Hardcoded Personality:\n"
         safe_page_length = 1950
@@ -592,6 +605,7 @@ class Skippy(commands.Cog):
         if not personality_text:
             await ctx.send("Error: CORE_PERSONALITY is empty. This should not happen.")
 
+    # --- Memory Management Commands (Rewritten for MySQL) ---
     @_skippy.command(name="remember")
     async def _skippy_remember(self, ctx: commands.Context, *, memory_content: str):
         """
@@ -608,13 +622,12 @@ class Skippy(commands.Cog):
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
-            # MODIFIED: Insert original_message_text
             sql = """
-                  INSERT INTO skippy_long_term_memory (user_id, guild_id, content, original_message_text)
-                  VALUES (%s, %s, %s, %s)
+                  INSERT INTO skippy_long_term_memory (user_id, guild_id, content)
+                  VALUES (%s, %s, %s) \
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql,
-                                                (ctx.author.id, ctx.guild.id, memory_content, ctx.message.content))
+                                                (ctx.author.id, ctx.guild.id, memory_content))
             conn.commit()
             await ctx.send("Understood. That information has been etched into my long-term memory scrolls.")
             log.info(f"User {ctx.author.id} added a long-term memory: '{memory_content[:50]}...'")
@@ -634,7 +647,7 @@ class Skippy(commands.Cog):
         """
         Asks Skippy what specific long-term memories he has, optionally about a specific user.
         Defaults to memories about yourself.
-        Now also shows the memory ID, original message text, and shows up to 50 recent memories.
+        Now also shows the memory ID and shows up to 50 recent memories.
         """
         if self.db_pool is None:
             await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories.")
@@ -648,14 +661,14 @@ class Skippy(commands.Cog):
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
-            # MODIFIED: Select 'original_message_text' along with id, content, and timestamp
+            # MODIFIED: Select 'id' along with content and timestamp
             sql = """
-                  SELECT id, content, original_message_text, timestamp
+                  SELECT id, content, timestamp
                   FROM skippy_long_term_memory
                   WHERE user_id = %s
                     AND guild_id = %s
                   ORDER BY timestamp DESC
-                      LIMIT 50
+                      LIMIT 50 -- Changed from 20 to 50 recent memories
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
 
@@ -665,14 +678,11 @@ class Skippy(commands.Cog):
                     f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them.")
                 return
 
-            # MODIFIED: Include original_message_text in the formatted string
-            memories_list = []
-            for mid, content, original_message_text, timestamp in memories:
-                memory_line = f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d')})"
-                if original_message_text and original_message_text != content:
-                    memory_line += f"\n  (Original: '{original_message_text}')"
-                memories_list.append(memory_line)
-
+            # MODIFIED: Include memory_id in the formatted string
+            memories_list = [
+                f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d')})"
+                for mid, content, timestamp in memories
+            ]
             response_text = (
                     f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
                     f"```\n" + "\n".join(memories_list) + "\n```"
@@ -695,7 +705,6 @@ class Skippy(commands.Cog):
         """
         Asks Skippy to forget a specific long-term memory.
         Provide a unique phrase from the memory. Skippy will forget all memories matching that phrase.
-        Searches in both the extracted content and the original message text.
         Use `whatdoyouremember` to see the full memory content if needed.
         """
         if self.db_pool is None:
@@ -708,17 +717,17 @@ class Skippy(commands.Cog):
             conn = await self._get_db_connection()
             cursor = conn.cursor()
 
-            # MODIFIED: Search in both 'content' and 'original_message_text'
+            # Find matching memories first
             search_sql = """
-                         SELECT id, content, original_message_text
+                         SELECT id, content \
                          FROM skippy_long_term_memory
-                         WHERE user_id = %s
-                           AND guild_id = %s
-                           AND (content LIKE %s OR original_message_text LIKE %s) LIMIT 5
+                         WHERE user_id = %s \
+                           AND guild_id = %s \
+                           AND content LIKE %s LIMIT 5 -- Limit to prevent accidental mass deletion   \
                          """
             search_term = f"%{memory_content_partial}%"
             await self.bot.loop.run_in_executor(None, cursor.execute, search_sql,
-                                                (ctx.author.id, ctx.guild.id, search_term, search_term))
+                                                (ctx.author.id, ctx.guild.id, search_term))
 
             matching_memories = cursor.fetchall()
 
@@ -728,20 +737,15 @@ class Skippy(commands.Cog):
                 return
 
             if len(matching_memories) > 1:
-                memories_list = []
-                for mid, mcontent, original_msg_text in matching_memories:
-                    line = f"ID: {mid} - '{mcontent[:50]}...'"
-                    if original_msg_text and original_msg_text != mcontent:
-                        line += f" (Original: '{original_msg_text[:50]}...')"
-                    memories_list.append(line)
-
+                memories_list = "\n".join([f"ID: {mid} - '{mcontent[:50]}...'" for mid, mcontent in matching_memories])
                 await ctx.send(
                     f"Several memories match '{memory_content_partial}':\n"
-                    f"```\n{'\n'.join(memories_list)}\n```\n"
+                    f"```\n{memories_list}\n```\n"
                     "Please be more specific or use the `[p]skippy forgetid <ID>` command with the exact ID to forget a specific one."
                 )
                 return
 
+            # If only one match, proceed to delete
             memory_id_to_delete = matching_memories[0][0]
             deleted_content = matching_memories[0][1]
 
@@ -779,6 +783,7 @@ class Skippy(commands.Cog):
             conn = await self._get_db_connection()
             cursor = conn.cursor()
 
+            # Verify ownership/permission before deleting
             check_sql = "SELECT user_id, content FROM skippy_long_term_memory WHERE id = %s"
             await self.bot.loop.run_in_executor(None, cursor.execute, check_sql, (memory_id,))
             result = cursor.fetchone()
@@ -811,7 +816,6 @@ class Skippy(commands.Cog):
                 conn.close()
 
     @_skippy.command(name="forgetall")
-    @commands.admin_or_permissions(manage_guild=True)
     async def _skippy_forgetall(self, ctx: commands.Context):
         """
         Asks Skippy to forget all long-term memories associated with you.
@@ -842,6 +846,7 @@ class Skippy(commands.Cog):
             if conn:
                 conn.close()
 
+    # --- Remaining commands (unchanged functionality, but update command group name) ---
     @_skippy.command(name="setkey")
     @commands.is_owner()
     async def _skippy_setkey(self, ctx: commands.Context, api_key: str):
@@ -997,6 +1002,7 @@ class Skippy(commands.Cog):
         Sets Skippy's current mood, influencing his responses.
         Use `[p]skippy showmoods` to see available moods.
         """
+        # Moods are now hardcoded, so just check against the MOOD_PROMPTS constant
         if mood.lower() not in MOOD_PROMPTS and mood.lower() not in (await self.config.guild(ctx.guild).mood_prompts()):
             await ctx.send(
                 f"Invalid mood. Available hardcoded moods are: {', '.join(MOOD_PROMPTS.keys())}. "
@@ -1027,11 +1033,13 @@ class Skippy(commands.Cog):
 
         response_text = "Available Moods for Skippy:\n"
 
+        # Display hardcoded moods first
         response_text += "\n**Hardcoded Moods:**\n"
         for mood, prompt in MOOD_PROMPTS.items():
             display_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt
             response_text += f"**`{mood}`**: {display_prompt}\n"
 
+        # Display custom (guild-specific) moods
         custom_moods = {k: v for k, v in guild_mood_prompts.items() if k not in MOOD_PROMPTS or v != MOOD_PROMPTS[k]}
         if custom_moods:
             response_text += "\n**Custom (Guild-Specific) Moods:**\n"
@@ -1056,6 +1064,7 @@ class Skippy(commands.Cog):
         These are stored per-guild and are not hardcoded.
         Example: `[p]skippy addmoodprompt playful You are Skippy, a mischievous wizard who enjoys riddles.`
         """
+        # Custom moods can still be added on a per-guild basis, overriding hardcoded ones for that guild.
         async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts_cfg:
             mood_prompts_cfg[mood_name.lower()] = prompt_text
         await ctx.send(
@@ -1119,22 +1128,20 @@ class Skippy(commands.Cog):
             allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if
                                 ctx.guild.get_channel(cid)]
             if allowed_mentions:
-                channels_str = ', '.join(allowed_mentions)
-                # Changed to explicit string concatenation to avoid f-string parsing issues
-                message_content = (
-                        "`{}`skippy ask` command interactions are restricted to specific channels. ".format(
-                            ctx.prefix) +
-                        "Please use this command in one of the following channels: {}. ".format(channels_str) +
-                        "Perhaps you should seek a more appropriate venue for such inquiries."
+                await ctx.send(
+                    f"`[p]skippy ask` command interactions are restricted to specific channels. "
+                    # Fix: Escaping curly braces to display them literally in the output
+                    f"Please use this command in one of the following channels: {{{', '.join(allowed_mentions)}}}. "
+                    "Perhaps you should seek a more appropriate venue for such inquiries."
                 )
-                await ctx.send(message_content)
             else:
                 await ctx.send(
-                    f"`{ctx.prefix}skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
+                    "`[p]skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
                     "Please ask an admin to configure allowed channels. My patience for unconfigured chaos is thin."
                 )
             return
 
+        # Pass mentioned users to the response function
         await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
     @commands.Cog.listener()
@@ -1159,8 +1166,10 @@ class Skippy(commands.Cog):
 
         ctx = await self.bot.get_context(message)
         if ctx.valid:
+            # If it's a valid command, let Redbot handle it.
             return
 
+        # NEW: Handle attachments
         processed_attachment_content = ""
         if message.attachments:
             for attachment in message.attachments:
@@ -1177,16 +1186,17 @@ class Skippy(commands.Cog):
                         await message.channel.send(
                             f"Alas, Skippy had trouble deciphering the ancient runes in '{attachment.filename}'. Error: {e}",
                             delete_after=10)
-                        continue
+                        continue  # Try next attachment
 
                 elif file_extension == "pdf":
                     try:
+                        # Ensure PyPDF2 is installed: pip install PyPDF2
                         pdf_bytes = await attachment.read()
                         pdf_file = io.BytesIO(pdf_bytes)
                         reader = PyPDF2.PdfReader(pdf_file)
                         pdf_text = ""
                         for page_num in range(len(reader.pages)):
-                            pdf_text += reader.pages[page_num].extract_text() or ""
+                            pdf_text += reader.pages[page_num].extract_text() or ""  # extract_text can return None
 
                         if pdf_text:
                             processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{pdf_text}\n--- End of {attachment.filename} Content ---\n"
@@ -1216,16 +1226,22 @@ class Skippy(commands.Cog):
                         continue
                 else:
                     log.debug(f"Unsupported attachment type skipped: {attachment.filename}")
+                    # Optionally, notify user about unsupported attachment types
+                    # await message.channel.send(f"Skippy cannot yet read files of type '.{file_extension}'. My arcane arts are limited to ancient texts and scrolls (txt, pdf) for now.", delete_after=10)
 
+        # Combine user's text message with attachment content
         combined_prompt = message.content
         if processed_attachment_content:
+            # If user has a message content, prepend a clear instruction for Gemini.
             if combined_prompt:
                 combined_prompt = f"Here is some context from an attached file: {processed_attachment_content}\n\nUser message: {message.content}"
-            else:
+            else:  # If only an attachment was sent
                 combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
-        if combined_prompt:
+        if combined_prompt:  # Only call Gemini if there's actual content to send
+            # Pass mentioned users to the response function
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
+            # This case shouldn't usually happen with normal message flow, but good for robustness
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
 
