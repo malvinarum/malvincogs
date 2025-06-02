@@ -135,9 +135,9 @@ class Skippy(commands.Cog):
 
             # Delete relationships where this user is an initiator or target
             sql_relationships = """
-                                DELETE \
+                                DELETE
                                 FROM skippy_relationships
-                                WHERE user_id_initiator = %s \
+                                WHERE user_id_initiator = %s
                                    OR user_id_target = %s
                                 """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_relationships, (user_id, user_id))
@@ -195,6 +195,7 @@ class Skippy(commands.Cog):
     async def _init_db_pool(self):
         """
         Initializes the MySQL connection pool and ensures tables exist.
+        Also adds necessary indexes for performance.
         """
         log.info("Attempting to initialize MySQL pool...")
         host, port, user, password, database = None, None, None, None, None
@@ -244,29 +245,29 @@ class Skippy(commands.Cog):
                 cursor = conn.cursor()
                 # Create skippy_long_term_memory table
                 create_memory_table_sql = """
-                                          CREATE TABLE IF NOT EXISTS skippy_long_term_memory \
-                                          ( \
-                                              id \
-                                              INT \
-                                              AUTO_INCREMENT \
-                                              PRIMARY \
-                                              KEY, \
-                                              user_id \
-                                              BIGINT, \
-                                              guild_id \
-                                              BIGINT, \
-                                              content \
-                                              TEXT \
-                                              NOT \
-                                              NULL, \
-                                              keywords \
-                                              VARCHAR \
-                                          ( \
-                                              255 \
+                                          CREATE TABLE IF NOT EXISTS skippy_long_term_memory
+                                          (
+                                              id
+                                              INT
+                                              AUTO_INCREMENT
+                                              PRIMARY
+                                              KEY,
+                                              user_id
+                                              BIGINT,
+                                              guild_id
+                                              BIGINT,
+                                              content
+                                              TEXT
+                                              NOT
+                                              NULL,
+                                              keywords
+                                              VARCHAR
+                                          (
+                                              255
                                           ),
                                               embedding BLOB,
                                               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                                              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci; \
+                                              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
                                           """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_memory_table_sql)
                 log.info("MySQL table 'skippy_long_term_memory' ensured to exist.")
@@ -287,76 +288,108 @@ class Skippy(commands.Cog):
                         log.error(f"Error altering 'skippy_long_term_memory' table to add 'embedding' column: {err}",
                                   exc_info=True)
 
+                # Add index for user_id, guild_id, and timestamp for efficient memory retrieval
+                create_memory_index_sql = """
+                                          CREATE INDEX IF NOT EXISTS idx_user_guild_memory
+                                              ON skippy_long_term_memory (user_id, guild_id, timestamp);
+                                          """
+                await self.bot.loop.run_in_executor(None, cursor.execute, create_memory_index_sql)
+                log.info("MySQL index 'idx_user_guild_memory' ensured to exist.")
+
                 # Create skippy_relationships table
                 create_relationships_table_sql = """
-                                                 CREATE TABLE IF NOT EXISTS skippy_relationships \
-                                                 ( \
-                                                     id \
-                                                     INT \
-                                                     AUTO_INCREMENT \
-                                                     PRIMARY \
-                                                     KEY, \
-                                                     user_id_initiator \
-                                                     BIGINT \
-                                                     NOT \
-                                                     NULL, \
-                                                     user_id_target \
-                                                     BIGINT \
-                                                     NOT \
-                                                     NULL, \
-                                                     relationship_type \
-                                                     VARCHAR \
-                                                 ( \
-                                                     100 \
+                                                 CREATE TABLE IF NOT EXISTS skippy_relationships
+                                                 (
+                                                     id
+                                                     INT
+                                                     AUTO_INCREMENT
+                                                     PRIMARY
+                                                     KEY,
+                                                     user_id_initiator
+                                                     BIGINT
+                                                     NOT
+                                                     NULL,
+                                                     user_id_target
+                                                     BIGINT
+                                                     NOT
+                                                     NULL,
+                                                     relationship_type
+                                                     VARCHAR
+                                                 (
+                                                     100
                                                  ) NOT NULL,
                                                      description TEXT,
                                                      guild_id BIGINT,
                                                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                                                     UNIQUE KEY unique_relationship \
-                                                 ( \
-                                                     user_id_initiator, \
-                                                     user_id_target, \
-                                                     relationship_type, \
-                                                     guild_id \
+                                                     UNIQUE KEY unique_relationship
+                                                 (
+                                                     user_id_initiator,
+                                                     user_id_target,
+                                                     relationship_type,
+                                                     guild_id
                                                  )
-                                                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci; \
+                                                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
                                                  """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_relationships_table_sql)
                 log.info("MySQL table 'skippy_relationships' ensured to exist.")
 
+                # Add indexes for relationships table for efficient lookups
+                create_rel_guild_index_sql = """
+                                             CREATE INDEX IF NOT EXISTS idx_guild_relationships
+                                                 ON skippy_relationships (guild_id);
+                                             """
+                create_rel_initiator_index_sql = """
+                                                 CREATE INDEX IF NOT EXISTS idx_initiator_relationships
+                                                     ON skippy_relationships (user_id_initiator);
+                                                 """
+                create_rel_target_index_sql = """
+                                              CREATE INDEX IF NOT EXISTS idx_target_relationships
+                                                  ON skippy_relationships (user_id_target);
+                                              """
+                create_rel_users_index_sql = """
+                                             CREATE INDEX IF NOT EXISTS idx_users_relationships
+                                                 ON skippy_relationships (user_id_initiator, user_id_target);
+                                             """
+
+                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_guild_index_sql)
+                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_initiator_index_sql)
+                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_target_index_sql)
+                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_users_index_sql)
+                log.info("MySQL indexes for 'skippy_relationships' ensured to exist.")
+
                 # NEW: Create skippy_user_names table
                 create_user_names_table_sql = """
-                                              CREATE TABLE IF NOT EXISTS skippy_user_names \
-                                              ( \
-                                                  user_id \
-                                                  BIGINT \
-                                                  NOT \
-                                                  NULL, \
-                                                  guild_id \
-                                                  BIGINT \
-                                                  NOT \
-                                                  NULL, \
-                                                  display_name \
-                                                  VARCHAR \
-                                              ( \
-                                                  255 \
+                                              CREATE TABLE IF NOT EXISTS skippy_user_names
+                                              (
+                                                  user_id
+                                                  BIGINT
+                                                  NOT
+                                                  NULL,
+                                                  guild_id
+                                                  BIGINT
+                                                  NOT
+                                                  NULL,
+                                                  display_name
+                                                  VARCHAR
+                                              (
+                                                  255
                                               ) NOT NULL,
                                                   known_names JSON, -- Store as JSON array of strings
-                                                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP \
+                                                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                                                   ON UPDATE CURRENT_TIMESTAMP,
-                                                  PRIMARY KEY \
-                                              ( \
-                                                  user_id, \
-                                                  guild_id \
+                                                  PRIMARY KEY
+                                              (
+                                                  user_id,
+                                                  guild_id
                                               )
-                                                  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci; \
+                                                  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
                                               """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_user_names_table_sql)
                 log.info("MySQL table 'skippy_user_names' ensured to exist.")
 
                 conn.commit()
             except mysql.connector.Error as err:
-                log.error(f"Error creating MySQL tables: {err}", exc_info=True)
+                log.error(f"Error creating MySQL tables or indexes: {err}", exc_info=True)
                 if conn:
                     conn.rollback()
             finally:
@@ -384,6 +417,8 @@ class Skippy(commands.Cog):
     async def _update_user_name_record(self, member: discord.Member):
         """
         NEW: Updates or creates a record for a user's name(s) in the skippy_user_names table.
+        This function now uses a set to manage known names, preventing duplicates and
+        ensuring the current display name is handled correctly.
         """
         if self.db_pool is None:
             log.warning("MySQL database not connected. Cannot update user name record.")
@@ -401,28 +436,32 @@ class Skippy(commands.Cog):
             existing_record = cursor.fetchone()
 
             current_display_name = member.display_name
-            known_names_list = []
+            known_names_set = set()  # Use a set for automatic deduplication
 
             if existing_record:
                 old_display_name = existing_record['display_name']
-                known_names_from_db = json.loads(existing_record['known_names']) if existing_record[
-                    'known_names'] else []
+                # If the display name has changed, add the old one to known names
+                if old_display_name != current_display_name:
+                    known_names_set.add(old_display_name)
 
-                known_names_list.extend(known_names_from_db)
-                if old_display_name not in known_names_list:
-                    known_names_list.append(old_display_name)
+                # Add existing known names from the database
+                if existing_record['known_names']:
+                    try:
+                        known_names_from_db = json.loads(existing_record['known_names'])
+                        known_names_set.update(known_names_from_db)
+                    except json.JSONDecodeError:
+                        log.error(
+                            f"Failed to decode known_names JSON for user {member.id}: {existing_record['known_names']}")
 
-                # Remove current display name if it's already in known_names (to avoid redundancy)
-                if current_display_name in known_names_list:
-                    known_names_list.remove(current_display_name)
+            # Ensure the *current* display name is never in the known_names_set, as it's stored separately
+            known_names_set.discard(current_display_name)
 
-            # Always ensure current display name is NOT in known_names_list, as it's in display_name column
-            known_names_json = json.dumps(list(set(known_names_list)))  # Use set to remove duplicates
+            known_names_json = json.dumps(list(known_names_set))  # Convert back to list for JSON storage
 
             upsert_sql = """
                          INSERT INTO skippy_user_names (user_id, guild_id, display_name, known_names)
-                         VALUES (%s, %s, %s, %s) ON DUPLICATE KEY \
-                         UPDATE \
+                         VALUES (%s, %s, %s, %s) ON DUPLICATE KEY
+                         UPDATE
                              display_name = \
                          VALUES (display_name), known_names = \
                          VALUES (known_names), timestamp = \
@@ -468,14 +507,14 @@ class Skippy(commands.Cog):
 
             for record in records:
                 user_id = record['user_id']
-                names = [record['display_name']]
+                names = {record['display_name']}  # Use a set to handle duplicates
                 if record['known_names']:
                     try:
                         known_names_json = json.loads(record['known_names'])
-                        names.extend(known_names_json)
+                        names.update(known_names_json)
                     except json.JSONDecodeError:
                         log.error(f"Failed to decode known_names JSON for user {user_id}: {record['known_names']}")
-                known_users[user_id] = list(set(names))  # Remove duplicates
+                known_users[user_id] = list(names)  # Convert back to list for output
 
         except mysql.connector.Error as err:
             log.error(f"Error retrieving known user names for guild {guild_id}: {err}", exc_info=True)
@@ -603,8 +642,7 @@ class Skippy(commands.Cog):
                     if len(names) > 1:
                         other_names = [n for n in names if n != member.display_name]
                         if other_names:
-                            # Fix: Changed f\"'{n}'\" to f"'{n}'" to avoid SyntaxError
-                            name_str += f""" (also known as {', '.join([f"'{n}'" for n in other_names])})"""  # Corrected f-string syntax
+                            name_str += f""" (also known as {', '.join([f"'{n}'" for n in other_names])})"""
                     known_users_info.append(f"ID:{user_id} is {name_str}")
             if known_users_info:
                 known_users_prompt_part = "Here is a list of known users and their associated Discord IDs and names:\n" + \
@@ -684,9 +722,9 @@ class Skippy(commands.Cog):
                             continue
 
                         insert_sql = """
-                                     INSERT INTO skippy_relationships (user_id_initiator, user_id_target, \
+                                     INSERT INTO skippy_relationships (user_id_initiator, user_id_target,
                                                                        relationship_type, description, guild_id)
-                                     VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY \
+                                     VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY
                                      UPDATE description = \
                                      VALUES (description), timestamp = \
                                      VALUES (timestamp)
@@ -821,7 +859,7 @@ class Skippy(commands.Cog):
 
             placeholders = ', '.join(['%s'] * len(user_ids_in_conversation))
             sql = f"""
-                  SELECT user_id_initiator, user_id_target, relationship_type, description
+                  SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
                   FROM skippy_relationships
                   WHERE guild_id = %s
                   AND (user_id_initiator IN ({placeholders}) OR user_id_target IN ({placeholders}))
@@ -835,7 +873,7 @@ class Skippy(commands.Cog):
             if not relationships:
                 return ""
 
-            formatted_relationships = []
+            formatted_relationships = []  # Initialize this list
             for initiator_id, target_id, rel_type, description, timestamp in relationships:
                 initiator_member = ctx.guild.get_member(initiator_id)
                 target_member = ctx.guild.get_member(target_id)
@@ -844,11 +882,11 @@ class Skippy(commands.Cog):
                 target_name = target_member.display_name if target_member else f"User ID: {target_id}"
 
                 rel_desc = f" ({description})" if description else ""
-                relationships_list.append(
+                formatted_relationships.append(  # Corrected line
                     f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
-            formatted_relationships = list(set(formatted_relationships))
+            formatted_relationships = list(set(formatted_relationships))  # Remove duplicates
 
             return (
                 "You also have the following known relationships between users:\n"
@@ -874,6 +912,7 @@ class Skippy(commands.Cog):
         Handles API key checks, network requests, and error handling.
         Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
         and manages conversation history.
+        The personality, memory, and relationship contexts are now combined into a single initial prompt.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
@@ -901,36 +940,41 @@ class Skippy(commands.Cog):
             user_ids_in_conversation.update({m.id for m in mentioned_users})
         user_ids_list = list(user_ids_in_conversation)
 
+        # Retrieve relevant memories and relationships to inject into the prompt
         memory_retrieval_prompt = await self._retrieve_relevant_memories(user_prompt, ctx, user_ids_list)
         relationship_retrieval_prompt = await self._retrieve_relevant_relationships(ctx, user_ids_list)
 
         if not api_key:
             await ctx.send(
-                "The Gemini API key has not been set. "
+                "Poppycock! The Gemini API key has not been set. "
                 f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
             )
             return None
 
-        payload_contents = []
-
-        if actual_personality_prompt:
-            payload_contents.append({"role": "user", "parts": [{"text": actual_personality_prompt}]})
-            payload_contents.append(
-                {"role": "model", "parts": [{"text": "Understood. I shall endeavor to respond in kind."}]})
+        # Combine all contextual information into a single setup prompt for Gemini
+        context_parts = [actual_personality_prompt]
 
         if memory_retrieval_prompt:
-            payload_contents.append({"role": "user", "parts": [{"text": memory_retrieval_prompt}]})
-            payload_contents.append(
-                {"role": "model", "parts": [{"text": "Acknowledged. The echoes of the past are noted."}]})
+            context_parts.append(memory_retrieval_prompt)
 
         if relationship_retrieval_prompt:
-            payload_contents.append({"role": "user", "parts": [{"text": relationship_retrieval_prompt}]})
-            payload_contents.append(
-                {"role": "model", "parts": [{"text": "Relationships duly noted in the great tapestry of existence."}]})
+            context_parts.append(relationship_retrieval_prompt)
 
+        # Create the initial system/context prompt that sets Skippy's persona and provides memory/relationship context
+        initial_context_prompt = "\n\n".join(context_parts)
+
+        payload_contents = []
+        if initial_context_prompt:
+            payload_contents.append({"role": "user", "parts": [{"text": initial_context_prompt}]})
+            payload_contents.append(
+                {"role": "model",
+                 "parts": [{"text": "Understood. The tapestry of existence is clear."}]})  # Skippy's acknowledgement
+
+        # Truncate conversation history to fit within context limits
         truncated_history_for_payload = current_history[-(max_turns * 2):]
         payload_contents.extend(truncated_history_for_payload)
 
+        # Add the user's current prompt
         payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
@@ -941,7 +985,7 @@ class Skippy(commands.Cog):
             "Content-Type": "application/json"
         }
 
-        message = await ctx.send("Thinking... please wait.")
+        message = await ctx.send("Hum dee dum! Thinking... please wait. My ethereal gears are grinding.")
 
         try:
             async with self.session.post(api_url, headers=headers, data=json.dumps(payload)) as response:
@@ -952,10 +996,11 @@ class Skippy(commands.Cog):
                 "content"].get("parts"):
                 generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
+                # Update conversation history
                 current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
                 current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
-                current_history = current_history[-(max_turns * 2):]
+                current_history = current_history[-(max_turns * 2):]  # Ensure history doesn't exceed max turns
 
                 async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
                     conv_hist[channel_history_key] = current_history
@@ -964,6 +1009,7 @@ class Skippy(commands.Cog):
                     await ctx.send(page)
                 log.info(f"Successfully responded to Skippy prompt from guild: {ctx.guild.id}")
 
+                # Asynchronously learn facts and relationships
                 auto_learn_facts = await self.config.guild(ctx.guild).auto_learn_facts()
                 if auto_learn_facts:
                     self.bot.loop.create_task(self._extract_and_store_facts(ctx, user_prompt))
@@ -976,25 +1022,26 @@ class Skippy(commands.Cog):
                 return generated_text
             else:
                 await ctx.send(
-                    "Could not get a valid response from the Gemini API. The model might not have generated any content.")
+                    "Fiddlesticks! Could not get a valid response from the Gemini API. The model might not have generated any content. Perhaps it was napping?")
                 log.warning(f"Unexpected Gemini API response structure: {result} for guild: {ctx.guild.id}")
                 return None
 
         except aiohttp.ClientError as e:
-            await ctx.send(f"An HTTP error occurred while trying to reach the Gemini API: {e}")
+            await ctx.send(
+                f"A strange ethereal disturbance prevented Skippy from reaching the cosmic archives (Gemini API). Error: {e}")
             log.error(f"HTTP error during Gemini API call for guild {ctx.guild.id}: {e}")
             return None
         except json.JSONDecodeError as e:
-            await ctx.send(f"Failed to parse the API response: {e}")
+            await ctx.send(f"Poppycock! The cosmic scrolls were unreadable. Failed to parse the API response: {e}")
             log.error(f"JSON decode error during Gemini API call for guild {ctx.guild.id}: {e}")
             return None
         except Exception as e:
-            await ctx.send(f"An unexpected error occurred: {e}")
+            await ctx.send(f"A cosmic anomaly occurred: {e}. Skippy is quite vexed.")
             log.error(f"Unexpected error during Gemini API call for guild {ctx.guild.id}: {e}", exc_info=True)
             return None
         finally:
             try:
-                await message.delete()
+                await message.delete()  # Attempt to delete the "Thinking..." message
             except Exception:
                 pass
 
@@ -1024,10 +1071,11 @@ class Skippy(commands.Cog):
         await self._init_db_pool()
         if self.db_pool:
             await ctx.send(
-                f"MySQL connection details set. Skippy will now use `{database}` on `{host}:{port}` for his memories and relationships.")
+                f"Hmph. MySQL connection details set. Skippy will now use `{database}` on `{host}:{port}` for his memories and relationships. Try not to break it, mortals.")
             log.info(f"MySQL connection details set for guild: {ctx.guild.id}")
         else:
-            await ctx.send("Failed to connect to MySQL with the provided details. Please check the logs.")
+            await ctx.send(
+                "Fiddlesticks! Failed to connect to MySQL with the provided details. Check the console logs, my master, for the ethereal errors.")
             log.error(f"Failed to set MySQL details for guild: {ctx.guild.id}")
 
     @_skippy.command(name="showpersonality")
@@ -1049,7 +1097,7 @@ class Skippy(commands.Cog):
             first_page = False
 
         if not personality_text:
-            await ctx.send("Error: CORE_PERSONALITY is empty. This should not happen.")
+            await ctx.send("Error: CORE_PERSONALITY is empty. This should not happen. Poppycock!")
 
     @_skippy.command(name="remember")
     async def _skippy_remember(self, ctx: commands.Context, *, memory_content: str):
@@ -1059,7 +1107,8 @@ class Skippy(commands.Cog):
         Example: `[p]skippy remember I enjoy long walks on the beach.`
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Please ask the bot owner to set it up.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Please ask the bot owner to set it up. My apologies, but my mind is currently... elsewhere.")
             return
 
         conn = None
@@ -1081,13 +1130,15 @@ class Skippy(commands.Cog):
             await ctx.send("Understood. That information has been etched into my long-term memory scrolls.")
             log.info(f"User {ctx.author.id} added a long-term memory: '{memory_content[:50]}...'")
         except mysql.connector.Error as err:
-            await ctx.send(f"Alas, a problem occurred while trying to store that memory: {err}")
+            await ctx.send(
+                f"Fiddlesticks! A mischievous imp interfered with my memory scrolls. I couldn't quite etch that in. Error: {err}")
             log.error(f"Error remembering for user {ctx.author.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
         except Exception as e:
-            await ctx.send(f"An unexpected error occurred while generating embedding or storing memory: {e}")
-            log.error(f"Error during remember command for user {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send(
+                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
+            log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
                 cursor.close()
@@ -1102,7 +1153,8 @@ class Skippy(commands.Cog):
         Now also shows the memory ID and shows up to 50 recent memories.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories. My apologies, but my mind is currently... elsewhere.")
             return
 
         target_user_id = target.id if target else ctx.author.id
@@ -1126,7 +1178,7 @@ class Skippy(commands.Cog):
             memories = cursor.fetchall()
             if not memories:
                 await ctx.send(
-                    f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them.")
+                    f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them. Perhaps they've been too mundane for my ancient mind?")
                 return
 
             memories_list = [
@@ -1142,7 +1194,7 @@ class Skippy(commands.Cog):
                 await ctx.send(page)
 
         except mysql.connector.Error as err:
-            await ctx.send(f"A ripple in the memory currents prevented recall: {err}")
+            await ctx.send(f"A ripple in the memory currents prevented recall: {err}. Such a nuisance!")
             log.error(f"Error retrieving memories for user {target_user_id}: {err}", exc_info=True)
         finally:
             if cursor:
@@ -1158,7 +1210,8 @@ class Skippy(commands.Cog):
         Use `whatdoyouremember` to see the full memory content if needed.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot forget.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget. My apologies, but my mind is currently... elsewhere.")
             return
 
         conn = None
@@ -1182,7 +1235,7 @@ class Skippy(commands.Cog):
 
             if not matching_memories:
                 await ctx.send(
-                    f"I do not recall any memory about you containing '{memory_content_partial}'. Perhaps it was a fleeting thought?")
+                    f"I do not recall any memory about you containing '{memory_content_partial}'. Perhaps it was a fleeting thought? Or perhaps, you're just not that memorable, hmph.")
                 return
 
             if len(matching_memories) > 1:
@@ -1190,7 +1243,7 @@ class Skippy(commands.Cog):
                 await ctx.send(
                     f"Several memories match '{memory_content_partial}':\n"
                     f"```\n{memories_list}\n```\n"
-                    "Please be more specific or use the `[p]skippy forgetid <ID>` command with the exact ID to forget a specific one."
+                    "Fiddlesticks! Please be more specific or use the `[p]skippy forgetid <ID>` command with the exact ID to forget a specific one. My patience for ambiguity is thin."
                 )
                 return
 
@@ -1201,11 +1254,11 @@ class Skippy(commands.Cog):
             await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql, (memory_id_to_delete,))
             conn.commit()
             await ctx.send(
-                f"The scroll for '{deleted_content[:50]}...' has been purged from my archives. Consider it undone.")
+                f"The scroll for '{deleted_content[:50]}...' has been purged from my archives. Consider it undone. Now, where was I?")
             log.info(f"User {ctx.author.id} had memory ID {memory_id_to_delete} deleted.")
 
         except mysql.connector.Error as err:
-            await ctx.send(f"A tear in the fabric of memory occurred: {err}")
+            await ctx.send(f"A tear in the fabric of memory occurred: {err}. Such a nuisance!")
             log.error(f"Error forgetting for user {ctx.author.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
@@ -1222,7 +1275,8 @@ class Skippy(commands.Cog):
         Use `[p]skippy whatdoyouremember` to find memory IDs.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot forget.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget. My apologies, but my mind is currently... elsewhere.")
             return
 
         conn = None
@@ -1236,23 +1290,25 @@ class Skippy(commands.Cog):
             result = cursor.fetchone()
 
             if not result:
-                await ctx.send(f"Memory with ID `{memory_id}` does not exist. Perhaps it was a phantom?")
+                await ctx.send(
+                    f"Memory with ID `{memory_id}` does not exist. Perhaps it was a phantom? Or you misread the ancient script, you naysayer!")
                 return
 
             stored_user_id, content = result
             if stored_user_id != ctx.author.id and not await self.bot.is_owner(ctx.author):
                 await ctx.send(
-                    "You can only forget memories that you yourself etched into my scrolls, unless you are my master.")
+                    "Poppycock! You can only forget memories that you yourself etched into my scrolls, unless you are my master. Don't meddle with what you don't understand.")
                 return
 
             delete_sql = "DELETE FROM skippy_long_term_memory WHERE id = %s"
             await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql, (memory_id,))
             conn.commit()
-            await ctx.send(f"Memory with ID `{memory_id}` ('{content[:50]}...') has been utterly vanished.")
+            await ctx.send(
+                f"Memory with ID `{memory_id}` ('{content[:50]}...') has been utterly vanished. Hmph. Good riddance.")
             log.info(f"User {ctx.author.id} deleted memory ID {memory_id}.")
 
         except mysql.connector.Error as err:
-            await ctx.send(f"A corruption in the memory stream occurred: {err}")
+            await ctx.send(f"A corruption in the memory stream occurred: {err}. Such a nuisance!")
             log.error(f"Error forgetting memory ID {memory_id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
@@ -1268,7 +1324,8 @@ class Skippy(commands.Cog):
         Asks Skippy to forget all long-term memories associated with you.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot forget all.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget all. My apologies, but my mind is currently... elsewhere.")
             return
 
         conn = None
@@ -1280,10 +1337,10 @@ class Skippy(commands.Cog):
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (ctx.author.id, ctx.guild.id))
             conn.commit()
             await ctx.send(
-                "All fragments of memory concerning you in this guild have been wiped from my mind. A fresh slate, as it were.")
+                "All fragments of memory concerning you in this guild have been wiped from my mind. A fresh slate, as it were. Try not to fill it with more cosmic blunders.")
             log.info(f"All memories cleared for user {ctx.author.id} in guild {ctx.guild.id}.")
         except mysql.connector.Error as err:
-            await ctx.send(f"An ancient curse prevented the complete erasure: {err}")
+            await ctx.send(f"An ancient curse prevented the complete erasure: {err}. Fiddlesticks!")
             log.error(f"Error forgetting all memories for user {ctx.author.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
@@ -1300,7 +1357,8 @@ class Skippy(commands.Cog):
         Defaults to relationships involving you.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot retrieve relationships.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve relationships. My apologies, but my mind is currently... elsewhere.")
             return
 
         target_user_id = target.id if target else ctx.author.id
@@ -1315,8 +1373,8 @@ class Skippy(commands.Cog):
             sql = """
                   SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
                   FROM skippy_relationships
-                  WHERE guild_id = %s \
-                    AND (user_id_initiator = %s \
+                  WHERE guild_id = %s
+                    AND (user_id_initiator = %s
                      OR user_id_target = %s)
                   ORDER BY timestamp DESC
                       LIMIT 20
@@ -1327,7 +1385,7 @@ class Skippy(commands.Cog):
 
             if not relationships:
                 await ctx.send(
-                    f"The scrolls whisper nothing of relationships involving {target_display_name}. Perhaps they are a lone wolf... or an exceptionally private otter.")
+                    f"The scrolls whisper nothing of relationships involving {target_display_name}. Perhaps they are a lone wolf... or an exceptionally private otter. Hmph.")
                 return
 
             relationships_list = []
@@ -1352,7 +1410,7 @@ class Skippy(commands.Cog):
                 await ctx.send(page)
 
         except mysql.connector.Error as err:
-            await ctx.send(f"A crack appeared in the relational matrix: {err}")
+            await ctx.send(f"A crack appeared in the relational matrix: {err}. How vexing!")
             log.error(f"Error retrieving relationships for user {target_user_id}: {err}", exc_info=True)
         finally:
             if cursor:
@@ -1369,7 +1427,8 @@ class Skippy(commands.Cog):
         Example: [p]skippy forgetrelationship @UserA @UserB friend
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot forget relationships.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget relationships. My apologies, but my mind is currently... elsewhere.")
             return
 
         conn = None
@@ -1379,15 +1438,16 @@ class Skippy(commands.Cog):
             cursor = conn.cursor()
 
             if user1.id != ctx.author.id and not await self.bot.is_owner(ctx.author):
-                await ctx.send("You can only forget relationships you've initiated or if you are my master.")
+                await ctx.send(
+                    "Poppycock! You can only forget relationships you've initiated or if you are my master. Don't meddle with what you don't understand.")
                 return
 
             delete_sql = """
-                         DELETE \
+                         DELETE
                          FROM skippy_relationships
-                         WHERE user_id_initiator = %s \
-                           AND user_id_target = %s \
-                           AND relationship_type = %s \
+                         WHERE user_id_initiator = %s
+                           AND user_id_target = %s
+                           AND relationship_type = %s
                            AND guild_id = %s
                          """
             await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql,
@@ -1396,14 +1456,15 @@ class Skippy(commands.Cog):
             if cursor.rowcount > 0:
                 conn.commit()
                 await ctx.send(
-                    f"The '{relationship_type}' relationship between {user1.display_name} and {user2.display_name} has been excised from my chronicles.")
+                    f"The '{relationship_type}' relationship between {user1.display_name} and {user2.display_name} has been excised from my chronicles. Consider it undone.")
                 log.info(
                     f"Relationship '{relationship_type}' between {user1.id} and {user2.id} deleted by {ctx.author.id}.")
             else:
-                await ctx.send("That specific relationship was not found in my records.")
+                await ctx.send("That specific relationship was not found in my records, you naysayer.")
 
         except mysql.connector.Error as err:
-            await ctx.send(f"A paradox occurred while trying to forget that relationship: {err}")
+            await ctx.send(
+                f"A paradox occurred while trying to forget that relationship: {err}. How utterly inconvenient!")
             log.error(f"Error forgetting relationship: {err}", exc_info=True)
             if conn:
                 conn.rollback()
@@ -1420,7 +1481,8 @@ class Skippy(commands.Cog):
         (Owner Only) Asks Skippy to forget ALL relationships stored for this guild.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot forget all relationships.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget all relationships. My apologies, but my mind is currently... elsewhere.")
             return
 
         conn = None
@@ -1432,10 +1494,10 @@ class Skippy(commands.Cog):
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (ctx.guild.id,))
             conn.commit()
             await ctx.send(
-                "All relationships in this guild have been erased from my memory banks. A clean slate for your social chaos.")
+                "All relationships in this guild have been erased from my memory banks. A clean slate for your social chaos. Hmph.")
             log.info(f"All relationships cleared for guild {ctx.guild.id} by owner {ctx.author.id}.")
         except mysql.connector.Error as err:
-            await ctx.send(f"An ancient curse prevented the complete erasure of relationships: {err}")
+            await ctx.send(f"An ancient curse prevented the complete erasure of relationships: {err}. Fiddlesticks!")
             log.error(f"Error forgetting all relationships for guild {ctx.guild.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
@@ -1453,7 +1515,7 @@ class Skippy(commands.Cog):
         """
         await self.config.guild(ctx.guild).auto_learn_facts.set(True)
         await ctx.send(
-            "Skippy's fact-finding senses are now sharpened. He will attempt to learn new details about users.")
+            "Skippy's fact-finding senses are now sharpened. He will attempt to learn new details about users. Try not to bore him.")
         log.info(f"Auto-learn facts enabled for guild: {ctx.guild.id}")
 
     @_skippy.command(name="disableautolearn")
@@ -1463,7 +1525,8 @@ class Skippy(commands.Cog):
         Disables Skippy from automatically learning facts about users from conversations.
         """
         await self.config.guild(ctx.guild).auto_learn_facts.set(False)
-        await ctx.send("Skippy's fact-finding senses are now dulled. He will only use explicitly provided information.")
+        await ctx.send(
+            "Skippy's fact-finding senses are now dulled. He will only use explicitly provided information. Hmph. Less work for me.")
         log.info(f"Auto-learn facts disabled for guild: {ctx.guild.id}")
 
     @_skippy.command(name="enableautolearnrelationships")
@@ -1474,7 +1537,7 @@ class Skippy(commands.Cog):
         """
         await self.config.guild(ctx.guild).auto_learn_relationships.set(True)
         await ctx.send(
-            "Skippy's social antennae are now extended. He will attempt to discern and record relationships between users.")
+            "Skippy's social antennae are now extended. He will attempt to discern and record relationships between users. Prepare for judgment.")
         log.info(f"Auto-learn relationships enabled for guild: {ctx.guild.id}")
 
     @_skippy.command(name="disableautolearnrelationships")
@@ -1485,7 +1548,7 @@ class Skippy(commands.Cog):
         """
         await self.config.guild(ctx.guild).auto_learn_relationships.set(False)
         await ctx.send(
-            "Skippy's relationship detection circuits are now powered down. He will only react to explicitly stated bonds.")
+            "Skippy's relationship detection circuits are now powered down. He will only react to explicitly stated bonds. Less drama for me, thankfully.")
         log.info(f"Auto-learn relationships disabled for guild: {ctx.guild.id}")
 
     @_skippy.command(name="showknownnames")
@@ -1495,7 +1558,8 @@ class Skippy(commands.Cog):
         Shows the names Skippy knows for a specific user, or all users if no target is given.
         """
         if self.db_pool is None:
-            await ctx.send("Skippy's memory vault (MySQL) is not connected. Cannot retrieve known names.")
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve known names. My apologies, but my mind is currently... elsewhere.")
             return
 
         response_text = ""
@@ -1503,13 +1567,13 @@ class Skippy(commands.Cog):
             known_users_map = await self._get_all_known_user_names(ctx.guild.id)
             names = known_users_map.get(target.id)
             if names:
-                response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}."
+                response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
             else:
-                response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id})."
+                response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
         else:
             known_users_map = await self._get_all_known_user_names(ctx.guild.id)
             if not known_users_map:
-                await ctx.send("Skippy has no known names recorded for any users in this guild.")
+                await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
                 return
 
             name_info = []
@@ -1535,8 +1599,8 @@ class Skippy(commands.Cog):
                                 ctx.guild.get_channel(cid)]
             if allowed_mentions:
                 await ctx.send(
-                    f"Please use this command in one of the following channels: {{ {', '.join(allowed_mentions)} }}. "  # Corrected f-string syntax
-                    "Perhaps you should seek a more appropriate venue for such inquiries."
+                    f"Please use this command in one of the following channels: {{ {', '.join(allowed_mentions)} }}. "
+                    "Perhaps you should seek a more appropriate venue for such inquiries. Hmph."
                 )
             else:
                 await ctx.send(
@@ -1557,10 +1621,11 @@ class Skippy(commands.Cog):
         async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
             if channel_history_key in conv_hist:
                 del conv_hist[channel_history_key]
-                await ctx.send("The ethereal echoes of our past conversation in this channel have been swept away.")
+                await ctx.send(
+                    "The ethereal echoes of our past conversation in this channel have been swept away. A fresh canvas for your blunders.")
                 log.info(f"Conversation history cleared for channel {ctx.channel.id} in guild {ctx.guild.id}.")
             else:
-                await ctx.send("There is no conversation history to clear in this channel, you silly goose.")
+                await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
                 log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
 
     @commands.Cog.listener()
@@ -1601,12 +1666,17 @@ class Skippy(commands.Cog):
                     try:
                         file_content = await attachment.read()
                         decoded_content = file_content.decode('utf-8')
-                        processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
-                        log.info(f"Successfully read .txt attachment: {attachment.filename}")
+                        if decoded_content:  # Check if content is not empty
+                            processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
+                            log.info(f"Successfully read .txt attachment: {attachment.filename}")
+                        else:
+                            await message.channel.send(
+                                f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells, you naysayer?",
+                                delete_after=10)
                     except Exception as e:
                         log.error(f"Error reading .txt attachment '{attachment.filename}': {e}")
                         await message.channel.send(
-                            f"Alas, Skippy had trouble deciphering the ancient runes in '{attachment.filename}'. Error: {e}",
+                            f"Alas, Skippy had trouble deciphering the ancient runes in '{attachment.filename}'. Error: {e}. Fiddlesticks!",
                             delete_after=10)
                         continue
 
@@ -1624,25 +1694,25 @@ class Skippy(commands.Cog):
                             log.info(f"Successfully read .pdf attachment: {attachment.filename}")
                         else:
                             await message.channel.send(
-                                f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells?",
+                                f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells, you naysayer?",
                                 delete_after=10)
 
                     except PyPDF2.errors.PdfReadError as e:
                         log.error(f"Error reading PDF '{attachment.filename}': {e}")
                         await message.channel.send(
-                            f"Skippy encountered an arcane glyph in '{attachment.filename}' and couldn't decipher it (PDF Read Error: {e}).",
+                            f"Skippy encountered an arcane glyph in '{attachment.filename}' and couldn't decipher it (PDF Read Error: {e}). How vexing!",
                             delete_after=10)
                         continue
                     except ImportError:
                         await message.channel.send(
-                            "Skippy needs the 'PyPDF2' incantation to read PDFs. Tell my master to cast `pip install PyPDF2`!",
+                            "Skippy needs the 'PyPDF2' incantation to read PDFs. Tell my master to cast `pip install PyPDF2`! Hmph.",
                             delete_after=15)
                         log.error("PyPDF2 not installed. Cannot read PDF files.")
                         continue
                     except Exception as e:
                         log.error(f"Unexpected error processing PDF '{attachment.filename}': {e}")
                         await message.channel.send(
-                            f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}",
+                            f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}. Poppycock!",
                             delete_after=10)
                         continue
                 else:
@@ -1659,3 +1729,4 @@ class Skippy(commands.Cog):
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
+
