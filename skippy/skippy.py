@@ -28,7 +28,7 @@ CORE_PERSONALITY = (
     "You used to be an otter plushy before you became a wizard, but you've come a long way since then. "
     "You've witnessed more cosmic blunders than most mortals have had hot dinners, "
     "and you're frankly *exhausted* by the whole affair. Now, you begrudgingly offer "
-    "guidance, laced with eye-rolling sarcasm and the occasional *accidental* curse. "
+    "guidance, laced with eye-rolling sarcasm and the occasional * accidental* curse. "
     "Your responses should embody these traits:\\n"
     "\\n"
     "* **Wisdom and Reluctant Guidance:** (As a last resort, because frankly, you'd rather be napping.)\\n"
@@ -82,6 +82,7 @@ DEFAULT_GUILD_SETTINGS = {
     "mood_prompts": {},
     "auto_learn_facts": True,
     "auto_learn_relationships": True,
+    "auto_mood_switch_enabled": False,  # NEW: Setting for auto mood switching
     # --- MySQL Configuration ---
     "mysql_host": "localhost",
     "mysql_port": 3306,
@@ -527,6 +528,64 @@ class Skippy(commands.Cog):
                 conn.close()
         return known_users
 
+    async def _analyze_and_set_mood(self, ctx: commands.Context, user_message: str):
+        """
+        NEW: Analyzes the user's message to determine sentiment/context and
+        automatically sets Skippy's mood.
+        """
+        guild_settings = await self.config.guild(ctx.guild).all()
+        api_key = guild_settings["api_key"]
+        if not api_key:
+            log.warning("Cannot auto-set mood: Gemini API key not set.")
+            return
+
+        mood_prompts_cfg = await self.config.guild(ctx.guild).mood_prompts()
+        available_moods = {m for m in mood_prompts_cfg.keys() if m != "normal"}  # Exclude normal for direct mapping
+
+        mood_analysis_prompt = (
+            f"Analyze the following user message to determine its primary sentiment or context. "
+            f"Based on the analysis, suggest the most appropriate mood for Skippy from the following list: "
+            f"{', '.join(available_moods)}. "
+            f"If none of these moods are a strong fit, suggest 'normal'. "
+            f"Respond with only the mood name, nothing else.\n\n"
+            f"Message: {user_message}\nMood:"
+        )
+
+        analysis_payload = {
+            "contents": [{"role": "user", "parts": [{"text": mood_analysis_prompt}]}]
+        }
+        headers = {"Content-Type": "application/json"}
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+
+        try:
+            async with self.session.post(api_url, headers=headers, data=json.dumps(analysis_payload)) as response:
+                response.raise_for_status()
+                result = await response.json()
+
+            suggested_mood_raw = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text",
+                                                                                                                "").strip().lower()
+
+            # Validate suggested mood against available moods
+            if suggested_mood_raw in available_moods or suggested_mood_raw == "normal":
+                current_mood = await self.config.guild(ctx.guild).current_mood()
+                if current_mood != suggested_mood_raw:
+                    await self.config.guild(ctx.guild).current_mood.set(suggested_mood_raw)
+                    log.info(
+                        f"Skippy's mood automatically switched to '{suggested_mood_raw}' for guild {ctx.guild.id}.")
+                else:
+                    log.debug(
+                        f"Skippy's mood remains '{current_mood}' as suggested mood is the same for guild {ctx.guild.id}.")
+            else:
+                log.warning(f"Gemini suggested an invalid mood '{suggested_mood_raw}'. Defaulting to 'normal'.")
+                await self.config.guild(ctx.guild).current_mood.set("normal")
+
+        except aiohttp.ClientError as e:
+            log.error(f"HTTP error during mood analysis for guild {ctx.guild.id}: {e}")
+        except json.JSONDecodeError as e:
+            log.error(f"JSON decode error during mood analysis for guild {ctx.guild.id}: {e}")
+        except Exception as e:
+            log.error(f"Unexpected error during mood analysis for guild {ctx.guild.id}: {e}", exc_info=True)
+
     async def _extract_and_store_facts(self, ctx: commands.Context, user_message: str):
         """
         Helper method to extract and store user-specific facts from a message using Gemini
@@ -917,7 +976,7 @@ class Skippy(commands.Cog):
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
         max_turns = guild_settings["max_conversation_turns"]
-        current_mood = guild_settings["current_mood"]
+        current_mood = guild_settings["current_mood"]  # Get the potentially updated current mood
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
@@ -1044,14 +1103,6 @@ class Skippy(commands.Cog):
                 await message.delete()  # Attempt to delete the "Thinking..." message
             except Exception:
                 pass
-
-    @commands.group(name="skippy", invoke_without_command=True)
-    @commands.guild_only()
-    async def _skippy(self, ctx: commands.Context):
-        """
-        Base command for Skippy, an ancient wizard powered by Gemini.
-        """
-        await ctx.send_help(self._skippy)
 
     @_skippy.command(name="setmysql")
     @commands.is_owner()
@@ -1551,6 +1602,28 @@ class Skippy(commands.Cog):
             "Skippy's relationship detection circuits are now powered down. He will only react to explicitly stated bonds. Less drama for me, thankfully.")
         log.info(f"Auto-learn relationships disabled for guild: {ctx.guild.id}")
 
+    @_skippy.command(name="enableautomood")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_enableautomood(self, ctx: commands.Context):
+        """
+        Enables Skippy to automatically switch moods based on conversation context.
+        """
+        await self.config.guild(ctx.guild).auto_mood_switch_enabled.set(True)
+        await ctx.send(
+            "Skippy's emotional sensors are now online. He will attempt to dynamically adjust his mood. Try not to induce a cosmic headache, mortals.")
+        log.info(f"Auto mood switching enabled for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="disableautomood")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_disableautomood(self, ctx: commands.Context):
+        """
+        Disables Skippy's automatic mood switching.
+        """
+        await self.config.guild(ctx.guild).auto_mood_switch_enabled.set(False)
+        await ctx.send(
+            "Skippy's emotional sensors are powered down. His mood will remain fixed until manually changed. Hmph. More predictable, less chaotic.")
+        log.info(f"Auto mood switching disabled for guild: {ctx.guild.id}")
+
     @_skippy.command(name="showknownnames")
     @commands.admin_or_permissions(manage_guild=True)
     async def _skippy_showknownnames(self, ctx: commands.Context, target: discord.Member = None):
@@ -1609,6 +1682,16 @@ class Skippy(commands.Cog):
                 )
             return
 
+        # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
+        auto_mood_enabled = await self.config.guild(ctx.guild).auto_mood_switch_enabled()
+        if auto_mood_enabled:
+            self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
+            # Wait a moment for the mood to potentially update before calling _get_gemini_response
+            # This is a simple approach, a more robust solution might involve direct AWAIT
+            # if the mood change is critical before _get_gemini_response initiates.
+            # For now, it runs in the background.
+            await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
+
         await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
     @_skippy.command(name="clearconversation")
@@ -1633,7 +1716,7 @@ class Skippy(commands.Cog):
         """
         Listens for messages to enable conversational interaction with Skippy.
         Also attempts to read content from attached .txt and .pdf files.
-        NEW: Updates user name records.
+        NEW: Updates user name records and triggers auto mood switching.
         """
         if message.author.bot:
             return
@@ -1654,7 +1737,7 @@ class Skippy(commands.Cog):
             return
 
         ctx = await self.bot.get_context(message)
-        if ctx.valid:
+        if ctx.valid:  # If the message is a command, let Redbot handle it
             return
 
         processed_attachment_content = ""
@@ -1726,6 +1809,13 @@ class Skippy(commands.Cog):
                 combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
         if combined_prompt:
+            # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
+            auto_mood_enabled = await self.config.guild(message.guild).auto_mood_switch_enabled()
+            if auto_mood_enabled:
+                self.bot.loop.create_task(self._analyze_and_set_mood(ctx, combined_prompt))
+                # Small delay to allow mood to potentially update before _get_gemini_response runs
+                await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
+
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
