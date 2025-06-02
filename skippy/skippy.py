@@ -1104,6 +1104,15 @@ class Skippy(commands.Cog):
             except Exception:
                 pass
 
+    # Moved _skippy command group definition here, before its subcommands
+    @commands.group(name="skippy", invoke_without_command=True)
+    @commands.guild_only()
+    async def _skippy(self, ctx: commands.Context):
+        """
+        Base command for Skippy, an ancient wizard powered by Gemini.
+        """
+        await ctx.send_help(self._skippy)
+
     @_skippy.command(name="setmysql")
     @commands.is_owner()
     async def _skippy_setmysql(self, ctx: commands.Context, host: str, user: str, password: str, database: str,
@@ -1819,4 +1828,3 @@ class Skippy(commands.Cog):
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-
