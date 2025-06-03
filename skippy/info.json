@@ -3,10 +3,10 @@
   "short": "An ancient otter wizard powered by Gemini.",
   "description": "A Redbot cog to interact with the Gemini API, embodying Skippy, a wise and world-weary otter wizard, with dynamic moods and long-term memory via MySQL.",
   "end_user_data_statement": "This cog stores user IDs, guild IDs, and conversation history for the purpose of maintaining context and personalized responses. It also stores user-specific facts in a MySQL database for long-term memory. All data can be deleted upon user request.",
-  "min_python_version": [3, 9, 0], // <--- CORRECTED
+  "min_python_version": [3, 9, 0],
   "min_red_version": "3.5.0",
   "max_red_version": "3.6.0",
   "tags": ["ai", "gemini", "chatbot", "memory", "mysql", "personality"],
-  "authors": ["Your Name"],
-  "requirements": ["aiohttp", "mysql-connector-python"]
+  "authors": ["Malvinarum"],
+  "requirements": ["aiohttp", "mysql-connector-python", "sentence-transformers", "PyPDF2"]
 }
