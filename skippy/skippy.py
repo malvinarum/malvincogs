@@ -78,7 +78,7 @@ DEFAULT_GUILD_SETTINGS = {
     "auto_learn_facts": True,
     "auto_learn_relationships": True,
     "auto_mood_switch_enabled": False,
-    "soft_max_reply_sentences": 5,  # NEW: Default soft limit for replies
+    "soft_max_reply_sentences": 5,  # Default soft limit for replies
     # --- MySQL Configuration ---
     "mysql_host": "localhost",
     "mysql_port": 3306,
@@ -140,7 +140,7 @@ class Skippy(commands.Cog):
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_relationships, (user_id, user_id))
             log.info(f"Deleted all relationships involving user {user_id} from MySQL.")
 
-            # NEW: Delete user names
+            # Delete user names
             sql_user_names = "DELETE FROM skippy_user_names WHERE user_id = %s"
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_user_names, (user_id,))
             log.info(f"Deleted all user name records for user {user_id} from MySQL.")
@@ -170,6 +170,7 @@ class Skippy(commands.Cog):
     async def cog_load(self):
         """
         Called when the cog is loaded. Ensures hardcoded moods are always present in guild config.
+        Also initializes the MySQL connection pool.
         """
         log.info("Skippy cog loading...")
         for guild in self.bot.guilds:
@@ -177,24 +178,35 @@ class Skippy(commands.Cog):
                 for mood_name, prompt_text in MOOD_PROMPTS.items():
                     if mood_name not in mood_prompts_cfg or mood_name == "normal":
                         mood_prompts_cfg[mood_name] = prompt_text
+
+        # NEW: Initialize DB pool when cog loads
+        await self._init_db_pool()
+
         log.info("Skippy cog loaded.")
 
     @commands.Cog.listener()
     async def on_ready(self):
         """
         Called when the bot is fully ready and connected to Discord.
-        Initializes the MySQL connection pool if it hasn't been already.
+        This listener is primarily for initial setup, but cog_load now handles DB init.
         """
-        if self.db_pool is None:
-            log.info("Bot is ready. Attempting to initialize MySQL pool.")
-            await self._init_db_pool()
+        # Removed _init_db_pool call here, as cog_load now handles it.
+        pass
 
     async def _init_db_pool(self):
         """
         Initializes the MySQL connection pool and ensures tables exist.
         Also adds necessary indexes for performance.
+        Ensures any existing pool is closed before creating a new one.
         """
         log.info("Attempting to initialize MySQL pool...")
+
+        # NEW: Close existing pool if it exists
+        if self.db_pool:
+            log.info("Closing existing MySQL connection pool before re-initialization.")
+            self.db_pool.close()
+            self.db_pool = None
+
         host, port, user, password, database = None, None, None, None, None
 
         if self.bot.guilds:
@@ -354,7 +366,7 @@ class Skippy(commands.Cog):
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_users_index_sql)
                 log.info("MySQL indexes for 'skippy_relationships' ensured to exist.")
 
-                # NEW: Create skippy_user_names table
+                # Create skippy_user_names table
                 create_user_names_table_sql = """
                                               CREATE TABLE IF NOT EXISTS skippy_user_names
                                               (
@@ -413,7 +425,7 @@ class Skippy(commands.Cog):
 
     async def _update_user_name_record(self, member: discord.Member):
         """
-        NEW: Updates or creates a record for a user's name(s) in the skippy_user_names table.
+        Updates or creates a record for a user's name(s) in the skippy_user_names table.
         This function now uses a set to manage known names, preventing duplicates and
         ensuring the current display name is handled correctly.
         """
@@ -483,7 +495,7 @@ class Skippy(commands.Cog):
 
     async def _get_all_known_user_names(self, guild_id: int) -> dict:
         """
-        NEW: Retrieves all known user names and their IDs for a given guild.
+        Retrieves all known user names and their IDs for a given guild.
         Returns a dictionary mapping user_id to a list of their known names.
         Example: {123: ["John", "Johnny"], 456: ["Jane"]}
         """
@@ -526,7 +538,7 @@ class Skippy(commands.Cog):
 
     async def _analyze_and_set_mood(self, ctx: commands.Context, user_message: str):
         """
-        NEW: Analyzes the user's message to determine sentiment/context and
+        Analyzes the user's message to determine sentiment/context and
         automatically sets Skippy's mood.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
@@ -672,7 +684,7 @@ class Skippy(commands.Cog):
 
     async def _extract_and_store_relationships(self, ctx: commands.Context, user_message: str, mentioned_users: list):
         """
-        NEW: Helper method to extract and store relationships between users from a message using Gemini.
+        Helper method to extract and store relationships between users from a message using Gemini.
         It now provides Gemini with known user names for better ID resolution.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
@@ -1213,7 +1225,7 @@ class Skippy(commands.Cog):
                 conn.rollback()
         except Exception as e:
             await ctx.send(
-                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
+                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the starsimonials align? Error: {e}")
             log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
@@ -1669,7 +1681,7 @@ class Skippy(commands.Cog):
             else:
                 response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
         else:
-            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+            known_users_map = await self._get_all_user_names(ctx.guild.id)  # Changed to _get_all_user_names
             if not known_users_map:
                 await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
                 return
@@ -1711,6 +1723,26 @@ class Skippy(commands.Cog):
         if auto_mood_enabled:
             self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
             await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
+
+        # IMPORTANT: Fix for image_attachments_data not being defined
+        image_attachments_data = []  # Initialize here to ensure it's always defined
+        if ctx.message.attachments:
+            for attachment in ctx.message.attachments:
+                mime_type = attachment.content_type
+                if mime_type and mime_type.startswith("image/"):
+                    try:
+                        image_bytes = await attachment.read()
+                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+                        image_attachments_data.append({
+                            "mime_type": mime_type,
+                            "data": base64_image
+                        })
+                    except Exception as e:
+                        log.error(f"Error processing image attachment '{attachment.filename}': {e}")
+                        await ctx.send(
+                            f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
+                            delete_after=10)
+                        continue
 
         await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions,
                                         image_parts_data=image_attachments_data)
@@ -1864,7 +1896,7 @@ class Skippy(commands.Cog):
         """
         Listens for messages to enable conversational interaction with Skippy.
         Also attempts to read content from attached .txt and .pdf files.
-        NEW: Now processes image attachments and sends them to Gemini for analysis.
+        Processes image attachments and sends them to Gemini for analysis.
         Updates user name records and triggers auto mood switching.
         """
         if message.author.bot:
