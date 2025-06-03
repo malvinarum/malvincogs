@@ -848,7 +848,7 @@ class Skippy(commands.Cog):
 
             memories_raw = cursor.fetchall()
 
-            if not memories_raw:  # Changed from 'memories' to 'memories_raw'
+            if not memories_raw:
                 return ""
 
             scored_memories = []
@@ -976,7 +976,7 @@ class Skippy(commands.Cog):
         max_turns = guild_settings["max_conversation_turns"]
         current_mood = guild_settings["current_mood"]
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
-        soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]  # NEW: Get soft limit
+        soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
         actual_personality_prompt = core_personality_prompt
@@ -990,7 +990,6 @@ class Skippy(commands.Cog):
                     f"{chosen_mood_prompt}"
                 )
 
-        # NEW: Add instruction for soft reply limit to the personality prompt
         actual_personality_prompt += (
             f"\n\nKeep your responses concise, ideally no more than {soft_max_reply_sentences} sentences. "
             "Prioritize brevity and directness while maintaining your persona."
@@ -1053,7 +1052,6 @@ class Skippy(commands.Cog):
 
         payload = {
             "contents": payload_contents,
-            # Removed "generationConfig": {"max_output_tokens": 150} for soft limit
         }
         headers = {
             "Content-Type": "application/json"
@@ -1714,7 +1712,8 @@ class Skippy(commands.Cog):
             self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
             await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
+        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions,
+                                        image_parts_data=image_attachments_data)
 
     @_skippy.command(name="clearconversation")
     @commands.admin_or_permissions(manage_channels=True)
@@ -1836,6 +1835,29 @@ class Skippy(commands.Cog):
                 log.info(f"Custom mood prompt '{mood_name.lower()}' removed for guild: {ctx.guild.id}")
             else:
                 await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
+
+    @_skippy.command(name="setsoftreplylimit")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_setsoftreplylimit(self, ctx: commands.Context, sentences: int):
+        """
+        Sets the soft limit for Skippy's replies in sentences.
+        Skippy will try to keep his responses to this many sentences.
+        """
+        if sentences <= 0:
+            await ctx.send("The soft reply limit must be a positive integer. Even my patience has limits, wot not?")
+            return
+        await self.config.guild(ctx.guild).soft_max_reply_sentences.set(sentences)
+        await ctx.send(f"Skippy's replies will now aim for a soft limit of {sentences} sentences. Prepare for brevity!")
+        log.info(f"Soft reply limit set to {sentences} sentences for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="showsoftreplylimit")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showsoftreplylimit(self, ctx: commands.Context):
+        """
+        Shows the current soft limit for Skippy's replies in sentences.
+        """
+        soft_limit = await self.config.guild(ctx.guild).soft_max_reply_sentences()
+        await ctx.send(f"Skippy is currently aiming for replies of approximately {soft_limit} sentences.")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
