@@ -406,9 +406,19 @@ class Skippy(commands.Cog):
             self.db_pool = None
 
     async def _get_db_connection(self):
-        """Retrieves a connection from the pool, ensuring it's done asynchronously."""
+        """
+        Retrieves a connection from the pool, ensuring it's done asynchronously.
+        Attempts to initialize the pool if it's not already initialized.
+        """
         if self.db_pool is None:
-            raise RuntimeError("MySQL database pool is not initialized. Cannot get a connection.")
+            log.info("Database pool not initialized. Attempting to initialize now.")
+            await self._init_db_pool()  # Attempt to initialize
+
+        if self.db_pool is None:
+            # If after attempting initialization, it's still None, then initialization failed.
+            raise RuntimeError(
+                "MySQL database pool is not initialized and failed to initialize on demand. Cannot get a connection.")
+
         return await self.bot.loop.run_in_executor(None, self.db_pool.get_connection)
 
     async def _get_embeddings(self, text: str) -> np.ndarray:
@@ -1014,7 +1024,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "Poppycock! The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key}>`."
             )
             return None
 
@@ -1354,6 +1364,10 @@ class Skippy(commands.Cog):
             log.error(f"Error forgetting for user {ctx.author.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
+        except Exception as e:
+            await ctx.send(
+                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
+            log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
                 cursor.close()
