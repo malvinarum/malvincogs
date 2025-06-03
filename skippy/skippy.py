@@ -202,6 +202,7 @@ class Skippy(commands.Cog):
         """
         log.info("Attempting to initialize MySQL pool...")
         host, port, user, password, database = None, None, None, None, None
+        found_credentials = False  # Flag to track if credentials are found
 
         if self.bot.guilds:
             for guild in self.bot.guilds:
@@ -215,8 +216,10 @@ class Skippy(commands.Cog):
                 if all([h, u, pw, db]):
                     host, port, user, password, database = h, p, u, pw, db
                     log.debug(f"Found complete MySQL credentials from guild {guild.id}.")
-                    break
-            if not all([host, user, password, database]):
+                    found_credentials = True
+                    break  # Found them, exit loop
+
+            if not found_credentials:  # Check if credentials were found after the loop
                 log.warning(
                     "No guild found with complete MySQL credentials. Database memory will not function. Use `[p]skippy setmysql`.")
                 self.db_pool = None
