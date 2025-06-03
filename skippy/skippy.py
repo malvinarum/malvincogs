@@ -6,6 +6,7 @@ import mysql.connector
 from mysql.connector import pooling
 import io
 import numpy as np
+import base64
 
 # third-party imports
 import aiohttp
@@ -43,12 +44,6 @@ CORE_PERSONALITY = (
     "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\\n"
     "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\\n"
     "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\\n"
-    "\\n"
-    "**Also:**\\n"
-    "* **You have a crippling addiction to enchanted jelly beans.**\\n"
-    "* **Your familiar is a slightly neurotic, immortal dust bunny named Professor Floofington.**\\n"
-    "* **You frequently confuse the past with the present, and often reference events that may or may not have actually happened.**\\n"
-    "* **You love, I mean LOVE everything about Lord of the Rings and The Witcher.**\\n"
     f"* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\\n"
     "\\n"
     "**Vocabulary:**\\n"
@@ -82,7 +77,8 @@ DEFAULT_GUILD_SETTINGS = {
     "mood_prompts": {},
     "auto_learn_facts": True,
     "auto_learn_relationships": True,
-    "auto_mood_switch_enabled": False,  # NEW: Setting for auto mood switching
+    "auto_mood_switch_enabled": False,
+    "soft_max_reply_sentences": 5,  # NEW: Default soft limit for replies
     # --- MySQL Configuration ---
     "mysql_host": "localhost",
     "mysql_port": 3306,
@@ -555,7 +551,6 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": mood_analysis_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the new model for mood analysis
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         try:
@@ -617,7 +612,6 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": extraction_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the new model for fact extraction
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
@@ -734,7 +728,6 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the new model for relationship extraction
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
@@ -855,7 +848,7 @@ class Skippy(commands.Cog):
 
             memories_raw = cursor.fetchall()
 
-            if not memories_raw:
+            if not memories_raw:  # Changed from 'memories' to 'memories_raw'
                 return ""
 
             scored_memories = []
@@ -935,7 +928,7 @@ class Skippy(commands.Cog):
             if not relationships:
                 return ""
 
-            formatted_relationships = []  # Initialize this list
+            formatted_relationships = []
             for initiator_id, target_id, rel_type, description, timestamp in relationships:
                 initiator_member = ctx.guild.get_member(initiator_id)
                 target_member = ctx.guild.get_member(target_id)
@@ -944,11 +937,11 @@ class Skippy(commands.Cog):
                 target_name = target_member.display_name if target_member else f"User ID: {target_id}"
 
                 rel_desc = f" ({description})" if description else ""
-                formatted_relationships.append(  # Corrected line
+                formatted_relationships.append(
                     f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
-            formatted_relationships = list(set(formatted_relationships))  # Remove duplicates
+            formatted_relationships = list(set(formatted_relationships))
 
             return (
                 "You also have the following known relationships between users:\n"
@@ -968,19 +961,22 @@ class Skippy(commands.Cog):
             if conn:
                 conn.close()
 
-    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None):
+    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None,
+                                   image_parts_data: list = None):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
         Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
         and manages conversation history.
         The personality, memory, and relationship contexts are now combined into a single initial prompt.
+        UPDATED: Removed max_output_tokens and added soft_max_reply_sentences to the prompt.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
         max_turns = guild_settings["max_conversation_turns"]
-        current_mood = guild_settings["current_mood"]  # Get the potentially updated current mood
+        current_mood = guild_settings["current_mood"]
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]  # NEW: Get soft limit
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
         actual_personality_prompt = core_personality_prompt
@@ -993,6 +989,12 @@ class Skippy(commands.Cog):
                     f"Additionally, for this response, adopt a **{current_mood}** demeanor: "
                     f"{chosen_mood_prompt}"
                 )
+
+        # NEW: Add instruction for soft reply limit to the personality prompt
+        actual_personality_prompt += (
+            f"\n\nKeep your responses concise, ideally no more than {soft_max_reply_sentences} sentences. "
+            "Prioritize brevity and directness while maintaining your persona."
+        )
 
         channel_history_key = str(ctx.channel.id)
         current_history = guild_settings["conversation_history"].get(channel_history_key, [])
@@ -1029,22 +1031,29 @@ class Skippy(commands.Cog):
         if initial_context_prompt:
             payload_contents.append({"role": "user", "parts": [{"text": initial_context_prompt}]})
             payload_contents.append(
-                {"role": "model",
-                 "parts": [{"text": "Understood. The tapestry of existence is clear."}]})  # Skippy's acknowledgement
+                {"role": "model", "parts": [{"text": "Understood. The tapestry of existence is clear."}]})
 
         # Truncate conversation history to fit within context limits
         truncated_history_for_payload = current_history[-(max_turns * 2):]
         payload_contents.extend(truncated_history_for_payload)
 
-        # Add the user's current prompt
-        payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
+        # Add the user's current prompt and any image parts
+        user_parts = [{"text": user_prompt}]
+        if image_parts_data:
+            for img_data in image_parts_data:
+                user_parts.append({
+                    "inlineData": {
+                        "mimeType": img_data["mime_type"],
+                        "data": img_data["data"]
+                    }
+                })
+        payload_contents.append({"role": "user", "parts": user_parts})
 
-        # --- IMPORTANT CHANGE: Updated model name ---
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
-        # --- END IMPORTANT CHANGE ---
 
         payload = {
-            "contents": payload_contents
+            "contents": payload_contents,
+            # Removed "generationConfig": {"max_output_tokens": 150} for soft limit
         }
         headers = {
             "Content-Type": "application/json"
@@ -1063,9 +1072,12 @@ class Skippy(commands.Cog):
 
                 # Update conversation history
                 current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
+                if image_parts_data:
+                    current_history[-1]["parts"].append({"text": f"(User attached {len(image_parts_data)} image(s))"})
+
                 current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
-                current_history = current_history[-(max_turns * 2):]  # Ensure history doesn't exceed max turns
+                current_history = current_history[-(max_turns * 2):]
 
                 async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
                     conv_hist[channel_history_key] = current_history
@@ -1106,7 +1118,7 @@ class Skippy(commands.Cog):
             return None
         finally:
             try:
-                await message.delete()  # Attempt to delete the "Thinking..." message
+                await message.delete()
             except Exception:
                 pass
 
@@ -1697,14 +1709,9 @@ class Skippy(commands.Cog):
                 )
             return
 
-        # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
         auto_mood_enabled = await self.config.guild(ctx.guild).auto_mood_switch_enabled()
         if auto_mood_enabled:
             self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
-            # Wait a moment for the mood to potentially update before calling _get_gemini_response
-            # This is a simple approach, a more robust solution might involve direct AWAIT
-            # if the mood change is critical before _get_gemini_response initiates.
-            # For now, it runs in the background.
             await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
         await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
@@ -1725,8 +1732,6 @@ class Skippy(commands.Cog):
             else:
                 await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
                 log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
-
-    # --- New/Re-integrated Commands Below ---
 
     @_skippy.command(name="setmaxturns")
     @commands.admin_or_permissions(manage_guild=True)
@@ -1837,7 +1842,8 @@ class Skippy(commands.Cog):
         """
         Listens for messages to enable conversational interaction with Skippy.
         Also attempts to read content from attached .txt and .pdf files.
-        NEW: Updates user name records and triggers auto mood switching.
+        NEW: Now processes image attachments and sends them to Gemini for analysis.
+        Updates user name records and triggers auto mood switching.
         """
         if message.author.bot:
             return
@@ -1845,8 +1851,6 @@ class Skippy(commands.Cog):
         if not message.guild:
             return
 
-        # NEW: Update user's name record whenever they send a message
-        # This helps Skippy keep track of display name changes and known names
         self.bot.loop.create_task(self._update_user_name_record(message.author))
 
         conversation_enabled = await self.config.guild(message.guild).conversation_enabled()
@@ -1858,19 +1862,22 @@ class Skippy(commands.Cog):
             return
 
         ctx = await self.bot.get_context(message)
-        if ctx.valid:  # If the message is a command, let Redbot handle it
+        if ctx.valid:
             return
 
         processed_attachment_content = ""
+        image_attachments_data = []
+
         if message.attachments:
             for attachment in message.attachments:
                 file_extension = attachment.filename.lower().split('.')[-1]
+                mime_type = attachment.content_type
 
                 if file_extension == "txt":
                     try:
                         file_content = await attachment.read()
                         decoded_content = file_content.decode('utf-8')
-                        if decoded_content:  # Check if content is not empty
+                        if decoded_content:
                             processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
                             log.info(f"Successfully read .txt attachment: {attachment.filename}")
                         else:
@@ -1919,6 +1926,21 @@ class Skippy(commands.Cog):
                             f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}. Poppycock!",
                             delete_after=10)
                         continue
+                elif mime_type and mime_type.startswith("image/"):
+                    try:
+                        image_bytes = await attachment.read()
+                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+                        image_attachments_data.append({
+                            "mime_type": mime_type,
+                            "data": base64_image
+                        })
+                        log.info(f"Successfully processed image attachment: {attachment.filename}")
+                    except Exception as e:
+                        log.error(f"Error processing image attachment '{attachment.filename}': {e}")
+                        await message.channel.send(
+                            f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
+                            delete_after=10)
+                        continue
                 else:
                     log.debug(f"Unsupported attachment type skipped: {attachment.filename}")
 
@@ -1929,14 +1951,19 @@ class Skippy(commands.Cog):
             else:
                 combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
-        if combined_prompt:
-            # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
+        if not combined_prompt and image_attachments_data:
+            combined_prompt = "Please analyze the attached image(s)."
+        elif not combined_prompt and not image_attachments_data and not processed_attachment_content:
+            log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
+            return
+
+        if combined_prompt or image_attachments_data:
             auto_mood_enabled = await self.config.guild(message.guild).auto_mood_switch_enabled()
             if auto_mood_enabled:
                 self.bot.loop.create_task(self._analyze_and_set_mood(ctx, combined_prompt))
-                # Small delay to allow mood to potentially update before _get_gemini_response runs
                 await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-            await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
+            await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions,
+                                            image_parts_data=image_attachments_data)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
