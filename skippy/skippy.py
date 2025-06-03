@@ -202,30 +202,27 @@ class Skippy(commands.Cog):
         """
         log.info("Attempting to initialize MySQL pool...")
         host, port, user, password, database = None, None, None, None, None
-        found_credentials = False  # Flag to track if credentials are found
 
-        if self.bot.guilds:
-            for guild in self.bot.guilds:
-                guild_settings = await self.config.guild(guild).all()
-                h = guild_settings.get("mysql_host")
-                p = guild_settings.get("mysql_port")
-                u = guild_settings.get("mysql_user")
-                pw = guild_settings.get("mysql_password")
-                db = guild_settings.get("mysql_database")
+        # Get all guild settings from config to find credentials
+        all_guild_settings = await self.config.all_guild_settings()
 
-                if all([h, u, pw, db]):
-                    host, port, user, password, database = h, p, u, pw, db
-                    log.debug(f"Found complete MySQL credentials from guild {guild.id}.")
-                    found_credentials = True
-                    break  # Found them, exit loop
+        found_credentials = False
+        for guild_id, guild_settings in all_guild_settings.items():
+            h = guild_settings.get("mysql_host")
+            p = guild_settings.get("mysql_port")
+            u = guild_settings.get("mysql_user")
+            pw = guild_settings.get("mysql_password")
+            db = guild_settings.get("mysql_database")
 
-            if not found_credentials:  # Check if credentials were found after the loop
-                log.warning(
-                    "No guild found with complete MySQL credentials. Database memory will not function. Use `[p]skippy setmysql`.")
-                self.db_pool = None
-                return
-        else:
-            log.warning("No guilds available yet. Cannot initialize MySQL pool. Database memory will not function.")
+            if all([h, u, pw, db]):
+                host, port, user, password, database = h, p, u, pw, db
+                log.debug(f"Found complete MySQL credentials from guild ID {guild_id}.")
+                found_credentials = True
+                break
+
+        if not found_credentials:
+            log.warning(
+                "No guild found with complete MySQL credentials. Database memory will not function. Use `[p]skippy setmysql`.")
             self.db_pool = None
             return
 
@@ -1277,16 +1274,15 @@ class Skippy(commands.Cog):
                 memories_list_str.append(
                     f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d %H:%M:%S')})")
 
-            # Combine all memories into a single string for pagination
-            # Removed the triple backticks from here
-            full_response_text = (
+            # Combine all memories into a single string for pagination, including the header
+            content_to_paginate = (
                     f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
                     + "\n".join(memories_list_str)
             )
 
             # Paginate the content and send it using Redbot's menu system
-            # Added triple backticks around each page
-            pages = [f"```\n{p}\n```" for p in pagify(full_response_text, delims=["\n"], escape_mass_mentions=True)]
+            # Each page will be wrapped in triple backticks
+            pages = [f"```\n{p}\n```" for p in pagify(content_to_paginate, delims=["\n"], escape_mass_mentions=True)]
             await menu(ctx, pages)
 
         except mysql.connector.Error as err:
