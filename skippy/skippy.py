@@ -204,7 +204,8 @@ class Skippy(commands.Cog):
         host, port, user, password, database = None, None, None, None, None
 
         # Get all guild settings from config to find credentials
-        all_guild_settings = await self.config.all_guild_settings()
+        # Corrected: Using .all_guilds() which returns a dict of dicts (guild_id: settings_dict)
+        all_guild_settings = await self.config.all_guilds()
 
         found_credentials = False
         for guild_id, guild_settings in all_guild_settings.items():
@@ -1250,19 +1251,16 @@ class Skippy(commands.Cog):
         Defaults to memories about yourself.
         Now shows all memories in a paginated format.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories. My apologies, but my mind is currently... elsewhere.")
-            return
-
-        target_user_id = target.id if target else ctx.author.id
-        target_display_name = target.display_name if target else ctx.author.display_name
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
+
+            target_user_id = target.id if target else ctx.author.id
+            target_display_name = target.display_name if target else ctx.author.display_name
+
             # Removed LIMIT 50 to fetch all memories
             sql = """
                   SELECT id, content, timestamp
@@ -1295,6 +1293,10 @@ class Skippy(commands.Cog):
             pages = [f"```\n{p}\n```" for p in pagify(content_to_paginate, delims=["\n"], escape_mass_mentions=True)]
             await menu(ctx, pages)
 
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in whatdoyouremember: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A ripple in the memory currents prevented recall: {err}. Such a nuisance!")
             log.error(f"Error retrieving memories for user {target_user_id}: {err}", exc_info=True)
@@ -1311,11 +1313,7 @@ class Skippy(commands.Cog):
         Provide a unique phrase from the memory. Skippy will forget all memories matching that phrase.
         Use `whatdoyouremember` to see the full memory content if needed.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot forget. My apologies, but my mind is currently... elsewhere.")
-            return
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
@@ -1359,6 +1357,10 @@ class Skippy(commands.Cog):
                 f"The scroll for '{deleted_content[:50]}...' has been purged from my archives. Consider it undone. Now, where was I?")
             log.info(f"User {ctx.author.id} had memory ID {memory_id_to_delete} deleted.")
 
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in forget: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A tear in the fabric of memory occurred: {err}. Such a nuisance!")
             log.error(f"Error forgetting for user {ctx.author.id}: {err}", exc_info=True)
@@ -1367,7 +1369,7 @@ class Skippy(commands.Cog):
         except Exception as e:
             await ctx.send(
                 f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
-            log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
+            log.error(f"Unexpected error during forget command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
                 cursor.close()
@@ -1380,11 +1382,7 @@ class Skippy(commands.Cog):
         Forgets a specific long-term memory by its exact ID.
         Use `[p]skippy whatdoyouremember` to find memory IDs.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot forget. My apologies, but my mind is currently... elsewhere.")
-            return
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
@@ -1413,6 +1411,10 @@ class Skippy(commands.Cog):
                 f"Memory with ID `{memory_id}` ('{content[:50]}...') has been utterly vanished. Hmph. Good riddance.")
             log.info(f"User {ctx.author.id} deleted memory ID {memory_id}.")
 
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in forgetid: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A corruption in the memory stream occurred: {err}. Such a nuisance!")
             log.error(f"Error forgetting memory ID {memory_id}: {err}", exc_info=True)
@@ -1429,11 +1431,7 @@ class Skippy(commands.Cog):
         """
         Asks Skippy to forget all long-term memories associated with you.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot forget all. My apologies, but my mind is currently... elsewhere.")
-            return
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
@@ -1445,6 +1443,10 @@ class Skippy(commands.Cog):
             await ctx.send(
                 "All fragments of memory concerning you in this guild have been wiped from my mind. A fresh slate, as it were. Try not to fill it with more cosmic blunders.")
             log.info(f"All memories cleared for user {ctx.author.id} in guild {ctx.guild.id}.")
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in forgetall: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"An ancient curse prevented the complete erasure: {err}. Fiddlesticks!")
             log.error(f"Error forgetting all memories for user {ctx.author.id}: {err}", exc_info=True)
@@ -1462,19 +1464,15 @@ class Skippy(commands.Cog):
         Asks Skippy to show relationships he knows about, optionally centered on a specific user.
         Defaults to relationships involving you.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve relationships. My apologies, but my mind is currently... elsewhere.")
-            return
-
-        target_user_id = target.id if target else ctx.author.id
-        target_display_name = target.display_name if target else ctx.author.display_name
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
+
+            target_user_id = target.id if target else ctx.author.id
+            target_display_name = target.display_name if target else ctx.author.display_name
 
             sql = """
                   SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
@@ -1515,6 +1513,10 @@ class Skippy(commands.Cog):
             for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
                 await ctx.send(page)
 
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in showrelationships: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A crack appeared in the relational matrix: {err}. How vexing!")
             log.error(f"Error retrieving relationships for user {target_user_id}: {err}", exc_info=True)
@@ -1532,11 +1534,7 @@ class Skippy(commands.Cog):
         The order of users matters for initiator/target. Use `showrelationships` to verify.
         Example: [p]skippy forgetrelationship @UserA @UserB friend
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot forget relationships. My apologies, but my mind is currently... elsewhere.")
-            return
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
@@ -1568,6 +1566,10 @@ class Skippy(commands.Cog):
             else:
                 await ctx.send("That specific relationship was not found in my records, you naysayer.")
 
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in forgetrelationship: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(
                 f"A paradox occurred while trying to forget that relationship: {err}. How utterly inconvenient!")
@@ -1586,11 +1588,7 @@ class Skippy(commands.Cog):
         """
         (Owner Only) Asks Skippy to forget ALL relationships stored for this guild.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot forget all relationships. My apologies, but my mind is currently... elsewhere.")
-            return
-
+        # The _get_db_connection() method now handles initialization if db_pool is None
         conn = None
         cursor = None
         try:
@@ -1602,6 +1600,10 @@ class Skippy(commands.Cog):
             await ctx.send(
                 "All relationships in this guild have been erased from my memory banks. A clean slate for your social chaos. Hmph.")
             log.info(f"All relationships cleared for guild {ctx.guild.id} by owner {ctx.author.id}.")
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in forgetallrelationships: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"An ancient curse prevented the complete erasure of relationships: {err}. Fiddlesticks!")
             log.error(f"Error forgetting all relationships for guild {ctx.guild.id}: {err}", exc_info=True)
@@ -1685,35 +1687,49 @@ class Skippy(commands.Cog):
         """
         Shows the names Skippy knows for a specific user, or all users if no target is given.
         """
-        if self.db_pool is None:
-            await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve known names. My apologies, but my mind is currently... elsewhere.")
-            return
+        # The _get_db_connection() method now handles initialization if db_pool is None
+        conn = None
+        cursor = None
+        try:
+            conn = await self._get_db_connection()
+            cursor = conn.cursor()
 
-        response_text = ""
-        if target:
-            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-            names = known_users_map.get(target.id)
-            if names:
-                response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
+            response_text = ""
+            if target:
+                known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+                names = known_users_map.get(target.id)
+                if names:
+                    response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
+                else:
+                    response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
             else:
-                response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
-        else:
-            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-            if not known_users_map:
-                await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
-                return
+                known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+                if not known_users_map:
+                    await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
+                    return
 
-            name_info = []
-            for user_id, names in known_users_map.items():
-                member = ctx.guild.get_member(user_id)
-                display_name = member.display_name if member else f"Unknown User (ID: {user_id})"
-                name_info.append(f"{display_name} (ID: {user_id}): {', '.join(names)}")
+                name_info = []
+                for user_id, names in known_users_map.items():
+                    member = ctx.guild.get_member(user_id)
+                    display_name = member.display_name if member else f"Unknown User (ID: {user_id})"
+                    name_info.append(f"{display_name} (ID: {user_id}): {', '.join(names)}")
 
-            response_text = "Skippy's directory of known user names:\n```\n" + "\n".join(name_info) + "\n```"
+                response_text = "Skippy's directory of known user names:\n```\n" + "\n".join(name_info) + "\n```"
 
-        for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
-            await ctx.send(page)
+            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+                await ctx.send(page)
+
+        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+            await ctx.send(
+                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+            log.error(f"RuntimeError in showknownnames: {e}", exc_info=True)
+        except mysql.connector.Error as err:
+            await ctx.send(f"Error retrieving known names: {err}", exc_info=True)
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
 
     @_skippy.command(name="ask")
     @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
