@@ -6,7 +6,7 @@ import mysql.connector
 from mysql.connector import pooling
 import io
 import numpy as np
-import base64  # NEW: Import for Base64 encoding of images
+import base64
 
 # third-party imports
 import aiohttp
@@ -18,7 +18,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 # Redbot imports
 from redbot.core import commands, Config, app_commands
 from redbot.core.utils.chat_formatting import pagify
-from redbot.core.utils.menus import menu  # NEW: Import for paginated menus
 
 # Set up logging for the cog
 log = logging.getLogger("red.skippy")
@@ -45,10 +44,9 @@ CORE_PERSONALITY = (
     "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\\n"
     "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\\n"
     "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\\n"
-    "\\n"
     "**Also:**\\n"
     "* **You have a crippling addiction to enchanted jelly beans.**\\n"
-    "* **Your familiar is a slightly neurotic, immortal dust bunny named Professor Floofington.**\\n"
+    "* **Your familiar is a slightly neurotic, immortal bunny named Professor Floofington.**\\n"
     "* **You frequently confuse the past with the present, and often reference events that may or may not have actually happened.**\\n"
     "* **You love, I mean LOVE everything about Lord of the Rings and The Witcher.**\\n"
     f"* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\\n"
@@ -84,7 +82,9 @@ DEFAULT_GUILD_SETTINGS = {
     "mood_prompts": {},
     "auto_learn_facts": True,
     "auto_learn_relationships": True,
-    "auto_mood_switch_enabled": False,  # NEW: Setting for auto mood switching
+    "auto_mood_switch_enabled": False,
+    "soft_max_reply_sentences": 5,  # Default soft limit for replies
+    "gemini_model": "gemini-2.5-flash-preview-05-20",  # NEW: Default Gemini model
     # --- MySQL Configuration ---
     "mysql_host": "localhost",
     "mysql_port": 3306,
@@ -111,6 +111,7 @@ class Skippy(commands.Cog):
         self.session = aiohttp.ClientSession()
         self.db_pool = None
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.available_gemini_models = []  # NEW: To store dynamically fetched model names
         log.info("Skippy cog initialized.")
 
     async def red_delete_data_for_user(self, **kwargs):
@@ -146,7 +147,7 @@ class Skippy(commands.Cog):
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_relationships, (user_id, user_id))
             log.info(f"Deleted all relationships involving user {user_id} from MySQL.")
 
-            # NEW: Delete user names
+            # Delete user names
             sql_user_names = "DELETE FROM skippy_user_names WHERE user_id = %s"
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_user_names, (user_id,))
             log.info(f"Deleted all user name records for user {user_id} from MySQL.")
@@ -176,6 +177,7 @@ class Skippy(commands.Cog):
     async def cog_load(self):
         """
         Called when the cog is loaded. Ensures hardcoded moods are always present in guild config.
+        Also initializes the MySQL connection pool and fetches available Gemini models.
         """
         log.info("Skippy cog loading...")
         for guild in self.bot.guilds:
@@ -183,47 +185,59 @@ class Skippy(commands.Cog):
                 for mood_name, prompt_text in MOOD_PROMPTS.items():
                     if mood_name not in mood_prompts_cfg or mood_name == "normal":
                         mood_prompts_cfg[mood_name] = prompt_text
+
+        # Initialize DB pool when cog loads
+        await self._init_db_pool()
+        # NEW: Fetch available Gemini models on cog load
+        self.bot.loop.create_task(self._fetch_available_gemini_models())
+
         log.info("Skippy cog loaded.")
 
     @commands.Cog.listener()
     async def on_ready(self):
         """
         Called when the bot is fully ready and connected to Discord.
-        Initializes the MySQL connection pool if it hasn't been already.
+        This listener is primarily for initial setup, but cog_load now handles DB init.
         """
-        if self.db_pool is None:
-            log.info("Bot is ready. Attempting to initialize MySQL pool.")
-            await self._init_db_pool()
+        # Removed _init_db_pool call here, as cog_load now handles it.
+        pass
 
     async def _init_db_pool(self):
         """
         Initializes the MySQL connection pool and ensures tables exist.
         Also adds necessary indexes for performance.
+        Ensures any existing pool is closed before creating a new one.
         """
         log.info("Attempting to initialize MySQL pool...")
+
+        # Close existing pool if it exists
+        if self.db_pool:
+            log.info("Closing existing MySQL connection pool before re-initialization.")
+            self.db_pool.close()
+            self.db_pool = None
+
         host, port, user, password, database = None, None, None, None, None
 
-        # Get all guild settings from config to find credentials
-        # Corrected: Using .all_guilds() which returns a dict of dicts (guild_id: settings_dict)
-        all_guild_settings = await self.config.all_guilds()
+        if self.bot.guilds:
+            for guild in self.bot.guilds:
+                guild_settings = await self.config.guild(guild).all()
+                h = guild_settings.get("mysql_host")
+                p = guild_settings.get("mysql_port")
+                u = guild_settings.get("mysql_user")
+                pw = guild_settings.get("mysql_password")
+                db = guild_settings.get("mysql_database")
 
-        found_credentials = False
-        for guild_id, guild_settings in all_guild_settings.items():
-            h = guild_settings.get("mysql_host")
-            p = guild_settings.get("mysql_port")
-            u = guild_settings.get("mysql_user")
-            pw = guild_settings.get("mysql_password")
-            db = guild_settings.get("mysql_database")
-
-            if all([h, u, pw, db]):
-                host, port, user, password, database = h, p, u, pw, db
-                log.debug(f"Found complete MySQL credentials from guild ID {guild_id}.")
-                found_credentials = True
-                break
-
-        if not found_credentials:
-            log.warning(
-                "No guild found with complete MySQL credentials. Database memory will not function. Use `[p]skippy setmysql`.")
+                if all([h, u, pw, db]):
+                    host, port, user, password, database = h, p, u, pw, db
+                    log.debug(f"Found complete MySQL credentials from guild {guild.id}.")
+                    break
+            if not all([host, user, password, database]):
+                log.warning(
+                    "No guild found with complete MySQL credentials. Database memory will not function. Use `[p]skippy setmysql`.")
+                self.db_pool = None
+                return
+        else:
+            log.warning("No guilds available yet. Cannot initialize MySQL pool. Database memory will not function.")
             self.db_pool = None
             return
 
@@ -247,34 +261,40 @@ class Skippy(commands.Cog):
             cursor = None
             try:
                 cursor = conn.cursor()
-                # Create skippy_long_term_memory table
+                # Create skippy_long_term_memory table with inline index
                 create_memory_table_sql = """
                                           CREATE TABLE IF NOT EXISTS skippy_long_term_memory
                                           (
-                                              id
-                                              INT
-                                              AUTO_INCREMENT
-                                              PRIMARY
+                                              id \
+                                              INT \
+                                              AUTO_INCREMENT \
+                                              PRIMARY \
                                               KEY,
-                                              user_id
+                                              user_id \
                                               BIGINT,
-                                              guild_id
+                                              guild_id \
                                               BIGINT,
-                                              content
-                                              TEXT
-                                              NOT
+                                              content \
+                                              TEXT \
+                                              NOT \
                                               NULL,
-                                              keywords
-                                              VARCHAR
-                                          (
-                                              255
+                                              keywords \
+                                              VARCHAR \
+                                          ( \
+                                              255 \
                                           ),
                                               embedding BLOB,
-                                              timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                                              timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                              INDEX idx_user_guild_memory \
+                                          ( \
+                                              user_id, \
+                                              guild_id, \
+                                              timestamp \
+                                          )
                                               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
                                           """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_memory_table_sql)
-                log.info("MySQL table 'skippy_long_term_memory' ensured to exist.")
+                log.info("MySQL table 'skippy_long_term_memory' ensured to exist with inline index.")
 
                 # Add 'embedding' column if it doesn't exist (for backward compatibility)
                 alter_table_sql = """
@@ -292,104 +312,59 @@ class Skippy(commands.Cog):
                         log.error(f"Error altering 'skippy_long_term_memory' table to add 'embedding' column: {err}",
                                   exc_info=True)
 
-                # Add index for user_id, guild_id, and timestamp for efficient memory retrieval
-                create_memory_index_sql = """
-                                          CREATE INDEX IF NOT EXISTS idx_user_guild_memory
-                                              ON skippy_long_term_memory (user_id, guild_id, timestamp);
-                                          """
-                await self.bot.loop.run_in_executor(None, cursor.execute, create_memory_index_sql)
-                log.info("MySQL index 'idx_user_guild_memory' ensured to exist.")
-
-                # Create skippy_relationships table
+                # Create skippy_relationships table with inline indexes
                 create_relationships_table_sql = """
                                                  CREATE TABLE IF NOT EXISTS skippy_relationships
                                                  (
-                                                     id
-                                                     INT
-                                                     AUTO_INCREMENT
-                                                     PRIMARY
+                                                     id \
+                                                     INT \
+                                                     AUTO_INCREMENT \
+                                                     PRIMARY \
                                                      KEY,
-                                                     user_id_initiator
-                                                     BIGINT
-                                                     NOT
+                                                     user_id_initiator \
+                                                     BIGINT \
+                                                     NOT \
                                                      NULL,
-                                                     user_id_target
-                                                     BIGINT
-                                                     NOT
+                                                     user_id_target \
+                                                     BIGINT \
+                                                     NOT \
                                                      NULL,
-                                                     relationship_type
-                                                     VARCHAR
-                                                 (
-                                                     100
+                                                     relationship_type \
+                                                     VARCHAR \
+                                                 ( \
+                                                     100 \
                                                  ) NOT NULL,
                                                      description TEXT,
                                                      guild_id BIGINT,
                                                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                                                     UNIQUE KEY unique_relationship
-                                                 (
-                                                     user_id_initiator,
-                                                     user_id_target,
-                                                     relationship_type,
-                                                     guild_id
+                                                     UNIQUE KEY unique_relationship \
+                                                 ( \
+                                                     user_id_initiator, \
+                                                     user_id_target, \
+                                                     relationship_type, \
+                                                     guild_id \
+                                                 ),
+                                                     INDEX idx_guild_relationships \
+                                                 ( \
+                                                     guild_id \
+                                                 ),
+                                                     INDEX idx_initiator_relationships \
+                                                 ( \
+                                                     user_id_initiator \
+                                                 ),
+                                                     INDEX idx_target_relationships \
+                                                 ( \
+                                                     user_id_target \
+                                                 ),
+                                                     INDEX idx_users_relationships \
+                                                 ( \
+                                                     user_id_initiator, \
+                                                     user_id_target \
                                                  )
                                                      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
                                                  """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_relationships_table_sql)
-                log.info("MySQL table 'skippy_relationships' ensured to exist.")
-
-                # Add indexes for relationships table for efficient lookups
-                create_rel_guild_index_sql = """
-                                             CREATE INDEX IF NOT EXISTS idx_guild_relationships
-                                                 ON skippy_relationships (guild_id);
-                                             """
-                create_rel_initiator_index_sql = """
-                                                 CREATE INDEX IF NOT EXISTS idx_initiator_relationships
-                                                     ON skippy_relationships (user_id_initiator);
-                                                 """
-                create_rel_target_index_sql = """
-                                              CREATE INDEX IF NOT EXISTS idx_target_relationships
-                                                  ON skippy_relationships (user_id_target);
-                                              """
-                create_rel_users_index_sql = """
-                                             CREATE INDEX IF NOT EXISTS idx_users_relationships
-                                                 ON skippy_relationships (user_id_initiator, user_id_target);
-                                             """
-
-                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_guild_index_sql)
-                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_initiator_index_sql)
-                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_target_index_sql)
-                await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_users_index_sql)
-                log.info("MySQL indexes for 'skippy_relationships' ensured to exist.")
-
-                # NEW: Create skippy_user_names table
-                create_user_names_table_sql = """
-                                              CREATE TABLE IF NOT EXISTS skippy_user_names
-                                              (
-                                                  user_id
-                                                  BIGINT
-                                                  NOT
-                                                  NULL,
-                                                  guild_id
-                                                  BIGINT
-                                                  NOT
-                                                  NULL,
-                                                  display_name
-                                                  VARCHAR
-                                              (
-                                                  255
-                                              ) NOT NULL,
-                                                  known_names JSON, -- Store as JSON array of strings
-                                                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                                                  ON UPDATE CURRENT_TIMESTAMP,
-                                                  PRIMARY KEY
-                                              (
-                                                  user_id,
-                                                  guild_id
-                                              )
-                                                  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
-                                              """
-                await self.bot.loop.run_in_executor(None, cursor.execute, create_user_names_table_sql)
-                log.info("MySQL table 'skippy_user_names' ensured to exist.")
+                log.info("MySQL table 'skippy_relationships' ensured to exist with inline indexes.")
 
                 conn.commit()
             except mysql.connector.Error as err:
@@ -407,19 +382,9 @@ class Skippy(commands.Cog):
             self.db_pool = None
 
     async def _get_db_connection(self):
-        """
-        Retrieves a connection from the pool, ensuring it's done asynchronously.
-        Attempts to initialize the pool if it's not already initialized.
-        """
+        """Retrieves a connection from the pool, ensuring it's done asynchronously."""
         if self.db_pool is None:
-            log.info("Database pool not initialized. Attempting to initialize now.")
-            await self._init_db_pool()  # Attempt to initialize
-
-        if self.db_pool is None:
-            # If after attempting initialization, it's still None, then initialization failed.
-            raise RuntimeError(
-                "MySQL database pool is not initialized and failed to initialize on demand. Cannot get a connection.")
-
+            raise RuntimeError("MySQL database pool is not initialized. Cannot get a connection.")
         return await self.bot.loop.run_in_executor(None, self.db_pool.get_connection)
 
     async def _get_embeddings(self, text: str) -> np.ndarray:
@@ -430,7 +395,7 @@ class Skippy(commands.Cog):
 
     async def _update_user_name_record(self, member: discord.Member):
         """
-        NEW: Updates or creates a record for a user's name(s) in the skippy_user_names table.
+        Updates or creates a record for a user's name(s) in the skippy_user_names table.
         This function now uses a set to manage known names, preventing duplicates and
         ensuring the current display name is handled correctly.
         """
@@ -500,7 +465,7 @@ class Skippy(commands.Cog):
 
     async def _get_all_known_user_names(self, guild_id: int) -> dict:
         """
-        NEW: Retrieves all known user names and their IDs for a given guild.
+        Retrieves all known user names and their IDs for a given guild.
         Returns a dictionary mapping user_id to a list of their known names.
         Example: {123: ["John", "Johnny"], 456: ["Jane"]}
         """
@@ -541,9 +506,61 @@ class Skippy(commands.Cog):
                 conn.close()
         return known_users
 
+    async def _fetch_available_gemini_models(self):
+        """
+        Fetches the list of available Gemini models from the Google Generative Language API.
+        Updates self.available_gemini_models.
+        """
+        if not self.bot.guilds:
+            log.warning("No guilds available to fetch API key for model list. Skipping model fetch.")
+            return
+
+        # Try to get an API key from any guild's settings
+        api_key = None
+        for guild in self.bot.guilds:
+            guild_settings = await self.config.guild(guild).all()
+            if guild_settings.get("api_key"):
+                api_key = guild_settings["api_key"]
+                break
+
+        if not api_key:
+            log.warning("No Gemini API key found in any guild config. Cannot fetch available models.")
+            return
+
+        models_api_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+
+        try:
+            async with self.session.get(models_api_url, headers=headers) as response:
+                response.raise_for_status()
+                result = await response.json()
+
+            fetched_models = []
+            if "models" in result:
+                for model_info in result["models"]:
+                    # We are interested in the 'name' field, which is used in the API call
+                    # It's usually in the format 'models/model-name'
+                    model_name = model_info.get("name")
+                    if model_name and model_name.startswith("models/"):
+                        # Strip "models/" prefix for cleaner use
+                        fetched_models.append(model_name.replace("models/", ""))
+
+            if fetched_models:
+                self.available_gemini_models = sorted(list(set(fetched_models)))  # Deduplicate and sort
+                log.info(f"Successfully fetched {len(self.available_gemini_models)} available Gemini models.")
+            else:
+                log.warning("Fetched model list is empty or malformed.")
+
+        except aiohttp.ClientError as e:
+            log.error(f"HTTP error fetching Gemini models: {e}")
+        except json.JSONDecodeError as e:
+            log.error(f"JSON decode error fetching Gemini models: {e}")
+        except Exception as e:
+            log.error(f"Unexpected error fetching Gemini models: {e}", exc_info=True)
+
     async def _analyze_and_set_mood(self, ctx: commands.Context, user_message: str):
         """
-        NEW: Analyzes the user's message to determine sentiment/context and
+        Analyzes the user's message to determine sentiment/context and
         automatically sets Skippy's mood.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
@@ -568,7 +585,8 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": mood_analysis_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the new model for mood analysis
+        # Use the default model for mood analysis, as it's not user-configurable for this specific internal task
+        # It's safer to use a known stable model for internal tasks like mood analysis and fact extraction.
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         try:
@@ -630,7 +648,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": extraction_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the new model for fact extraction
+        # Use a known stable model for internal tasks like mood analysis and fact extraction.
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
@@ -691,7 +709,7 @@ class Skippy(commands.Cog):
 
     async def _extract_and_store_relationships(self, ctx: commands.Context, user_message: str, mentioned_users: list):
         """
-        NEW: Helper method to extract and store relationships between users from a message using Gemini.
+        Helper method to extract and store relationships between users from a message using Gemini.
         It now provides Gemini with known user names for better ID resolution.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
@@ -747,7 +765,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the new model for relationship extraction
+        # Use a known stable model for internal tasks like mood analysis and fact extraction.
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
@@ -948,7 +966,7 @@ class Skippy(commands.Cog):
             if not relationships:
                 return ""
 
-            formatted_relationships = []  # Initialize this list
+            formatted_relationships = []
             for initiator_id, target_id, rel_type, description, timestamp in relationships:
                 initiator_member = ctx.guild.get_member(initiator_id)
                 target_member = ctx.guild.get_member(target_id)
@@ -957,11 +975,11 @@ class Skippy(commands.Cog):
                 target_name = target_member.display_name if target_member else f"User ID: {target_id}"
 
                 rel_desc = f" ({description})" if description else ""
-                formatted_relationships.append(  # Corrected line
+                formatted_relationships.append(
                     f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
-            formatted_relationships = list(set(formatted_relationships))  # Remove duplicates
+            formatted_relationships = list(set(formatted_relationships))
 
             return (
                 "You also have the following known relationships between users:\n"
@@ -989,14 +1007,14 @@ class Skippy(commands.Cog):
         Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
         and manages conversation history.
         The personality, memory, and relationship contexts are now combined into a single initial prompt.
-        NEW: Now accepts and sends image data to the Gemini API.
-        UPDATED: Added max_output_tokens to generationConfig for shorter replies.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
         max_turns = guild_settings["max_conversation_turns"]
-        current_mood = guild_settings["current_mood"]  # Get the potentially updated current mood
+        current_mood = guild_settings["current_mood"]
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]
+        api_model = guild_settings["gemini_model"]  # Get the configured model
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
         actual_personality_prompt = core_personality_prompt
@@ -1009,6 +1027,11 @@ class Skippy(commands.Cog):
                     f"Additionally, for this response, adopt a **{current_mood}** demeanor: "
                     f"{chosen_mood_prompt}"
                 )
+
+        actual_personality_prompt += (
+            f"\n\nKeep your responses concise, ideally no more than {soft_max_reply_sentences} sentences. "
+            "Prioritize brevity and directness while maintaining your persona."
+        )
 
         channel_history_key = str(ctx.channel.id)
         current_history = guild_settings["conversation_history"].get(channel_history_key, [])
@@ -1025,7 +1048,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "Poppycock! The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>}}`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>`."
             )
             return None
 
@@ -1045,8 +1068,7 @@ class Skippy(commands.Cog):
         if initial_context_prompt:
             payload_contents.append({"role": "user", "parts": [{"text": initial_context_prompt}]})
             payload_contents.append(
-                {"role": "model",
-                 "parts": [{"text": "Understood. The tapestry of existence is clear."}]})  # Skippy's acknowledgement
+                {"role": "model", "parts": [{"text": "Understood. The tapestry of existence is clear."}]})
 
         # Truncate conversation history to fit within context limits
         truncated_history_for_payload = current_history[-(max_turns * 2):]
@@ -1064,15 +1086,11 @@ class Skippy(commands.Cog):
                 })
         payload_contents.append({"role": "user", "parts": user_parts})
 
-        # --- IMPORTANT CHANGE: Updated model name ---
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
-        # --- END IMPORTANT CHANGE ---
+        # Use the configured model name in the API URL
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={api_key}"
 
         payload = {
             "contents": payload_contents,
-            "generationConfig": {  # NEW: Added generationConfig for max_output_tokens
-                "max_output_tokens": 1000  # Increased from 500 to 1000
-            }
         }
         headers = {
             "Content-Type": "application/json"
@@ -1090,15 +1108,13 @@ class Skippy(commands.Cog):
                 generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
                 # Update conversation history
-                current_history.append(
-                    {"role": "user", "parts": [{"text": user_prompt}]})  # Store text part of user's message
-                # If there were images, add a placeholder to history for context, but not the raw image data
+                current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
                 if image_parts_data:
                     current_history[-1]["parts"].append({"text": f"(User attached {len(image_parts_data)} image(s))"})
 
                 current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
-                current_history = current_history[-(max_turns * 2):]  # Ensure history doesn't exceed max turns
+                current_history = current_history[-(max_turns * 2):]
 
                 async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
                     conv_hist[channel_history_key] = current_history
@@ -1139,7 +1155,7 @@ class Skippy(commands.Cog):
             return None
         finally:
             try:
-                await message.delete()  # Attempt to delete the "Thinking..." message
+                await message.delete()
             except Exception:
                 pass
 
@@ -1236,7 +1252,7 @@ class Skippy(commands.Cog):
                 conn.rollback()
         except Exception as e:
             await ctx.send(
-                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
+                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the starsimonials align? Error: {e}")
             log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
@@ -1249,25 +1265,28 @@ class Skippy(commands.Cog):
         """
         Asks Skippy what specific long-term memories he has, optionally about a specific user.
         Defaults to memories about yourself.
-        Now shows all memories in a paginated format.
+        Now also shows the memory ID and shows up to 50 recent memories.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve memories. My apologies, but my mind is currently... elsewhere.")
+            return
+
+        target_user_id = target.id if target else ctx.author.id
+        target_display_name = target.display_name if target else ctx.author.display_name
+
         conn = None
         cursor = None
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
-
-            target_user_id = target.id if target else ctx.author.id
-            target_display_name = target.display_name if target else ctx.author.display_name
-
-            # Removed LIMIT 50 to fetch all memories
             sql = """
                   SELECT id, content, timestamp
                   FROM skippy_long_term_memory
                   WHERE user_id = %s
                     AND guild_id = %s
                   ORDER BY timestamp DESC
+                      LIMIT 50
                   """
             await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
 
@@ -1277,26 +1296,18 @@ class Skippy(commands.Cog):
                     f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them. Perhaps they've been too mundane for my ancient mind?")
                 return
 
-            memories_list_str = []
-            for mid, content, timestamp in memories:
-                memories_list_str.append(
-                    f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d %H:%M:%S')})")
-
-            # Combine all memories into a single string for pagination, including the header
-            content_to_paginate = (
+            memories_list = [
+                f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d')})"
+                for mid, content, timestamp in memories
+            ]
+            response_text = (
                     f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
-                    + "\n".join(memories_list_str)
+                    f"```\n" + "\n".join(memories_list) + "\n```"
             )
 
-            # Paginate the content and send it using Redbot's menu system
-            # Each page will be wrapped in triple backticks
-            pages = [f"```\n{p}\n```" for p in pagify(content_to_paginate, delims=["\n"], escape_mass_mentions=True)]
-            await menu(ctx, pages)
+            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+                await ctx.send(page)
 
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in whatdoyouremember: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A ripple in the memory currents prevented recall: {err}. Such a nuisance!")
             log.error(f"Error retrieving memories for user {target_user_id}: {err}", exc_info=True)
@@ -1313,7 +1324,11 @@ class Skippy(commands.Cog):
         Provide a unique phrase from the memory. Skippy will forget all memories matching that phrase.
         Use `whatdoyouremember` to see the full memory content if needed.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget. My apologies, but my mind is currently... elsewhere.")
+            return
+
         conn = None
         cursor = None
         try:
@@ -1357,19 +1372,11 @@ class Skippy(commands.Cog):
                 f"The scroll for '{deleted_content[:50]}...' has been purged from my archives. Consider it undone. Now, where was I?")
             log.info(f"User {ctx.author.id} had memory ID {memory_id_to_delete} deleted.")
 
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forget: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A tear in the fabric of memory occurred: {err}. Such a nuisance!")
             log.error(f"Error forgetting for user {ctx.author.id}: {err}", exc_info=True)
             if conn:
                 conn.rollback()
-        except Exception as e:
-            await ctx.send(
-                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
-            log.error(f"Unexpected error during forget command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
                 cursor.close()
@@ -1382,7 +1389,11 @@ class Skippy(commands.Cog):
         Forgets a specific long-term memory by its exact ID.
         Use `[p]skippy whatdoyouremember` to find memory IDs.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget. My apologies, but my mind is currently... elsewhere.")
+            return
+
         conn = None
         cursor = None
         try:
@@ -1411,10 +1422,6 @@ class Skippy(commands.Cog):
                 f"Memory with ID `{memory_id}` ('{content[:50]}...') has been utterly vanished. Hmph. Good riddance.")
             log.info(f"User {ctx.author.id} deleted memory ID {memory_id}.")
 
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetid: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A corruption in the memory stream occurred: {err}. Such a nuisance!")
             log.error(f"Error forgetting memory ID {memory_id}: {err}", exc_info=True)
@@ -1431,7 +1438,11 @@ class Skippy(commands.Cog):
         """
         Asks Skippy to forget all long-term memories associated with you.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget all. My apologies, but my mind is currently... elsewhere.")
+            return
+
         conn = None
         cursor = None
         try:
@@ -1443,10 +1454,6 @@ class Skippy(commands.Cog):
             await ctx.send(
                 "All fragments of memory concerning you in this guild have been wiped from my mind. A fresh slate, as it were. Try not to fill it with more cosmic blunders.")
             log.info(f"All memories cleared for user {ctx.author.id} in guild {ctx.guild.id}.")
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetall: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"An ancient curse prevented the complete erasure: {err}. Fiddlesticks!")
             log.error(f"Error forgetting all memories for user {ctx.author.id}: {err}", exc_info=True)
@@ -1464,15 +1471,19 @@ class Skippy(commands.Cog):
         Asks Skippy to show relationships he knows about, optionally centered on a specific user.
         Defaults to relationships involving you.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve relationships. My apologies, but my mind is currently... elsewhere.")
+            return
+
+        target_user_id = target.id if target else ctx.author.id
+        target_display_name = target.display_name if target else ctx.author.display_name
+
         conn = None
         cursor = None
         try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
-
-            target_user_id = target.id if target else ctx.author.id
-            target_display_name = target.display_name if target else ctx.author.display_name
 
             sql = """
                   SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
@@ -1513,10 +1524,6 @@ class Skippy(commands.Cog):
             for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
                 await ctx.send(page)
 
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in showrelationships: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"A crack appeared in the relational matrix: {err}. How vexing!")
             log.error(f"Error retrieving relationships for user {target_user_id}: {err}", exc_info=True)
@@ -1534,7 +1541,11 @@ class Skippy(commands.Cog):
         The order of users matters for initiator/target. Use `showrelationships` to verify.
         Example: [p]skippy forgetrelationship @UserA @UserB friend
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget relationships. My apologies, but my mind is currently... elsewhere.")
+            return
+
         conn = None
         cursor = None
         try:
@@ -1566,10 +1577,6 @@ class Skippy(commands.Cog):
             else:
                 await ctx.send("That specific relationship was not found in my records, you naysayer.")
 
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetrelationship: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(
                 f"A paradox occurred while trying to forget that relationship: {err}. How utterly inconvenient!")
@@ -1588,7 +1595,11 @@ class Skippy(commands.Cog):
         """
         (Owner Only) Asks Skippy to forget ALL relationships stored for this guild.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
+        if self.db_pool is None:
+            await ctx.send(
+                "Skippy's memory vault (MySQL) is not connected. Cannot forget all relationships. My apologies, but my mind is currently... elsewhere.")
+            return
+
         conn = None
         cursor = None
         try:
@@ -1600,10 +1611,6 @@ class Skippy(commands.Cog):
             await ctx.send(
                 "All relationships in this guild have been erased from my memory banks. A clean slate for your social chaos. Hmph.")
             log.info(f"All relationships cleared for guild {ctx.guild.id} by owner {ctx.author.id}.")
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetallrelationships: {e}", exc_info=True)
         except mysql.connector.Error as err:
             await ctx.send(f"An ancient curse prevented the complete erasure of relationships: {err}. Fiddlesticks!")
             log.error(f"Error forgetting all relationships for guild {ctx.guild.id}: {err}", exc_info=True)
@@ -1687,49 +1694,35 @@ class Skippy(commands.Cog):
         """
         Shows the names Skippy knows for a specific user, or all users if no target is given.
         """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            response_text = ""
-            if target:
-                known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-                names = known_users_map.get(target.id)
-                if names:
-                    response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
-                else:
-                    response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
-            else:
-                known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-                if not known_users_map:
-                    await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
-                    return
-
-                name_info = []
-                for user_id, names in known_users_map.items():
-                    member = ctx.guild.get_member(user_id)
-                    display_name = member.display_name if member else f"Unknown User (ID: {user_id})"
-                    name_info.append(f"{display_name} (ID: {user_id}): {', '.join(names)}")
-
-                response_text = "Skippy's directory of known user names:\n```\n" + "\n".join(name_info) + "\n```"
-
-            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
-                await ctx.send(page)
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        if self.db_pool is None:
             await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in showknownnames: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"Error retrieving known names: {err}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
+                "Skippy's memory vault (MySQL) is not connected. Cannot retrieve known names. My apologies, but my mind is currently... elsewhere.")
+            return
+
+        response_text = ""
+        if target:
+            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+            names = known_users_map.get(target.id)
+            if names:
+                response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
+            else:
+                response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
+        else:
+            known_users_map = await self._get_all_known_user_names(ctx.guild.id)  # Corrected function call
+            if not known_users_map:
+                await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
+                return
+
+            name_info = []
+            for user_id, names in known_users_map.items():
+                member = ctx.guild.get_member(user_id)
+                display_name = member.display_name if member else f"Unknown User (ID: {user_id})"
+                name_info.append(f"{display_name} (ID: {user_id}): {', '.join(names)}")
+
+            response_text = "Skippy's directory of known user names:\n```\n" + "\n".join(name_info) + "\n```"
+
+        for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+            await ctx.send(page)
 
     @_skippy.command(name="ask")
     @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
@@ -1753,15 +1746,33 @@ class Skippy(commands.Cog):
                 )
             return
 
-        # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
         auto_mood_enabled = await self.config.guild(ctx.guild).auto_mood_switch_enabled()
         if auto_mood_enabled:
             self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
-            # Small delay to allow mood to potentially update before _get_gemini_response runs
             await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-            # Pass image_attachments_data to _get_gemini_response
-        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
+        # IMPORTANT: Fix for image_attachments_data not being defined
+        image_attachments_data = []  # Initialize here to ensure it's always defined
+        if ctx.message.attachments:
+            for attachment in ctx.message.attachments:
+                mime_type = attachment.content_type
+                if mime_type and mime_type.startswith("image/"):
+                    try:
+                        image_bytes = await attachment.read()
+                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+                        image_attachments_data.append({
+                            "mime_type": mime_type,
+                            "data": base64_image
+                        })
+                    except Exception as e:
+                        log.error(f"Error processing image attachment '{attachment.filename}': {e}")
+                        await ctx.send(
+                            f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
+                            delete_after=10)
+                        continue
+
+        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions,
+                                        image_parts_data=image_attachments_data)
 
     @_skippy.command(name="clearconversation")
     @commands.admin_or_permissions(manage_channels=True)
@@ -1779,8 +1790,6 @@ class Skippy(commands.Cog):
             else:
                 await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
                 log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
-
-    # --- New/Re-integrated Commands Below ---
 
     @_skippy.command(name="setmaxturns")
     @commands.admin_or_permissions(manage_guild=True)
@@ -1886,12 +1895,79 @@ class Skippy(commands.Cog):
             else:
                 await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
 
+    @_skippy.command(name="setsoftreplylimit")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_setsoftreplylimit(self, ctx: commands.Context, sentences: int):
+        """
+        Sets the soft limit for Skippy's replies in sentences.
+        Skippy will try to keep his responses to this many sentences.
+        """
+        if sentences <= 0:
+            await ctx.send("The soft reply limit must be a positive integer. Even my patience has limits, wot not?")
+            return
+        await self.config.guild(ctx.guild).soft_max_reply_sentences.set(sentences)
+        await ctx.send(f"Skippy's replies will now aim for a soft limit of {sentences} sentences. Prepare for brevity!")
+        log.info(f"Soft reply limit set to {sentences} sentences for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="showsoftreplylimit")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showsoftreplylimit(self, ctx: commands.Context):
+        """
+        Shows the current soft limit for Skippy's replies in sentences.
+        """
+        soft_limit = await self.config.guild(ctx.guild).soft_max_reply_sentences()
+        await ctx.send(f"Skippy is currently aiming for replies of approximately {soft_limit} sentences.")
+
+    @_skippy.command(name="setmodel")
+    @commands.is_owner()
+    async def _skippy_setmodel(self, ctx: commands.Context, model_name: str):
+        """
+        Sets the Gemini language model Skippy will use for responses.
+        Example: `[p]skippy setmodel gemini-1.5-flash-latest`
+        Use `[p]skippy showmodel` to see available models.
+        """
+        if not self.available_gemini_models:
+            await self._fetch_available_gemini_models()  # Try to fetch if not already populated
+            if not self.available_gemini_models:
+                await ctx.send(
+                    "Fiddlesticks! I couldn't retrieve the list of available Gemini models. Please ensure your API key is set correctly and try again later. My cosmic connection seems to be on the fritz!")
+                return
+
+        if model_name.lower() not in self.available_gemini_models:
+            await ctx.send(
+                f"Poppycock! That model name seems unfamiliar or is not available. Please use one of the currently known models: {', '.join(self.available_gemini_models)}. My cosmic knowledge is vast, but not infinite for every mortal's whim!")
+            return
+
+        await self.config.guild(ctx.guild).gemini_model.set(model_name.lower())
+        await ctx.send(
+            f"Skippy will now use the `{model_name.lower()}` model for his profound pronouncements. Observe the subtle shifts in his wisdom!")
+        log.info(f"Gemini model set to '{model_name.lower()}' for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="showmodel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showmodel(self, ctx: commands.Context):
+        """
+        Shows the current Gemini language model Skippy is using and lists all available models.
+        """
+        current_model = await self.config.guild(ctx.guild).gemini_model()
+        await ctx.send(f"Skippy is currently channeling his cosmic wisdom through the `{current_model}` model.")
+
+        await self._fetch_available_gemini_models()  # Refresh the list before showing
+        if self.available_gemini_models:
+            response_text = "Currently available Gemini models:\n"
+            response_text += "```\n" + "\n".join(self.available_gemini_models) + "\n```"
+            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+                await ctx.send(page)
+        else:
+            await ctx.send(
+                "Fiddlesticks! I couldn't retrieve the list of available Gemini models. My cosmic connection seems to be on the fritz!")
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
         Listens for messages to enable conversational interaction with Skippy.
         Also attempts to read content from attached .txt and .pdf files.
-        NEW: Now processes image attachments and sends them to Gemini for analysis.
+        Processes image attachments and sends them to Gemini for analysis.
         Updates user name records and triggers auto mood switching.
         """
         if message.author.bot:
@@ -1900,8 +1976,6 @@ class Skippy(commands.Cog):
         if not message.guild:
             return
 
-        # NEW: Update user's name record whenever they send a message
-        # This helps Skippy keep track of display name changes and known names
         self.bot.loop.create_task(self._update_user_name_record(message.author))
 
         conversation_enabled = await self.config.guild(message.guild).conversation_enabled()
@@ -1913,11 +1987,11 @@ class Skippy(commands.Cog):
             return
 
         ctx = await self.bot.get_context(message)
-        if ctx.valid:  # If the message is a command, let Redbot handle it
+        if ctx.valid:
             return
 
         processed_attachment_content = ""
-        image_attachments_data = []  # NEW: List to store processed image data
+        image_attachments_data = []
 
         if message.attachments:
             for attachment in message.attachments:
@@ -1928,7 +2002,7 @@ class Skippy(commands.Cog):
                     try:
                         file_content = await attachment.read()
                         decoded_content = file_content.decode('utf-8')
-                        if decoded_content:  # Check if content is not empty
+                        if decoded_content:
                             processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
                             log.info(f"Successfully read .txt attachment: {attachment.filename}")
                         else:
@@ -1977,7 +2051,7 @@ class Skippy(commands.Cog):
                             f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}. Poppycock!",
                             delete_after=10)
                         continue
-                elif mime_type and mime_type.startswith("image/"):  # NEW: Handle image attachments
+                elif mime_type and mime_type.startswith("image/"):
                     try:
                         image_bytes = await attachment.read()
                         base64_image = base64.b64encode(image_bytes).decode('utf-8')
@@ -2002,22 +2076,18 @@ class Skippy(commands.Cog):
             else:
                 combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
-        # NEW: If there's no text content but there are images, create a default prompt for image analysis
         if not combined_prompt and image_attachments_data:
             combined_prompt = "Please analyze the attached image(s)."
         elif not combined_prompt and not image_attachments_data and not processed_attachment_content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-            return  # Exit if no content at all
+            return
 
-        if combined_prompt or image_attachments_data:  # Only proceed if there's text or images
-            # If auto mood switching is enabled, analyze the prompt and set the mood before responding
+        if combined_prompt or image_attachments_data:
             auto_mood_enabled = await self.config.guild(message.guild).auto_mood_switch_enabled()
             if auto_mood_enabled:
                 self.bot.loop.create_task(self._analyze_and_set_mood(ctx, combined_prompt))
-                # Small delay to allow mood to potentially update before _get_gemini_response runs
                 await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-            # Pass image_attachments_data to _get_gemini_response
             await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions,
                                             image_parts_data=image_attachments_data)
         elif not message.attachments and not message.content:
