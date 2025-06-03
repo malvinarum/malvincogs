@@ -79,6 +79,7 @@ DEFAULT_GUILD_SETTINGS = {
     "auto_learn_relationships": True,
     "auto_mood_switch_enabled": False,
     "soft_max_reply_sentences": 5,  # Default soft limit for replies
+    "gemini_model": "gemini-2.5-flash-preview-05-20",  # NEW: Default Gemini model
     # --- MySQL Configuration ---
     "mysql_host": "localhost",
     "mysql_port": 3306,
@@ -179,7 +180,7 @@ class Skippy(commands.Cog):
                     if mood_name not in mood_prompts_cfg or mood_name == "normal":
                         mood_prompts_cfg[mood_name] = prompt_text
 
-        # NEW: Initialize DB pool when cog loads
+        # Initialize DB pool when cog loads
         await self._init_db_pool()
 
         log.info("Skippy cog loaded.")
@@ -201,7 +202,7 @@ class Skippy(commands.Cog):
         """
         log.info("Attempting to initialize MySQL pool...")
 
-        # NEW: Close existing pool if it exists
+        # Close existing pool if it exists
         if self.db_pool:
             log.info("Closing existing MySQL connection pool before re-initialization.")
             self.db_pool.close()
@@ -981,7 +982,6 @@ class Skippy(commands.Cog):
         Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
         and manages conversation history.
         The personality, memory, and relationship contexts are now combined into a single initial prompt.
-        UPDATED: Removed max_output_tokens and added soft_max_reply_sentences to the prompt.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
@@ -989,6 +989,7 @@ class Skippy(commands.Cog):
         current_mood = guild_settings["current_mood"]
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
         soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]
+        api_model = guild_settings["gemini_model"]  # NEW: Get the configured model
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
         actual_personality_prompt = core_personality_prompt
@@ -1060,7 +1061,8 @@ class Skippy(commands.Cog):
                 })
         payload_contents.append({"role": "user", "parts": user_parts})
 
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+        # Use the configured model name in the API URL
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={api_key}"
 
         payload = {
             "contents": payload_contents,
@@ -1681,7 +1683,7 @@ class Skippy(commands.Cog):
             else:
                 response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
         else:
-            known_users_map = await self._get_all_user_names(ctx.guild.id)  # Changed to _get_all_user_names
+            known_users_map = await self._get_all_known_user_names(ctx.guild.id)  # Corrected function call
             if not known_users_map:
                 await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
                 return
@@ -1890,6 +1892,35 @@ class Skippy(commands.Cog):
         """
         soft_limit = await self.config.guild(ctx.guild).soft_max_reply_sentences()
         await ctx.send(f"Skippy is currently aiming for replies of approximately {soft_limit} sentences.")
+
+    @_skippy.command(name="setmodel")
+    @commands.is_owner()
+    async def _skippy_setmodel(self, ctx: commands.Context, model_name: str):
+        """
+        Sets the Gemini language model Skippy will use for responses.
+        Example: `[p]skippy setmodel gemini-1.5-flash-latest`
+        Current recommended models: `gemini-2.5-flash-preview-05-20`, `gemini-1.5-flash-latest`
+        """
+        # Basic validation for common model names. You might want to expand this.
+        valid_models = ["gemini-2.5-flash-preview-05-20", "gemini-1.5-flash-latest", "gemini-pro"]
+        if model_name.lower() not in valid_models:
+            await ctx.send(
+                f"Poppycock! That model name seems unfamiliar. Please use one of the known models: {', '.join(valid_models)}. My cosmic knowledge is vast, but not infinite for every mortal's whim!")
+            return
+
+        await self.config.guild(ctx.guild).gemini_model.set(model_name.lower())
+        await ctx.send(
+            f"Skippy will now use the `{model_name.lower()}` model for his profound pronouncements. Observe the subtle shifts in his wisdom!")
+        log.info(f"Gemini model set to '{model_name.lower()}' for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="showmodel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showmodel(self, ctx: commands.Context):
+        """
+        Shows the current Gemini language model Skippy is using.
+        """
+        current_model = await self.config.guild(ctx.guild).gemini_model()
+        await ctx.send(f"Skippy is currently channeling his cosmic wisdom through the `{current_model}` model.")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
