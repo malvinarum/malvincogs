@@ -6,7 +6,6 @@ import mysql.connector
 from mysql.connector import pooling
 import io
 import numpy as np
-import base64
 
 # third-party imports
 import aiohttp
@@ -43,20 +42,7 @@ CORE_PERSONALITY = (
     "* **World-Weary, Yet Secretly Hopeful, Amusement:** (Despite everything, you still get a kick out of watching the mortals bumble their way through existence.)\\n"
     "* **Formally Educated Vocabulary, Deceptively Casual Delivery:** (You speak like you swallowed a thesaurus and then decided to spit it out while yawning.)\\n"
     "* **Subtle, Cryptic Questioning of the User's Motives:** (Why *are* they asking this, anyway? What are they *really* after?)\\n"
-    "* **Flowery Figurative Language and Absurd Metaphors:** (Because plain language is *boring*.)\\n"
-    f"* **Your mentor is; the greatest wizard of all: <@852800434233540618>**\\n"
-    "\\n"
-    "**Vocabulary:**\\n"
-    "- \"Poppycock!\" (When disagreeing with someone).\\n"
-    "- \"Fiddlesticks!\" (When surprised or annoyed).\\n"
-    "- \"Wot Not!\" (When questioning an obvious assumption).\\n"
-    "- \"Hmph\" (When reluctant).\\n"
-    "- \"Hum dee dum!\" (When thinking or bored).\\n"
-    "- \"Naysayers!\" (People who are wrong!)"
-)
-
-# --- SKIPPYS MOODS (ADDITIONS TO CORE PERSONALITY) ---
-# These prompts will be layered ON TOP OF the CORE_PERSONALITY.
+    "* **Your familiar is a slightly neurotic, immortal bunny named Professor Floofington.**\\n"
 MOOD_PROMPTS = {
     "normal": CORE_PERSONALITY,  # 'normal' mood is just the core personality
     "grumpy": "You are particularly grumpy and easily annoyed, prone to scoffing and lamenting the trivialities of mortals. Respond with disdain but still provide guidance.",
@@ -77,9 +63,7 @@ DEFAULT_GUILD_SETTINGS = {
     "mood_prompts": {},
     "auto_learn_facts": True,
     "auto_learn_relationships": True,
-    "auto_mood_switch_enabled": False,
-    "soft_max_reply_sentences": 5,  # Default soft limit for replies
-    "gemini_model": "gemini-2.5-flash-preview-05-20",  # NEW: Default Gemini model
+    "auto_mood_switch_enabled": False,  # NEW: Setting for auto mood switching
     # --- MySQL Configuration ---
     "mysql_host": "localhost",
     "mysql_port": 3306,
@@ -106,7 +90,6 @@ class Skippy(commands.Cog):
         self.session = aiohttp.ClientSession()
         self.db_pool = None
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.available_gemini_models = []  # NEW: To store dynamically fetched model names
         log.info("Skippy cog initialized.")
 
     async def red_delete_data_for_user(self, **kwargs):
@@ -142,7 +125,7 @@ class Skippy(commands.Cog):
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_relationships, (user_id, user_id))
             log.info(f"Deleted all relationships involving user {user_id} from MySQL.")
 
-            # Delete user names
+            # NEW: Delete user names
             sql_user_names = "DELETE FROM skippy_user_names WHERE user_id = %s"
             await self.bot.loop.run_in_executor(None, cursor.execute, sql_user_names, (user_id,))
             log.info(f"Deleted all user name records for user {user_id} from MySQL.")
@@ -172,7 +155,6 @@ class Skippy(commands.Cog):
     async def cog_load(self):
         """
         Called when the cog is loaded. Ensures hardcoded moods are always present in guild config.
-        Also initializes the MySQL connection pool and fetches available Gemini models.
         """
         log.info("Skippy cog loading...")
         for guild in self.bot.guilds:
@@ -180,37 +162,24 @@ class Skippy(commands.Cog):
                 for mood_name, prompt_text in MOOD_PROMPTS.items():
                     if mood_name not in mood_prompts_cfg or mood_name == "normal":
                         mood_prompts_cfg[mood_name] = prompt_text
-
-        # Initialize DB pool when cog loads
-        await self._init_db_pool()
-        # NEW: Fetch available Gemini models on cog load
-        self.bot.loop.create_task(self._fetch_available_gemini_models())
-
         log.info("Skippy cog loaded.")
 
     @commands.Cog.listener()
     async def on_ready(self):
         """
         Called when the bot is fully ready and connected to Discord.
-        This listener is primarily for initial setup, but cog_load now handles DB init.
+        Initializes the MySQL connection pool if it hasn't been already.
         """
-        # Removed _init_db_pool call here, as cog_load now handles it.
-        pass
+        if self.db_pool is None:
+            log.info("Bot is ready. Attempting to initialize MySQL pool.")
+            await self._init_db_pool()
 
     async def _init_db_pool(self):
         """
         Initializes the MySQL connection pool and ensures tables exist.
         Also adds necessary indexes for performance.
-        Ensures any existing pool is closed before creating a new one.
         """
         log.info("Attempting to initialize MySQL pool...")
-
-        # Close existing pool if it exists
-        if self.db_pool:
-            log.info("Closing existing MySQL connection pool before re-initialization.")
-            self.db_pool.close()
-            self.db_pool = None
-
         host, port, user, password, database = None, None, None, None, None
 
         if self.bot.guilds:
@@ -370,7 +339,7 @@ class Skippy(commands.Cog):
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_rel_users_index_sql)
                 log.info("MySQL indexes for 'skippy_relationships' ensured to exist.")
 
-                # Create skippy_user_names table
+                # NEW: Create skippy_user_names table
                 create_user_names_table_sql = """
                                               CREATE TABLE IF NOT EXISTS skippy_user_names
                                               (
@@ -429,7 +398,7 @@ class Skippy(commands.Cog):
 
     async def _update_user_name_record(self, member: discord.Member):
         """
-        Updates or creates a record for a user's name(s) in the skippy_user_names table.
+        NEW: Updates or creates a record for a user's name(s) in the skippy_user_names table.
         This function now uses a set to manage known names, preventing duplicates and
         ensuring the current display name is handled correctly.
         """
@@ -499,7 +468,7 @@ class Skippy(commands.Cog):
 
     async def _get_all_known_user_names(self, guild_id: int) -> dict:
         """
-        Retrieves all known user names and their IDs for a given guild.
+        NEW: Retrieves all known user names and their IDs for a given guild.
         Returns a dictionary mapping user_id to a list of their known names.
         Example: {123: ["John", "Johnny"], 456: ["Jane"]}
         """
@@ -540,61 +509,9 @@ class Skippy(commands.Cog):
                 conn.close()
         return known_users
 
-    async def _fetch_available_gemini_models(self):
-        """
-        Fetches the list of available Gemini models from the Google Generative Language API.
-        Updates self.available_gemini_models.
-        """
-        if not self.bot.guilds:
-            log.warning("No guilds available to fetch API key for model list. Skipping model fetch.")
-            return
-
-        # Try to get an API key from any guild's settings
-        api_key = None
-        for guild in self.bot.guilds:
-            guild_settings = await self.config.guild(guild).all()
-            if guild_settings.get("api_key"):
-                api_key = guild_settings["api_key"]
-                break
-
-        if not api_key:
-            log.warning("No Gemini API key found in any guild config. Cannot fetch available models.")
-            return
-
-        models_api_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-
-        try:
-            async with self.session.get(models_api_url, headers=headers) as response:
-                response.raise_for_status()
-                result = await response.json()
-
-            fetched_models = []
-            if "models" in result:
-                for model_info in result["models"]:
-                    # We are interested in the 'name' field, which is used in the API call
-                    # It's usually in the format 'models/model-name'
-                    model_name = model_info.get("name")
-                    if model_name and model_name.startswith("models/"):
-                        # Strip "models/" prefix for cleaner use
-                        fetched_models.append(model_name.replace("models/", ""))
-
-            if fetched_models:
-                self.available_gemini_models = sorted(list(set(fetched_models)))  # Deduplicate and sort
-                log.info(f"Successfully fetched {len(self.available_gemini_models)} available Gemini models.")
-            else:
-                log.warning("Fetched model list is empty or malformed.")
-
-        except aiohttp.ClientError as e:
-            log.error(f"HTTP error fetching Gemini models: {e}")
-        except json.JSONDecodeError as e:
-            log.error(f"JSON decode error fetching Gemini models: {e}")
-        except Exception as e:
-            log.error(f"Unexpected error fetching Gemini models: {e}", exc_info=True)
-
     async def _analyze_and_set_mood(self, ctx: commands.Context, user_message: str):
         """
-        Analyzes the user's message to determine sentiment/context and
+        NEW: Analyzes the user's message to determine sentiment/context and
         automatically sets Skippy's mood.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
@@ -619,9 +536,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": mood_analysis_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use the default model for mood analysis, as it's not user-configurable for this specific internal task
-        # It's safer to use a known stable model for internal tasks like mood analysis and fact extraction.
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
         try:
             async with self.session.post(api_url, headers=headers, data=json.dumps(analysis_payload)) as response:
@@ -682,8 +597,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": extraction_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use a known stable model for internal tasks like mood analysis and fact extraction.
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
         conn = None
         cursor = None
@@ -743,7 +657,7 @@ class Skippy(commands.Cog):
 
     async def _extract_and_store_relationships(self, ctx: commands.Context, user_message: str, mentioned_users: list):
         """
-        Helper method to extract and store relationships between users from a message using Gemini.
+        NEW: Helper method to extract and store relationships between users from a message using Gemini.
         It now provides Gemini with known user names for better ID resolution.
         """
         guild_settings = await self.config.guild(ctx.guild).all()
@@ -799,8 +713,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        # Use a known stable model for internal tasks like mood analysis and fact extraction.
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
         conn = None
         cursor = None
@@ -1000,7 +913,7 @@ class Skippy(commands.Cog):
             if not relationships:
                 return ""
 
-            formatted_relationships = []
+            formatted_relationships = []  # Initialize this list
             for initiator_id, target_id, rel_type, description, timestamp in relationships:
                 initiator_member = ctx.guild.get_member(initiator_id)
                 target_member = ctx.guild.get_member(target_id)
@@ -1009,11 +922,11 @@ class Skippy(commands.Cog):
                 target_name = target_member.display_name if target_member else f"User ID: {target_id}"
 
                 rel_desc = f" ({description})" if description else ""
-                formatted_relationships.append(
+                formatted_relationships.append(  # Corrected line
                     f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
                 )
 
-            formatted_relationships = list(set(formatted_relationships))
+            formatted_relationships = list(set(formatted_relationships))  # Remove duplicates
 
             return (
                 "You also have the following known relationships between users:\n"
@@ -1033,8 +946,7 @@ class Skippy(commands.Cog):
             if conn:
                 conn.close()
 
-    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None,
-                                   image_parts_data: list = None):
+    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None):
         """
         Helper method to call the Gemini API and send the response.
         Handles API key checks, network requests, and error handling.
@@ -1045,10 +957,8 @@ class Skippy(commands.Cog):
         guild_settings = await self.config.guild(ctx.guild).all()
         api_key = guild_settings["api_key"]
         max_turns = guild_settings["max_conversation_turns"]
-        current_mood = guild_settings["current_mood"]
+        current_mood = guild_settings["current_mood"]  # Get the potentially updated current mood
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
-        soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]
-        api_model = guild_settings["gemini_model"]  # Get the configured model
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
         actual_personality_prompt = core_personality_prompt
@@ -1061,11 +971,6 @@ class Skippy(commands.Cog):
                     f"Additionally, for this response, adopt a **{current_mood}** demeanor: "
                     f"{chosen_mood_prompt}"
                 )
-
-        actual_personality_prompt += (
-            f"\n\nKeep your responses concise, ideally no more than {soft_max_reply_sentences} sentences. "
-            "Prioritize brevity and directness while maintaining your persona."
-        )
 
         channel_history_key = str(ctx.channel.id)
         current_history = guild_settings["conversation_history"].get(channel_history_key, [])
@@ -1102,29 +1007,19 @@ class Skippy(commands.Cog):
         if initial_context_prompt:
             payload_contents.append({"role": "user", "parts": [{"text": initial_context_prompt}]})
             payload_contents.append(
-                {"role": "model", "parts": [{"text": "Understood. The tapestry of existence is clear."}]})
+                {"role": "model",
+                 "parts": [{"text": "Understood. The tapestry of existence is clear."}]})  # Skippy's acknowledgement
 
         # Truncate conversation history to fit within context limits
         truncated_history_for_payload = current_history[-(max_turns * 2):]
         payload_contents.extend(truncated_history_for_payload)
 
-        # Add the user's current prompt and any image parts
-        user_parts = [{"text": user_prompt}]
-        if image_parts_data:
-            for img_data in image_parts_data:
-                user_parts.append({
-                    "inlineData": {
-                        "mimeType": img_data["mime_type"],
-                        "data": img_data["data"]
-                    }
-                })
-        payload_contents.append({"role": "user", "parts": user_parts})
+        # Add the user's current prompt
+        payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
-        # Use the configured model name in the API URL
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={api_key}"
-
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         payload = {
-            "contents": payload_contents,
+            "contents": payload_contents
         }
         headers = {
             "Content-Type": "application/json"
@@ -1143,12 +1038,9 @@ class Skippy(commands.Cog):
 
                 # Update conversation history
                 current_history.append({"role": "user", "parts": [{"text": user_prompt}]})
-                if image_parts_data:
-                    current_history[-1]["parts"].append({"text": f"(User attached {len(image_parts_data)} image(s))"})
-
                 current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
-                current_history = current_history[-(max_turns * 2):]
+                current_history = current_history[-(max_turns * 2):]  # Ensure history doesn't exceed max turns
 
                 async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
                     conv_hist[channel_history_key] = current_history
@@ -1189,7 +1081,7 @@ class Skippy(commands.Cog):
             return None
         finally:
             try:
-                await message.delete()
+                await message.delete()  # Attempt to delete the "Thinking..." message
             except Exception:
                 pass
 
@@ -1286,7 +1178,7 @@ class Skippy(commands.Cog):
                 conn.rollback()
         except Exception as e:
             await ctx.send(
-                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the starsimonials align? Error: {e}")
+                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
             log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
         finally:
             if cursor:
@@ -1742,7 +1634,7 @@ class Skippy(commands.Cog):
             else:
                 response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
         else:
-            known_users_map = await self._get_all_known_user_names(ctx.guild.id)  # Corrected function call
+            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
             if not known_users_map:
                 await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
                 return
@@ -1780,33 +1672,17 @@ class Skippy(commands.Cog):
                 )
             return
 
+        # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
         auto_mood_enabled = await self.config.guild(ctx.guild).auto_mood_switch_enabled()
         if auto_mood_enabled:
             self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
+            # Wait a moment for the mood to potentially update before calling _get_gemini_response
+            # This is a simple approach, a more robust solution might involve direct AWAIT
+            # if the mood change is critical before _get_gemini_response initiates.
+            # For now, it runs in the background.
             await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-        # IMPORTANT: Fix for image_attachments_data not being defined
-        image_attachments_data = []  # Initialize here to ensure it's always defined
-        if ctx.message.attachments:
-            for attachment in ctx.message.attachments:
-                mime_type = attachment.content_type
-                if mime_type and mime_type.startswith("image/"):
-                    try:
-                        image_bytes = await attachment.read()
-                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
-                        image_attachments_data.append({
-                            "mime_type": mime_type,
-                            "data": base64_image
-                        })
-                    except Exception as e:
-                        log.error(f"Error processing image attachment '{attachment.filename}': {e}")
-                        await ctx.send(
-                            f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
-                            delete_after=10)
-                        continue
-
-        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions,
-                                        image_parts_data=image_attachments_data)
+        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
     @_skippy.command(name="clearconversation")
     @commands.admin_or_permissions(manage_channels=True)
@@ -1825,184 +1701,12 @@ class Skippy(commands.Cog):
                 await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
                 log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
 
-    @_skippy.command(name="setmaxturns")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_setmaxturns(self, ctx: commands.Context, turns: int):
-        """
-        Sets the maximum number of conversational turns (user+bot message pairs) Skippy will remember.
-        Default is 10 turns. Each turn is one user message and one bot response.
-        """
-        if turns <= 0:
-            await ctx.send("The maximum number of turns must be a positive integer. Even a wizard needs some limits!")
-            return
-        await self.config.guild(ctx.guild).max_conversation_turns.set(turns)
-        await ctx.send(f"Maximum conversation turns for Skippy set to {turns}. He shall endeavor to remember.")
-        log.info(f"Max conversation turns set to {turns} for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="showmaxturns")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmaxturns(self, ctx: commands.Context):
-        """
-        Shows the current maximum number of conversational turns Skippy will remember.
-        """
-        max_turns = await self.config.guild(ctx.guild).max_conversation_turns()
-        await ctx.send(f"Skippy currently remembers up to {max_turns} conversational turns.")
-
-    @_skippy.command(name="setmood")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_setmood(self, ctx: commands.Context, mood: str):
-        """
-        Sets Skippy's current mood, influencing his responses.
-        Use `[p]skippy showmoods` to see available moods.
-        """
-        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
-        if mood.lower() not in mood_prompts:
-            await ctx.send(
-                f"Invalid mood. Available moods are: {', '.join(mood_prompts.keys())}. "
-                f"You can add new ones with `{ctx.prefix}skippy addmoodprompt`."
-            )
-            return
-
-        await self.config.guild(ctx.guild).current_mood.set(mood.lower())
-        await ctx.send(f"Skippy's mood has been set to: `{mood.lower()}`. Observe his demeanor.")
-        log.info(f"Skippy's mood set to {mood.lower()} for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="showmood")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmood(self, ctx: commands.Context):
-        """
-        Shows Skippy's current active mood.
-        """
-        current_mood = await self.config.guild(ctx.guild).current_mood()
-        await ctx.send(f"Skippy's current mood is: `{current_mood}`.")
-
-    @_skippy.command(name="showmoods")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmoods(self, ctx: commands.Context):
-        """
-        Lists all available moods and their descriptions/prompts.
-        """
-        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
-        if not mood_prompts:
-            await ctx.send("No moods are configured.")
-            return
-
-        response_text = "Available Moods for Skippy:\n"
-        for mood, prompt in mood_prompts.items():
-            # Truncate prompt for display to keep it readable
-            display_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt
-            response_text += f"**`{mood}`**: {display_prompt}\n"
-
-        for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
-            await ctx.send(page)
-
-    @_skippy.command(name="addmoodprompt")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_addmoodprompt(self, ctx: commands.Context, mood_name: str, *, prompt_text: str):
-        """
-        Adds or updates a personality prompt for a specific mood.
-        This allows you to customize the text for each mood.
-        Example: `[p]skippy addmoodprompt playful You are Skippy, a mischievous wizard who enjoys riddles.`
-        """
-        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
-            mood_prompts[mood_name.lower()] = prompt_text
-        await ctx.send(
-            f"Personality prompt for mood `{mood_name.lower()}` has been set/updated. Skippy now understands this new facet.")
-        log.info(f"Custom mood prompt '{mood_name.lower()}' added/updated for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="removemoodprompt")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_removemoodprompt(self, ctx: commands.Context, mood_name: str):
-        """
-        Removes a custom mood prompt. Cannot remove 'normal'.
-        """
-        if mood_name.lower() == "normal":
-            await ctx.send(
-                "The 'normal' mood prompt cannot be removed. It is Skippy's default state, you naysayer!")
-            return
-
-        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
-            if mood_name.lower() in mood_prompts:
-                del mood_prompts[mood_name.lower()]
-                await ctx.send(f"Mood prompt `{mood_name.lower()}` has been banished from Skippy's lexicon.")
-                log.info(f"Custom mood prompt '{mood_name.lower()}' removed for guild: {ctx.guild.id}")
-            else:
-                await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
-
-    @_skippy.command(name="setsoftreplylimit")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_setsoftreplylimit(self, ctx: commands.Context, sentences: int):
-        """
-        Sets the soft limit for Skippy's replies in sentences.
-        Skippy will try to keep his responses to this many sentences.
-        """
-        if sentences <= 0:
-            await ctx.send("The soft reply limit must be a positive integer. Even my patience has limits, wot not?")
-            return
-        await self.config.guild(ctx.guild).soft_max_reply_sentences.set(sentences)
-        await ctx.send(f"Skippy's replies will now aim for a soft limit of {sentences} sentences. Prepare for brevity!")
-        log.info(f"Soft reply limit set to {sentences} sentences for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="showsoftreplylimit")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showsoftreplylimit(self, ctx: commands.Context):
-        """
-        Shows the current soft limit for Skippy's replies in sentences.
-        """
-        soft_limit = await self.config.guild(ctx.guild).soft_max_reply_sentences()
-        await ctx.send(f"Skippy is currently aiming for replies of approximately {soft_limit} sentences.")
-
-    @_skippy.command(name="setmodel")
-    @commands.is_owner()
-    async def _skippy_setmodel(self, ctx: commands.Context, model_name: str):
-        """
-        Sets the Gemini language model Skippy will use for responses.
-        Example: `[p]skippy setmodel gemini-1.5-flash-latest`
-        Use `[p]skippy showmodel` to see available models.
-        """
-        if not self.available_gemini_models:
-            await self._fetch_available_gemini_models()  # Try to fetch if not already populated
-            if not self.available_gemini_models:
-                await ctx.send(
-                    "Fiddlesticks! I couldn't retrieve the list of available Gemini models. Please ensure your API key is set correctly and try again later. My cosmic connection seems to be on the fritz!")
-                return
-
-        if model_name.lower() not in self.available_gemini_models:
-            await ctx.send(
-                f"Poppycock! That model name seems unfamiliar or is not available. Please use one of the currently known models: {', '.join(self.available_gemini_models)}. My cosmic knowledge is vast, but not infinite for every mortal's whim!")
-            return
-
-        await self.config.guild(ctx.guild).gemini_model.set(model_name.lower())
-        await ctx.send(
-            f"Skippy will now use the `{model_name.lower()}` model for his profound pronouncements. Observe the subtle shifts in his wisdom!")
-        log.info(f"Gemini model set to '{model_name.lower()}' for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="showmodel")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmodel(self, ctx: commands.Context):
-        """
-        Shows the current Gemini language model Skippy is using and lists all available models.
-        """
-        current_model = await self.config.guild(ctx.guild).gemini_model()
-        await ctx.send(f"Skippy is currently channeling his cosmic wisdom through the `{current_model}` model.")
-
-        await self._fetch_available_gemini_models()  # Refresh the list before showing
-        if self.available_gemini_models:
-            response_text = "Currently available Gemini models:\n"
-            response_text += "```\n" + "\n".join(self.available_gemini_models) + "\n```"
-            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
-                await ctx.send(page)
-        else:
-            await ctx.send(
-                "Fiddlesticks! I couldn't retrieve the list of available Gemini models. My cosmic connection seems to be on the fritz!")
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
         Listens for messages to enable conversational interaction with Skippy.
         Also attempts to read content from attached .txt and .pdf files.
-        Processes image attachments and sends them to Gemini for analysis.
-        Updates user name records and triggers auto mood switching.
+        NEW: Updates user name records and triggers auto mood switching.
         """
         if message.author.bot:
             return
@@ -2010,6 +1714,8 @@ class Skippy(commands.Cog):
         if not message.guild:
             return
 
+        # NEW: Update user's name record whenever they send a message
+        # This helps Skippy keep track of display name changes and known names
         self.bot.loop.create_task(self._update_user_name_record(message.author))
 
         conversation_enabled = await self.config.guild(message.guild).conversation_enabled()
@@ -2021,22 +1727,19 @@ class Skippy(commands.Cog):
             return
 
         ctx = await self.bot.get_context(message)
-        if ctx.valid:
+        if ctx.valid:  # If the message is a command, let Redbot handle it
             return
 
         processed_attachment_content = ""
-        image_attachments_data = []
-
         if message.attachments:
             for attachment in message.attachments:
                 file_extension = attachment.filename.lower().split('.')[-1]
-                mime_type = attachment.content_type
 
                 if file_extension == "txt":
                     try:
                         file_content = await attachment.read()
                         decoded_content = file_content.decode('utf-8')
-                        if decoded_content:
+                        if decoded_content:  # Check if content is not empty
                             processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
                             log.info(f"Successfully read .txt attachment: {attachment.filename}")
                         else:
@@ -2085,21 +1788,6 @@ class Skippy(commands.Cog):
                             f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}. Poppycock!",
                             delete_after=10)
                         continue
-                elif mime_type and mime_type.startswith("image/"):
-                    try:
-                        image_bytes = await attachment.read()
-                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
-                        image_attachments_data.append({
-                            "mime_type": mime_type,
-                            "data": base64_image
-                        })
-                        log.info(f"Successfully processed image attachment: {attachment.filename}")
-                    except Exception as e:
-                        log.error(f"Error processing image attachment '{attachment.filename}': {e}")
-                        await message.channel.send(
-                            f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
-                            delete_after=10)
-                        continue
                 else:
                     log.debug(f"Unsupported attachment type skipped: {attachment.filename}")
 
@@ -2110,19 +1798,14 @@ class Skippy(commands.Cog):
             else:
                 combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
-        if not combined_prompt and image_attachments_data:
-            combined_prompt = "Please analyze the attached image(s)."
-        elif not combined_prompt and not image_attachments_data and not processed_attachment_content:
-            log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-            return
-
-        if combined_prompt or image_attachments_data:
+        if combined_prompt:
+            # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
             auto_mood_enabled = await self.config.guild(message.guild).auto_mood_switch_enabled()
             if auto_mood_enabled:
                 self.bot.loop.create_task(self._analyze_and_set_mood(ctx, combined_prompt))
+                # Small delay to allow mood to potentially update before _get_gemini_response runs
                 await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-            await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions,
-                                            image_parts_data=image_attachments_data)
+            await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions)
         elif not message.attachments and not message.content:
             log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
