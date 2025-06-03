@@ -555,7 +555,8 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": mood_analysis_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        # Use the new model for mood analysis
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         try:
             async with self.session.post(api_url, headers=headers, data=json.dumps(analysis_payload)) as response:
@@ -616,7 +617,8 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": extraction_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        # Use the new model for fact extraction
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
         cursor = None
@@ -732,7 +734,8 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        # Use the new model for relationship extraction
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
         cursor = None
@@ -1036,7 +1039,10 @@ class Skippy(commands.Cog):
         # Add the user's current prompt
         payload_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        # --- IMPORTANT CHANGE: Updated model name ---
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+        # --- END IMPORTANT CHANGE ---
+
         payload = {
             "contents": payload_contents
         }
@@ -1719,6 +1725,112 @@ class Skippy(commands.Cog):
             else:
                 await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
                 log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
+
+    # --- New/Re-integrated Commands Below ---
+
+    @_skippy.command(name="setmaxturns")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_setmaxturns(self, ctx: commands.Context, turns: int):
+        """
+        Sets the maximum number of conversational turns (user+bot message pairs) Skippy will remember.
+        Default is 10 turns. Each turn is one user message and one bot response.
+        """
+        if turns <= 0:
+            await ctx.send("The maximum number of turns must be a positive integer. Even a wizard needs some limits!")
+            return
+        await self.config.guild(ctx.guild).max_conversation_turns.set(turns)
+        await ctx.send(f"Maximum conversation turns for Skippy set to {turns}. He shall endeavor to remember.")
+        log.info(f"Max conversation turns set to {turns} for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="showmaxturns")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showmaxturns(self, ctx: commands.Context):
+        """
+        Shows the current maximum number of conversational turns Skippy will remember.
+        """
+        max_turns = await self.config.guild(ctx.guild).max_conversation_turns()
+        await ctx.send(f"Skippy currently remembers up to {max_turns} conversational turns.")
+
+    @_skippy.command(name="setmood")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_setmood(self, ctx: commands.Context, mood: str):
+        """
+        Sets Skippy's current mood, influencing his responses.
+        Use `[p]skippy showmoods` to see available moods.
+        """
+        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        if mood.lower() not in mood_prompts:
+            await ctx.send(
+                f"Invalid mood. Available moods are: {', '.join(mood_prompts.keys())}. "
+                f"You can add new ones with `{ctx.prefix}skippy addmoodprompt`."
+            )
+            return
+
+        await self.config.guild(ctx.guild).current_mood.set(mood.lower())
+        await ctx.send(f"Skippy's mood has been set to: `{mood.lower()}`. Observe his demeanor.")
+        log.info(f"Skippy's mood set to {mood.lower()} for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="showmood")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showmood(self, ctx: commands.Context):
+        """
+        Shows Skippy's current active mood.
+        """
+        current_mood = await self.config.guild(ctx.guild).current_mood()
+        await ctx.send(f"Skippy's current mood is: `{current_mood}`.")
+
+    @_skippy.command(name="showmoods")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_showmoods(self, ctx: commands.Context):
+        """
+        Lists all available moods and their descriptions/prompts.
+        """
+        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        if not mood_prompts:
+            await ctx.send("No moods are configured.")
+            return
+
+        response_text = "Available Moods for Skippy:\n"
+        for mood, prompt in mood_prompts.items():
+            # Truncate prompt for display to keep it readable
+            display_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt
+            response_text += f"**`{mood}`**: {display_prompt}\n"
+
+        for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+            await ctx.send(page)
+
+    @_skippy.command(name="addmoodprompt")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_addmoodprompt(self, ctx: commands.Context, mood_name: str, *, prompt_text: str):
+        """
+        Adds or updates a personality prompt for a specific mood.
+        This allows you to customize the text for each mood.
+        Example: `[p]skippy addmoodprompt playful You are Skippy, a mischievous wizard who enjoys riddles.`
+        """
+        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+            mood_prompts[mood_name.lower()] = prompt_text
+        await ctx.send(
+            f"Personality prompt for mood `{mood_name.lower()}` has been set/updated. Skippy now understands this new facet.")
+        log.info(f"Custom mood prompt '{mood_name.lower()}' added/updated for guild: {ctx.guild.id}")
+
+    @_skippy.command(name="removemoodprompt")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def _skippy_removemoodprompt(self, ctx: commands.Context, mood_name: str):
+        """
+        Removes a custom mood prompt. Cannot remove 'normal'.
+        """
+        if mood_name.lower() == "normal":
+            await ctx.send(
+                "The 'normal' mood prompt cannot be removed. It is Skippy's default state, you naysayer!")
+            return
+
+        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+            if mood_name.lower() in mood_prompts:
+                del mood_prompts[mood_name.lower()]
+                await ctx.send(f"Mood prompt `{mood_name.lower()}` has been banished from Skippy's lexicon.")
+                log.info(f"Custom mood prompt '{mood_name.lower()}' removed for guild: {ctx.guild.id}")
+            else:
+                await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
