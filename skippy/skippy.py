@@ -1024,7 +1024,7 @@ class Skippy(commands.Cog):
         if not api_key:
             await ctx.send(
                 "Poppycock! The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key}>`."
+                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>}}`."
             )
             return None
 
@@ -1747,6 +1747,7 @@ class Skippy(commands.Cog):
             # For now, it runs in the background.
             await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
+            # Pass image_attachments_data to _get_gemini_response
         await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
     @_skippy.command(name="clearconversation")
