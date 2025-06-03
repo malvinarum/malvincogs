@@ -1278,14 +1278,15 @@ class Skippy(commands.Cog):
                     f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d %H:%M:%S')})")
 
             # Combine all memories into a single string for pagination
+            # Removed the triple backticks from here
             full_response_text = (
                     f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
-                    f"```\n" + "\n".join(memories_list_str) + "\n```"
+                    + "\n".join(memories_list_str)
             )
 
             # Paginate the content and send it using Redbot's menu system
-            pages = [p for p in pagify(full_response_text, delims=["\n"],
-                                       escape_mass_mentions=True)]  # Convert pagify object to a list
+            # Added triple backticks around each page
+            pages = [f"```\n{p}\n```" for p in pagify(full_response_text, delims=["\n"], escape_mass_mentions=True)]
             await menu(ctx, pages)
 
         except mysql.connector.Error as err:
