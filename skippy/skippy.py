@@ -636,1392 +636,1411 @@ class Skippy(commands.Cog):
         conn = None
         cursor = None
         try:
-            async with self.session.post(api_url, headers=headers, data=json.dumps(extraction_payload)) as response:
-                response.raise_for_status()
-                result = await response.json()
-
-            extracted_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text",
-                                                                                                            "").strip()
-
-            if extracted_text and extracted_text.upper() != "NONE":
-                parsed_facts_count = 0
-                conn = await self._get_db_connection()
-                cursor = conn.cursor()
-
-                for line in extracted_text.split('\n'):
-                    match = re.match(r"^\s*([a-zA-Z0-9_]+):\s*(.*)$", line)
-                    if match:
-                        key = match.group(1).lower()
-                        value = match.group(2).strip()
-                        memory_content = f"{key}: {value}"
-
-                        embedding = await self._get_embeddings(memory_content)
-                        embedding_bytes = embedding.tobytes()
-
-                        insert_sql = """
-                                     INSERT INTO skippy_long_term_memory (user_id, guild_id, content, keywords, embedding)
-                                     VALUES (%s, %s, %s, %s, %s)
-                                     """
-                        await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
-                                                            (ctx.author.id, ctx.guild.id, memory_content, key,
-                                                             embedding_bytes))
-                        parsed_facts_count += 1
-                conn.commit()
-                if parsed_facts_count > 0:
-                    log.info(
-                        f"Automatically learned {parsed_facts_count} facts from user {ctx.author.id} in guild {ctx.guild.id} to MySQL.")
-            else:
-                log.debug(f"No new facts extracted from user {ctx.author.id}'s message.")
-
-        except aiohttp.ClientError as e:
-            log.error(f"HTTP error during fact extraction for guild {ctx.guild.id}: {e}")
-        except mysql.connector.Error as err:
-            log.error(f"Error storing learned facts to MySQL: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        except json.JSONDecodeError as e:
-            log.error(f"JSON decode error during fact extraction for guild {ctx.guild.id}: {e}")
-        except Exception as e:
-            log.error(f"Unexpected error during fact extraction for guild {ctx.guild.id}: {e}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    async def _extract_and_store_relationships(self, ctx: commands.Context, user_message: str, mentioned_users: list):
-        """
-        NEW: Helper method to extract and store relationships between users from a message using Gemini.
-        It now provides Gemini with known user names for better ID resolution.
-        """
-        guild_settings = await self.config.guild(ctx.guild).all()
-        api_key = guild_settings["api_key"]
-
-        if not api_key:
-            log.warning("Cannot auto-learn relationships: Gemini API key not set.")
-            return
-        if self.db_pool is None:
-            log.warning("Cannot auto-learn relationships: MySQL database not connected.")
-            return
-
-        # Gather all known user names for context
-        known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-        known_users_prompt_part = ""
-        if known_users_map:
-            known_users_info = []
-            for user_id, names in known_users_map.items():
-                member = ctx.guild.get_member(user_id)
-                if member:  # Only include users currently in the guild
-                    name_str = f"'{member.display_name}'"
-                    if len(names) > 1:
-                        other_names = [n for n in names if n != member.display_name]
-                        if other_names:
-                            name_str += f""" (also known as {', '.join([f"'{n}'" for n in other_names])})"""
-                    known_users_info.append(f"ID:{user_id} is {name_str}")
-            if known_users_info:
-                known_users_prompt_part = "Here is a list of known users and their associated Discord IDs and names:\n" + \
-                                          "```\n" + "\n".join(known_users_info) + "\n```\n" + \
-                                          "When identifying users in relationships, ALWAYS use their Discord User ID from this list if available. " + \
-                                          "If a name is mentioned but no ID is given, try to infer the ID from this list.\n\n"
-
-        relationship_prompt = (
-            f"{known_users_prompt_part}"  # Include known users context
-            "Analyze the following message for stated or strongly implied relationships between users. "
-            "Identify two distinct users from the message (either the author or a mentioned user, or inferred by name) "
-            "and their relationship type. Output each identified relationship on a new line "
-            "in the exact format: `RELATIONSHIP: User1_ID:<user_id_1>; User2_ID:<user_id_2>; Type:<relationship_type>; Description:<concise context>`. "
-            "For `User1_ID`, use the ID of the person stating the relationship (often the author) or the primary subject. "
-            "For `User2_ID`, use the ID of the person being described in the relationship. "
-            "For `Type`, use a simple descriptor like 'sibling', 'friend', 'spouse', 'colleague', 'parent', 'child', 'partner', 'mentor', 'student'. "
-            "If no clear relationships are found, output 'NONE'.\n\n"
-            "Example:\n"
-            "Message: My brother <@12345> and I are going to the store. (Author: <@98765>)\n"
-            "Output: RELATIONSHIP: User1_ID:98765; User2_ID:12345; Type:sibling; Description:going to the store with brother.\n\n"
-            "Example:\n"
-            "Message: Jane is my best friend. (Author: <@33445>, Known Users: ID:11122 is 'Jane')\n"
-            "Output: RELATIONSHIP: User1_ID:33445; User2_ID:11122; Type:friend; Description:is my best friend.\n\n"
-            f"Message: {user_message}\nOutput:"
-        )
-
-        extraction_payload = {
-            "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
-        }
-        headers = {"Content-Type": "application/json"}
-        # Use the new model for relationship extraction
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
-
-        conn = None
-        cursor = None
-        try:
-            async with self.session.post(api_url, headers=headers, data=json.dumps(extraction_payload)) as response:
-                response.raise_for_status()
-                result = await response.json()
-
-            extracted_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text",
-                                                                                                            "").strip()
-
-            if extracted_text and extracted_text.upper() != "NONE":
-                parsed_relationships_count = 0
-                conn = await self._get_db_connection()
-                cursor = conn.cursor()
-
-                relationship_regex = re.compile(
-                    r"RELATIONSHIP: User1_ID:(\d+); User2_ID:(\d+); Type:([a-zA-Z0-9_]+); Description:(.*)"
-                )
-
-                for line in extracted_text.split('\n'):
-                    match = relationship_regex.match(line.strip())
-                    if match:
-                        user1_id_str, user2_id_str, rel_type, description = match.groups()
-                        try:
-                            user1_id = int(user1_id_str)
-                            user2_id = int(user2_id_str)
-                        except ValueError:
-                            log.warning(f"Failed to parse user IDs in relationship: {line}")
-                            continue
-
-                        # Validate if the extracted IDs are actually members of the guild
-                        member1 = ctx.guild.get_member(user1_id)
-                        member2 = ctx.guild.get_member(user2_id)
-
-                        if not member1 or not member2:
-                            log.warning(
-                                f"Skipping relationship - one or both user IDs ({user1_id}, {user2_id}) not found in guild: {line}")
-                            continue
-
-                        # Ensure the relationship involves the author or a mentioned user
-                        # This prevents the LLM from creating relationships about random users not in context
-                        involved_users_in_message = {ctx.author.id}.union({m.id for m in mentioned_users})
-                        if user1_id not in involved_users_in_message and user2_id not in involved_users_in_message:
-                            log.debug(f"Skipping relationship - neither user involved in message: {line}")
-                            continue
-
-                        insert_sql = """
-                                     INSERT INTO skippy_relationships (user_id_initiator, user_id_target,
-                                                                       relationship_type, description, guild_id)
-                                     VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY
-                                     UPDATE description = \
-                                     VALUES (description), timestamp = \
-                                     VALUES (timestamp)
-                                     """
-                        await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
-                                                            (user1_id, user2_id, rel_type.lower(), description.strip(),
-                                                             ctx.guild.id))
-                        parsed_relationships_count += 1
-                conn.commit()
-                if parsed_relationships_count > 0:
-                    log.info(
-                        f"Automatically learned {parsed_relationships_count} relationships from user {ctx.author.id} in guild {ctx.guild.id} to MySQL.")
-            else:
-                log.debug(f"No new relationships extracted from user {ctx.author.id}'s message.")
-
-        except aiohttp.ClientError as e:
-            log.error(f"HTTP error during relationship extraction for guild {ctx.guild.id}: {e}")
-        except mysql.connector.Error as err:
-            log.error(f"Error storing learned relationships to MySQL: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        except json.JSONDecodeError as e:
-            log.error(f"JSON decode error during relationship extraction for guild {ctx.guild.id}: {e}")
-        except Exception as e:
-            log.error(f"Unexpected error during relationship extraction for guild {ctx.guild.id}: {e}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    async def _retrieve_relevant_memories(self, user_prompt: str, ctx: commands.Context,
-                                          user_ids_in_conversation: list) -> str:
-        """
-        Retrieves relevant long-term memories from MySQL based on the user's prompt
-        using embedding similarity (RAG).
-        Returns a formatted string of relevant memories to be included in the Gemini prompt.
-        user_ids_in_conversation: List of user IDs (author + mentioned users) relevant to the current conversation.
-        """
-        if self.db_pool is None:
-            log.warning("MySQL database not connected. Cannot retrieve long-term memories.")
-            return ""
-
-        conn = None
-        cursor = None
-        try:
             conn = await self._get_db_connection()
             cursor = conn.cursor()
 
-            query_embedding = await self._get_embeddings(user_prompt)
+            for line in extracted_text.split('\n'):
+                match = re.match(r"^\s*([a-zA-Z0-9_]+):\s*(.*)$", line)
+                if match:
+                    key = match.group(1).lower()
+                    value = match.group(2).strip()
+                    memory_content = f"{key}: {value}"
 
-            all_memories_for_users = []
-            if not user_ids_in_conversation:
-                log.debug("No relevant users for memory retrieval.")
-                return ""
+                    embedding = await self._get_embeddings(memory_content)
+                    embedding_bytes = embedding.tobytes()
 
-            placeholders = ', '.join(['%s'] * len(user_ids_in_conversation))
-            sql_fetch_memories = f"""
+                    insert_sql = """
+                                 INSERT INTO skippy_long_term_memory (user_id, guild_id, content, keywords, embedding)
+                                 VALUES (%s, %s, %s, %s, %s)
+                                 """
+                    await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
+                                                        (ctx.author.id, ctx.guild.id, memory_content, key,
+                                                         embedding_bytes))
+                    parsed_facts_count += 1
+            conn.commit()
+            if parsed_facts_count > 0:
+                log.info(
+                    f"Automatically learned {parsed_facts_count} facts from user {ctx.author.id} in guild {ctx.guild.id} to MySQL.")
+        else:
+        log.debug(f"No new facts extracted from user {ctx.author.id}'s message.")
+
+    except aiohttp.ClientError as e:
+    log.error(f"HTTP error during fact extraction for guild {ctx.guild.id}: {e}")
+
+except mysql.connector.Error as err:
+log.error(f"Error storing learned facts to MySQL: {err}", exc_info=True)
+if conn:
+    conn.rollback()
+except json.JSONDecodeError as e:
+log.error(f"JSON decode error during fact extraction for guild {ctx.guild.id}: {e}")
+except Exception as e:
+log.error(f"Unexpected error during fact extraction for guild {ctx.guild.id}: {e}", exc_info=True)
+finally:
+if cursor:
+    cursor.close()
+if conn:
+    conn.close()
+
+
+async def _extract_and_store_relationships(self, ctx: commands.Context, user_message: str, mentioned_users: list):
+    """
+    NEW: Helper method to extract and store relationships between users from a message using Gemini.
+    It now provides Gemini with known user names for better ID resolution.
+    """
+    guild_settings = await self.config.guild(ctx.guild).all()
+    api_key = guild_settings["api_key"]
+
+    if not api_key:
+        log.warning("Cannot auto-learn relationships: Gemini API key not set.")
+        return
+    if self.db_pool is None:
+        log.warning("Cannot auto-learn relationships: MySQL database not connected.")
+        return
+
+    # Gather all known user names for context
+    known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+    known_users_prompt_part = ""
+    if known_users_map:
+        known_users_info = []
+        for user_id, names in known_users_map.items():
+            member = ctx.guild.get_member(user_id)
+            if member:  # Only include users currently in the guild
+                name_str = f"'{member.display_name}'"
+                if len(names) > 1:
+                    other_names = [n for n in names if n != member.display_name]
+                    if other_names:
+                        name_str += f""" (also known as {', '.join([f"'{n}'" for n in other_names])})"""
+                known_users_info.append(f"ID:{user_id} is {name_str}")
+        if known_users_info:
+            known_users_prompt_part = "Here is a list of known users and their associated Discord IDs and names:\n" + \
+                                      "```\n" + "\n".join(known_users_info) + "\n```\n" + \
+                                      "When identifying users in relationships, ALWAYS use their Discord User ID from this list if available. " + \
+                                      "If a name is mentioned but no ID is given, try to infer the ID from this list.\n\n"
+
+    relationship_prompt = (
+        f"{known_users_prompt_part}"  # Include known users context
+        "Analyze the following message for stated or strongly implied relationships between users. "
+        "Identify two distinct users from the message (either the author or a mentioned user, or inferred by name) "
+        "and their relationship type. Output each identified relationship on a new line "
+        "in the exact format: `RELATIONSHIP: User1_ID:<user_id_1>; User2_ID:<user_id_2>; Type:<relationship_type>; Description:<concise context>`. "
+        "For `User1_ID`, use the ID of the person stating the relationship (often the author) or the primary subject. "
+        "For `User2_ID`, use the ID of the person being described in the relationship. "
+        "For `Type`, use a simple descriptor like 'sibling', 'friend', 'spouse', 'colleague', 'parent', 'child', 'partner', 'mentor', 'student'. "
+        "If no clear relationships are found, output 'NONE'.\n\n"
+        "Example:\n"
+        "Message: My brother <@12345> and I are going to the store. (Author: <@98765>)\n"
+        "Output: RELATIONSHIP: User1_ID:98765; User2_ID:12345; Type:sibling; Description:going to the store with brother.\n\n"
+        "Example:\n"
+        "Message: Jane is my best friend. (Author: <@33445>, Known Users: ID:11122 is 'Jane')\n"
+        "Output: RELATIONSHIP: User1_ID:33445; User2_ID:11122; Type:friend; Description:is my best friend.\n\n"
+        f"Message: {user_message}\nOutput:"
+    )
+
+    extraction_payload = {
+        "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
+    }
+    headers = {"Content-Type": "application/json"}
+    # Use the new model for relationship extraction
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+
+    conn = None
+    cursor = None
+    try:
+        async with self.session.post(api_url, headers=headers, data=json.dumps(extraction_payload)) as response:
+            response.raise_for_status()
+            result = await response.json()
+
+        extracted_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text",
+                                                                                                        "").strip()
+
+        if extracted_text and extracted_text.upper() != "NONE":
+            parsed_relationships_count = 0
+            conn = await self._get_db_connection()
+            cursor = conn.cursor()
+
+            relationship_regex = re.compile(
+                r"RELATIONSHIP: User1_ID:(\d+); User2_ID:(\d+); Type:([a-zA-Z0-9_]+); Description:(.*)"
+            )
+
+            for line in extracted_text.split('\n'):
+                match = relationship_regex.match(line.strip())
+                if match:
+                    user1_id_str, user2_id_str, rel_type, description = match.groups()
+                    try:
+                        user1_id = int(user1_id_str)
+                        user2_id = int(user2_id_str)
+                    except ValueError:
+                        log.warning(f"Failed to parse user IDs in relationship: {line}")
+                        continue
+
+                    # Validate if the extracted IDs are actually members of the guild
+                    member1 = ctx.guild.get_member(user1_id)
+                    member2 = ctx.guild.get_member(user2_id)
+
+                    if not member1 or not member2:
+                        log.warning(
+                            f"Skipping relationship - one or both user IDs ({user1_id}, {user2_id}) not found in guild: {line}")
+                        continue
+
+                    # Ensure the relationship involves the author or a mentioned user
+                    # This prevents the LLM from creating relationships about random users not in context
+                    involved_users_in_message = {ctx.author.id}.union({m.id for m in mentioned_users})
+                    if user1_id not in involved_users_in_message and user2_id not in involved_users_in_message:
+                        log.debug(f"Skipping relationship - neither user involved in message: {line}")
+                        continue
+
+                    insert_sql = """
+                                 INSERT INTO skippy_relationships (user_id_initiator, user_id_target,
+                                                                   relationship_type, description, guild_id)
+                                 VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY
+                                 UPDATE description = \
+                                 VALUES (description), timestamp = \
+                                 VALUES (timestamp) \
+                                 """
+                    await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
+                                                        (user1_id, user2_id, rel_type.lower(), description.strip(),
+                                                         ctx.guild.id))
+                    parsed_relationships_count += 1
+            conn.commit()
+            if parsed_relationships_count > 0:
+                log.info(
+                    f"Automatically learned {parsed_relationships_count} relationships from user {ctx.author.id} in guild {ctx.guild.id} to MySQL.")
+        else:
+            log.debug(f"No new relationships extracted from user {ctx.author.id}'s message.")
+
+    except aiohttp.ClientError as e:
+        log.error(f"HTTP error during relationship extraction for guild {ctx.guild.id}: {e}")
+    except mysql.connector.Error as err:
+        log.error(f"Error storing learned relationships to MySQL: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    except json.JSONDecodeError as e:
+        log.error(f"JSON decode error during relationship extraction for guild {ctx.guild.id}: {e}")
+    except Exception as e:
+        log.error(f"Unexpected error during relationship extraction for guild {ctx.guild.id}: {e}", exc_info=True)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+async def _retrieve_relevant_memories(self, user_prompt: str, ctx: commands.Context,
+                                      user_ids_in_conversation: list) -> str:
+    """
+    Retrieves relevant long-term memories from MySQL based on the user's prompt
+    using embedding similarity (RAG).
+    Returns a formatted string of relevant memories to be included in the Gemini prompt.
+    user_ids_in_conversation: List of user IDs (author + mentioned users) relevant to the current conversation.
+    """
+    if self.db_pool is None:
+        log.warning("MySQL database not connected. Cannot retrieve long-term memories.")
+        return ""
+
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        query_embedding = await self._get_embeddings(user_prompt)
+
+        all_memories_for_users = []
+        if not user_ids_in_conversation:
+            log.debug("No relevant users for memory retrieval.")
+            return ""
+
+        placeholders = ', '.join(['%s'] * len(user_ids_in_conversation))
+        sql_fetch_memories = f"""
                                  SELECT content, embedding, user_id
                                  FROM skippy_long_term_memory
                                  WHERE user_id IN ({placeholders}) AND guild_id = %s
                                  ORDER BY timestamp DESC LIMIT 200
                                  """
-            params = tuple(user_ids_in_conversation) + (ctx.guild.id,)
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql_fetch_memories, params)
+        params = tuple(user_ids_in_conversation) + (ctx.guild.id,)
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql_fetch_memories, params)
 
-            memories_raw = cursor.fetchall()
+        memories_raw = cursor.fetchall()
 
-            if not memories_raw:
-                return ""
-
-            scored_memories = []
-            for content, embedding_blob, memory_user_id in memories_raw:
-                try:
-                    stored_embedding = np.frombuffer(embedding_blob, dtype=np.float32)
-
-                    similarity = cosine_similarity(query_embedding.reshape(1, -1), stored_embedding.reshape(1, -1))[0][
-                        0]
-
-                    scored_memories.append((content, similarity, memory_user_id))
-                except Exception as e:
-                    log.error(f"Error processing embedding for memory: {content[:50]}... Error: {e}")
-                    continue
-
-            scored_memories.sort(key=lambda x: x[1], reverse=True)
-            top_relevant_memories = scored_memories[:5]
-
-            if not top_relevant_memories:
-                return ""
-
-            formatted_memories = []
-            for content, similarity, uid in top_relevant_memories:
-                member = ctx.guild.get_member(uid)
-                user_display_name = member.display_name if member else f"User ID: {uid}"
-                formatted_memories.append(f"Fact about {user_display_name}: {content}")
-
-            return (
-                "You have the following specific facts and memories about the users involved in this conversation:\n"
-                f"```\n{' | '.join(formatted_memories)}\n```\n"
-                "Incorporate these facts subtly and naturally where relevant, without explicitly stating you 'remembered' them from a database."
-            )
-
-        except mysql.connector.Error as err:
-            log.error(f"Error retrieving long-term memories from MySQL for RAG: {err}", exc_info=True)
-            return ""
-        except Exception as e:
-            log.error(f"Unexpected error during RAG memory retrieval: {e}", exc_info=True)
-            return ""
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    async def _retrieve_relevant_relationships(self, ctx: commands.Context, user_ids_in_conversation: list) -> str:
-        """
-        Retrieves relevant relationships from MySQL based on the users involved in the conversation.
-        Returns a formatted string of relevant relationships to be included in the Gemini prompt.
-        """
-        if self.db_pool is None:
-            log.warning("MySQL database not connected. Cannot retrieve relationships.")
-            return ""
-        if not user_ids_in_conversation or len(user_ids_in_conversation) < 2:
-            log.debug("Less than two relevant users for relationship retrieval. Skipping.")
+        if not memories_raw:
             return ""
 
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
+        scored_memories = []
+        for content, embedding_blob, memory_user_id in memories_raw:
+            try:
+                stored_embedding = np.frombuffer(embedding_blob, dtype=np.float32)
 
-            placeholders = ', '.join(['%s'] * len(user_ids_in_conversation))
-            sql = f"""
+                similarity = cosine_similarity(query_embedding.reshape(1, -1), stored_embedding.reshape(1, -1))[0][
+                    0]
+
+                scored_memories.append((content, similarity, memory_user_id))
+            except Exception as e:
+                log.error(f"Error processing embedding for memory: {content[:50]}... Error: {e}")
+                continue
+
+        scored_memories.sort(key=lambda x: x[1], reverse=True)
+        top_relevant_memories = scored_memories[:5]
+
+        if not top_relevant_memories:
+            return ""
+
+        formatted_memories = []
+        for content, similarity, uid in top_relevant_memories:
+            member = ctx.guild.get_member(uid)
+            user_display_name = member.display_name if member else f"User ID: {uid}"
+            formatted_memories.append(f"Fact about {user_display_name}: {content}")
+
+        return (
+            "You have the following specific facts and memories about the users involved in this conversation:\n"
+            f"```\n{' | '.join(formatted_memories)}\n```\n"
+            "Incorporate these facts subtly and naturally where relevant, without explicitly stating you 'remembered' them from a database."
+        )
+
+    except mysql.connector.Error as err:
+        log.error(f"Error retrieving long-term memories from MySQL for RAG: {err}", exc_info=True)
+        return ""
+    except Exception as e:
+        log.error(f"Unexpected error during RAG memory retrieval: {e}", exc_info=True)
+        return ""
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+async def _retrieve_relevant_relationships(self, ctx: commands.Context, user_ids_in_conversation: list) -> str:
+    """
+    Retrieves relevant relationships from MySQL based on the users involved in the conversation.
+    Returns a formatted string of relevant relationships to be included in the Gemini prompt.
+    """
+    if self.db_pool is None:
+        log.warning("MySQL database not connected. Cannot retrieve relationships.")
+        return ""
+    if not user_ids_in_conversation or len(user_ids_in_conversation) < 2:
+        log.debug("Less than two relevant users for relationship retrieval. Skipping.")
+        return ""
+
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        placeholders = ', '.join(['%s'] * len(user_ids_in_conversation))
+        sql = f"""
                   SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
                   FROM skippy_relationships
                   WHERE guild_id = %s
                   AND (user_id_initiator IN ({placeholders}) OR user_id_target IN ({placeholders}))
                   LIMIT 10
                   """
-            params = (ctx.guild.id,) + tuple(user_ids_in_conversation) + tuple(user_ids_in_conversation)
+        params = (ctx.guild.id,) + tuple(user_ids_in_conversation) + tuple(user_ids_in_conversation)
 
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql, params)
-            relationships = cursor.fetchall()
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql, params)
+        relationships = cursor.fetchall()
 
-            if not relationships:
-                return ""
+        if not relationships:
+            return ""
 
-            formatted_relationships = []  # Initialize this list
-            for initiator_id, target_id, rel_type, description, timestamp in relationships:
-                initiator_member = ctx.guild.get_member(initiator_id)
-                target_member = ctx.guild.get_member(target_id)
+        formatted_relationships = []  # Initialize this list
+        for initiator_id, target_id, rel_type, description, timestamp in relationships:
+            initiator_member = ctx.guild.get_member(initiator_id)
+            target_member = ctx.guild.get_member(target_id)
 
-                initiator_name = initiator_member.display_name if initiator_member else f"User ID: {initiator_id}"
-                target_name = target_member.display_name if target_member else f"User ID: {target_id}"
+            initiator_name = initiator_member.display_name if initiator_member else f"User ID: {initiator_id}"
+            target_name = target_member.display_name if target_member else f"User ID: {target_id}"
 
-                rel_desc = f" ({description})" if description else ""
-                formatted_relationships.append(  # Corrected line
-                    f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
-                )
-
-            formatted_relationships = list(set(formatted_relationships))  # Remove duplicates
-
-            return (
-                "You also have the following known relationships between users:\n"
-                f"```\n{' | '.join(formatted_relationships)}\n```\n"
-                "Utilize this relationship knowledge to inform your conversational responses, especially when addressing or referring to specific users."
+            rel_desc = f" ({description})" if description else ""
+            formatted_relationships.append(  # Corrected line
+                f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
             )
 
-        except mysql.connector.Error as err:
-            log.error(f"Error retrieving relationships from MySQL: {err}", exc_info=True)
-            return ""
-        except Exception as e:
-            log.error(f"Unexpected error during relationship retrieval: {e}", exc_info=True)
-            return ""
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
+        formatted_relationships = list(set(formatted_relationships))  # Remove duplicates
 
-    async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None,
-                                   image_parts_data: list = None):
-        """
-        Helper method to call the Gemini API and send the response.
-        Handles API key checks, network requests, and error handling.
-        Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
-        and manages conversation history.
-        The personality, memory, and relationship contexts are now combined into a single initial prompt.
-        NEW: Now accepts and sends image data to the Gemini API.
-        UPDATED: Added max_output_tokens to generationConfig for shorter replies.
-        """
-        guild_settings = await self.config.guild(ctx.guild).all()
-        api_key = guild_settings["api_key"]
-        max_turns = guild_settings["max_conversation_turns"]
-        current_mood = guild_settings["current_mood"]  # Get the potentially updated current mood
-        guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+        return (
+            "You also have the following known relationships between users:\n"
+            f"```\n{' | '.join(formatted_relationships)}\n```\n"
+            "Utilize this relationship knowledge to inform your conversational responses, especially when addressing or referring to specific users."
+        )
 
-        core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
-        actual_personality_prompt = core_personality_prompt
+    except mysql.connector.Error as err:
+        log.error(f"Error retrieving relationships from MySQL: {err}", exc_info=True)
+        return ""
+    except Exception as e:
+        log.error(f"Unexpected error during relationship retrieval: {e}", exc_info=True)
+        return ""
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
-        if current_mood != "normal":
-            chosen_mood_prompt = guild_mood_prompts.get(current_mood, MOOD_PROMPTS.get(current_mood))
-            if chosen_mood_prompt and chosen_mood_prompt != CORE_PERSONALITY:
-                actual_personality_prompt = (
-                    f"{core_personality_prompt}\n\n"
-                    f"Additionally, for this response, adopt a **{current_mood}** demeanor: "
-                    f"{chosen_mood_prompt}"
-                )
 
-        channel_history_key = str(ctx.channel.id)
-        current_history = guild_settings["conversation_history"].get(channel_history_key, [])
+async def _get_gemini_response(self, ctx: commands.Context, user_prompt: str, mentioned_users: list = None,
+                               image_parts_data: list = None):
+    """
+    Helper method to call the Gemini API and send the response.
+    Handles API key checks, network requests, and error handling.
+    Includes the dynamic personality (mood-based), user-specific memories (from MySQL via RAG),
+    and manages conversation history.
+    The personality, memory, and relationship contexts are now combined into a single initial prompt.
+    NEW: Now accepts and sends image data to the Gemini API.
+    UPDATED: Added max_output_tokens to generationConfig for shorter replies.
+    """
+    guild_settings = await self.config.guild(ctx.guild).all()
+    api_key = guild_settings["api_key"]
+    max_turns = guild_settings["max_conversation_turns"]
+    current_mood = guild_settings["current_mood"]  # Get the potentially updated current mood
+    guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
 
-        user_ids_in_conversation = {ctx.author.id}
-        if mentioned_users:
-            user_ids_in_conversation.update({m.id for m in mentioned_users})
-        user_ids_list = list(user_ids_in_conversation)
+    core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
+    actual_personality_prompt = core_personality_prompt
 
-        # Retrieve relevant memories and relationships to inject into the prompt
-        memory_retrieval_prompt = await self._retrieve_relevant_memories(user_prompt, ctx, user_ids_list)
-        relationship_retrieval_prompt = await self._retrieve_relevant_relationships(ctx, user_ids_list)
-
-        if not api_key:
-            await ctx.send(
-                "Poppycock! The Gemini API key has not been set. "
-                f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>}}`."
+    if current_mood != "normal":
+        chosen_mood_prompt = guild_mood_prompts.get(current_mood, MOOD_PROMPTS.get(current_mood))
+        if chosen_mood_prompt and chosen_mood_prompt != CORE_PERSONALITY:
+            actual_personality_prompt = (
+                f"{core_personality_prompt}\n\n"
+                f"Additionally, for this response, adopt a **{current_mood}** demeanor: "
+                f"{chosen_mood_prompt}"
             )
-            return None
 
-        # Combine all contextual information into a single setup prompt for Gemini
-        context_parts = [actual_personality_prompt]
+    channel_history_key = str(ctx.channel.id)
+    current_history = guild_settings["conversation_history"].get(channel_history_key, [])
 
-        if memory_retrieval_prompt:
-            context_parts.append(memory_retrieval_prompt)
+    user_ids_in_conversation = {ctx.author.id}
+    if mentioned_users:
+        user_ids_in_conversation.update({m.id for m in mentioned_users})
+    user_ids_list = list(user_ids_in_conversation)
 
-        if relationship_retrieval_prompt:
-            context_parts.append(relationship_retrieval_prompt)
+    # Retrieve relevant memories and relationships to inject into the prompt
+    memory_retrieval_prompt = await self._retrieve_relevant_memories(user_prompt, ctx, user_ids_list)
+    relationship_retrieval_prompt = await self._retrieve_relevant_relationships(ctx, user_ids_list)
 
-        # Create the initial system/context prompt that sets Skippy's persona and provides memory/relationship context
-        initial_context_prompt = "\n\n".join(context_parts)
+    if not api_key:
+        await ctx.send(
+            "Poppycock! The Gemini API key has not been set. "
+            f"Please ask the bot owner to set it using `{ctx.prefix}skippy setkey <your_api_key>}}`."
+        )
+        return None
 
-        payload_contents = []
-        if initial_context_prompt:
-            payload_contents.append({"role": "user", "parts": [{"text": initial_context_prompt}]})
-            payload_contents.append(
-                {"role": "model",
-                 "parts": [{"text": "Understood. The tapestry of existence is clear."}]})  # Skippy's acknowledgement
+    # Combine all contextual information into a single setup prompt for Gemini
+    context_parts = [actual_personality_prompt]
 
-        # Truncate conversation history to fit within context limits
-        truncated_history_for_payload = current_history[-(max_turns * 2):]
-        payload_contents.extend(truncated_history_for_payload)
+    if memory_retrieval_prompt:
+        context_parts.append(memory_retrieval_prompt)
 
-        # Add the user's current prompt and any image parts
-        user_parts = [{"text": user_prompt}]
-        if image_parts_data:
-            for img_data in image_parts_data:
-                user_parts.append({
-                    "inlineData": {
-                        "mimeType": img_data["mime_type"],
-                        "data": img_data["data"]
-                    }
-                })
-        payload_contents.append({"role": "user", "parts": user_parts})
+    if relationship_retrieval_prompt:
+        context_parts.append(relationship_retrieval_prompt)
 
-        # --- IMPORTANT CHANGE: Updated model name ---
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
-        # --- END IMPORTANT CHANGE ---
+    # Create the initial system/context prompt that sets Skippy's persona and provides memory/relationship context
+    initial_context_prompt = "\n\n".join(context_parts)
 
-        payload = {
-            "contents": payload_contents,
-            "generationConfig": {  # NEW: Added generationConfig for max_output_tokens
-                "max_output_tokens": 150  # Limit the response length to 150 tokens
-            }
+    payload_contents = []
+    if initial_context_prompt:
+        payload_contents.append({"role": "user", "parts": [{"text": initial_context_prompt}]})
+        payload_contents.append(
+            {"role": "model",
+             "parts": [{"text": "Understood. The tapestry of existence is clear."}]})  # Skippy's acknowledgement
+
+    # Truncate conversation history to fit within context limits
+    truncated_history_for_payload = current_history[-(max_turns * 2):]
+    payload_contents.extend(truncated_history_for_payload)
+
+    # Add the user's current prompt and any image parts
+    user_parts = [{"text": user_prompt}]
+    if image_parts_data:
+        for img_data in image_parts_data:
+            user_parts.append({
+                "inlineData": {
+                    "mimeType": img_data["mime_type"],
+                    "data": img_data["data"]
+                }
+            })
+    payload_contents.append({"role": "user", "parts": user_parts})
+
+    # --- IMPORTANT CHANGE: Updated model name ---
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+    # --- END IMPORTANT CHANGE ---
+
+    payload = {
+        "contents": payload_contents,
+        "generationConfig": {  # NEW: Added generationConfig for max_output_tokens
+            "max_output_tokens": 500  # Increased from 150 to 500
         }
-        headers = {
-            "Content-Type": "application/json"
-        }
+    }
+    headers = {
+        "Content-Type": "application/json"
+    }
 
-        message = await ctx.send("Hum dee dum! Thinking... please wait. My ethereal gears are grinding.")
+    message = await ctx.send("Hum dee dum! Thinking... please wait. My ethereal gears are grinding.")
 
-        try:
-            async with self.session.post(api_url, headers=headers, data=json.dumps(payload)) as response:
-                response.raise_for_status()
-                result = await response.json()
+    try:
+        async with self.session.post(api_url, headers=headers, data=json.dumps(payload)) as response:
+            response.raise_for_status()
+            result = await response.json()
 
-            if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0][
-                "content"].get("parts"):
-                generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0][
+            "content"].get("parts"):
+            generated_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-                # Update conversation history
-                current_history.append(
-                    {"role": "user", "parts": [{"text": user_prompt}]})  # Store text part of user's message
-                # If there were images, add a placeholder to history for context, but not the raw image data
-                if image_parts_data:
-                    current_history[-1]["parts"].append({"text": f"(User attached {len(image_parts_data)} image(s))"})
+            # Update conversation history
+            current_history.append(
+                {"role": "user", "parts": [{"text": user_prompt}]})  # Store text part of user's message
+            # If there were images, add a placeholder to history for context, but not the raw image data
+            if image_parts_data:
+                current_history[-1]["parts"].append({"text": f"(User attached {len(image_parts_data)} image(s))"})
 
-                current_history.append({"role": "model", "parts": [{"text": generated_text}]})
+            current_history.append({"role": "model", "parts": [{"text": generated_text}]})
 
-                current_history = current_history[-(max_turns * 2):]  # Ensure history doesn't exceed max turns
+            current_history = current_history[-(max_turns * 2):]  # Ensure history doesn't exceed max turns
 
-                async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
-                    conv_hist[channel_history_key] = current_history
+            async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
+                conv_hist[channel_history_key] = current_history
 
-                for page in pagify(generated_text, delims=["\n", " "], escape_mass_mentions=True):
-                    await ctx.send(page)
-                log.info(f"Successfully responded to Skippy prompt from guild: {ctx.guild.id}")
+            for page in pagify(generated_text, delims=["\n", " "], escape_mass_mentions=True):
+                await ctx.send(page)
+            log.info(f"Successfully responded to Skippy prompt from guild: {ctx.guild.id}")
 
-                # Asynchronously learn facts and relationships
-                auto_learn_facts = await self.config.guild(ctx.guild).auto_learn_facts()
-                if auto_learn_facts:
-                    self.bot.loop.create_task(self._extract_and_store_facts(ctx, user_prompt))
+            # Asynchronously learn facts and relationships
+            auto_learn_facts = await self.config.guild(ctx.guild).auto_learn_facts()
+            if auto_learn_facts:
+                self.bot.loop.create_task(self._extract_and_store_facts(ctx, user_prompt))
 
-                auto_learn_relationships = await self.config.guild(ctx.guild).auto_learn_relationships()
-                if auto_learn_relationships:
-                    self.bot.loop.create_task(
-                        self._extract_and_store_relationships(ctx, ctx.message.content, ctx.message.mentions))
+            auto_learn_relationships = await self.config.guild(ctx.guild).auto_learn_relationships()
+            if auto_learn_relationships:
+                self.bot.loop.create_task(
+                    self._extract_and_store_relationships(ctx, ctx.message.content, ctx.message.mentions))
 
-                return generated_text
-            else:
-                await ctx.send(
-                    "Fiddlesticks! Could not get a valid response from the Gemini API. The model might not have generated any content. Perhaps it was napping?")
-                log.warning(f"Unexpected Gemini API response structure: {result} for guild: {ctx.guild.id}")
-                return None
-
-        except aiohttp.ClientError as e:
-            await ctx.send(
-                f"A strange ethereal disturbance prevented Skippy from reaching the cosmic archives (Gemini API). Error: {e}")
-            log.error(f"HTTP error during Gemini API call for guild {ctx.guild.id}: {e}")
-            return None
-        except json.JSONDecodeError as e:
-            await ctx.send(f"Poppycock! The cosmic scrolls were unreadable. Failed to parse the API response: {e}")
-            log.error(f"JSON decode error during Gemini API call for guild {ctx.guild.id}: {e}")
-            return None
-        except Exception as e:
-            await ctx.send(f"A cosmic anomaly occurred: {e}. Skippy is quite vexed.")
-            log.error(f"Unexpected error during Gemini API call for guild {ctx.guild.id}: {e}", exc_info=True)
-            return None
-        finally:
-            try:
-                await message.delete()  # Attempt to delete the "Thinking..." message
-            except Exception:
-                pass
-
-    # Moved _skippy command group definition here, before its subcommands
-    @commands.group(name="skippy", invoke_without_command=True)
-    @commands.guild_only()
-    async def _skippy(self, ctx: commands.Context):
-        """
-        Base command for Skippy, an ancient wizard powered by Gemini.
-        """
-        await ctx.send_help(self._skippy)
-
-    @_skippy.command(name="setmysql")
-    @commands.is_owner()
-    async def _skippy_setmysql(self, ctx: commands.Context, host: str, user: str, password: str, database: str,
-                               port: int = 3306):
-        """
-        Sets the MySQL database connection details for Skippy's long-term memory.
-        Example: [p]skippy setmysql localhost skippy_user my_secret_pass skippy_db 3306
-        """
-        async with self.config.guild(ctx.guild).all() as guild_settings:
-            guild_settings["mysql_host"] = host
-            guild_settings["mysql_user"] = user
-            guild_settings["mysql_password"] = password
-            guild_settings["mysql_database"] = database
-            guild_settings["mysql_port"] = port
-
-        await self._init_db_pool()
-        if self.db_pool:
-            await ctx.send(
-                f"Hmph. MySQL connection details set. Skippy will now use `{database}` on `{host}:{port}` for his memories and relationships. Try not to break it, mortals.")
-            log.info(f"MySQL connection details set for guild: {ctx.guild.id}")
+            return generated_text
         else:
             await ctx.send(
-                "Fiddlesticks! Failed to connect to MySQL with the provided details. Check the console logs, my master, for the ethereal errors.")
-            log.error(f"Failed to set MySQL details for guild: {ctx.guild.id}")
+                "Fiddlesticks! Could not get a valid response from the Gemini API. The model might not have generated any content. Perhaps it was napping?")
+            log.warning(f"Unexpected Gemini API response structure: {result} for guild: {ctx.guild.id}")
+            return None
 
-    @_skippy.command(name="showpersonality")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showpersonality(self, ctx: commands.Context):
-        """
-        Shows Skippy's core hardcoded personality.
-        """
-        personality_text = CORE_PERSONALITY
+    except aiohttp.ClientError as e:
+        await ctx.send(
+            f"A strange ethereal disturbance prevented Skippy from reaching the cosmic archives (Gemini API). Error: {e}")
+        log.error(f"HTTP error during Gemini API call for guild {ctx.guild.id}: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        await ctx.send(f"Poppycock! The cosmic scrolls were unreadable. Failed to parse the API response: {e}")
+        log.error(f"JSON decode error during Gemini API call for guild {ctx.guild.id}: {e}")
+        return None
+    except Exception as e:
+        await ctx.send(f"A cosmic anomaly occurred: {e}. Skippy is quite vexed.")
+        log.error(f"Unexpected error during Gemini API call for guild {ctx.guild.id}: {e}", exc_info=True)
+        return None
+    finally:
+        try:
+            await message.delete()  # Attempt to delete the "Thinking..." message
+        except Exception:
+            pass
 
-        initial_header = "Skippy's Core Hardcoded Personality:\n"
-        safe_page_length = 1950
 
-        first_page = True
-        for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True,
-                           page_length=safe_page_length):
-            current_header = initial_header if first_page else ""
-            await ctx.send(f"{current_header}```{page}```")
-            first_page = False
+# Moved _skippy command group definition here, before its subcommands
+@commands.group(name="skippy", invoke_without_command=True)
+@commands.guild_only()
+async def _skippy(self, ctx: commands.Context):
+    """
+    Base command for Skippy, an ancient wizard powered by Gemini.
+    """
+    await ctx.send_help(self._skippy)
 
-        if not personality_text:
-            await ctx.send("Error: CORE_PERSONALITY is empty. This should not happen. Poppycock!")
 
-    @_skippy.command(name="remember")
-    async def _skippy_remember(self, ctx: commands.Context, *, memory_content: str):
-        """
-        Asks Skippy to remember a specific piece of information for long-term recall.
-        This will be stored in MySQL with an associated embedding.
-        Example: `[p]skippy remember I enjoy long walks on the beach.`
-        """
-        if self.db_pool is None:
+@_skippy.command(name="setmysql")
+@commands.is_owner()
+async def _skippy_setmysql(self, ctx: commands.Context, host: str, user: str, password: str, database: str,
+                           port: int = 3306):
+    """
+    Sets the MySQL database connection details for Skippy's long-term memory.
+    Example: [p]skippy setmysql localhost skippy_user my_secret_pass skippy_db 3306
+    """
+    async with self.config.guild(ctx.guild).all() as guild_settings:
+        guild_settings["mysql_host"] = host
+        guild_settings["mysql_user"] = user
+        guild_settings["mysql_password"] = password
+        guild_settings["mysql_database"] = database
+        guild_settings["mysql_port"] = port
+
+    await self._init_db_pool()
+    if self.db_pool:
+        await ctx.send(
+            f"Hmph. MySQL connection details set. Skippy will now use `{database}` on `{host}:{port}` for his memories and relationships. Try not to break it, mortals.")
+        log.info(f"MySQL connection details set for guild: {ctx.guild.id}")
+    else:
+        await ctx.send(
+            "Fiddlesticks! Failed to connect to MySQL with the provided details. Check the console logs, my master, for the ethereal errors.")
+        log.error(f"Failed to set MySQL details for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="showpersonality")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_showpersonality(self, ctx: commands.Context):
+    """
+    Shows Skippy's core hardcoded personality.
+    """
+    personality_text = CORE_PERSONALITY
+
+    initial_header = "Skippy's Core Hardcoded Personality:\n"
+    safe_page_length = 1950
+
+    first_page = True
+    for page in pagify(personality_text, delims=["\n", " "], escape_mass_mentions=True,
+                       page_length=safe_page_length):
+        current_header = initial_header if first_page else ""
+        await ctx.send(f"{current_header}```{page}```")
+        first_page = False
+
+    if not personality_text:
+        await ctx.send("Error: CORE_PERSONALITY is empty. This should not happen. Poppycock!")
+
+
+@_skippy.command(name="remember")
+async def _skippy_remember(self, ctx: commands.Context, *, memory_content: str):
+    """
+    Asks Skippy to remember a specific piece of information for long-term recall.
+    This will be stored in MySQL with an associated embedding.
+    Example: `[p]skippy remember I enjoy long walks on the beach.`
+    """
+    if self.db_pool is None:
+        await ctx.send(
+            "Skippy's memory vault (MySQL) is not connected. Please ask the bot owner to set it up. My apologies, but my mind is currently... elsewhere.")
+        return
+
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        embedding = await self._get_embeddings(memory_content)
+        embedding_bytes = embedding.tobytes()
+
+        sql = """
+              INSERT INTO skippy_long_term_memory (user_id, guild_id, content, embedding)
+              VALUES (%s, %s, %s, %s) \
+              """
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql,
+                                            (ctx.author.id, ctx.guild.id, memory_content, embedding_bytes))
+        conn.commit()
+        await ctx.send("Understood. That information has been etched into my long-term memory scrolls.")
+        log.info(f"User {ctx.author.id} added a long-term memory: '{memory_content[:50]}...'")
+    except mysql.connector.Error as err:
+        await ctx.send(
+            f"Fiddlesticks! A mischievous imp interfered with my memory scrolls. I couldn't quite etch that in. Error: {err}")
+        log.error(f"Error remembering for user {ctx.author.id}: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    except Exception as e:
+        await ctx.send(
+            f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
+        log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@_skippy.command(name="whatdoyouremember")
+async def _skippy_whatdoyouremember(self, ctx: commands.Context, target: discord.Member = None):
+    """
+    Asks Skippy what specific long-term memories he has, optionally about a specific user.
+    Defaults to memories about yourself.
+    Now shows all memories in a paginated format.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        target_user_id = target.id if target else ctx.author.id
+        target_display_name = target.display_name if target else ctx.author.display_name
+
+        # Removed LIMIT 50 to fetch all memories
+        sql = """
+              SELECT id, content, timestamp
+              FROM skippy_long_term_memory
+              WHERE user_id = %s
+                AND guild_id = %s
+              ORDER BY timestamp DESC \
+              """
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
+
+        memories = cursor.fetchall()
+        if not memories:
             await ctx.send(
-                "Skippy's memory vault (MySQL) is not connected. Please ask the bot owner to set it up. My apologies, but my mind is currently... elsewhere.")
+                f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them. Perhaps they've been too mundane for my ancient mind?")
             return
 
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
+        memories_list_str = []
+        for mid, content, timestamp in memories:
+            memories_list_str.append(f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d %H:%M:%S')})")
 
-            embedding = await self._get_embeddings(memory_content)
-            embedding_bytes = embedding.tobytes()
+        # Combine all memories into a single string for pagination, including the header
+        content_to_paginate = (
+                f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
+                + "\n".join(memories_list_str)
+        )
 
-            sql = """
-                  INSERT INTO skippy_long_term_memory (user_id, guild_id, content, embedding)
-                  VALUES (%s, %s, %s, %s)
-                  """
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql,
-                                                (ctx.author.id, ctx.guild.id, memory_content, embedding_bytes))
-            conn.commit()
-            await ctx.send("Understood. That information has been etched into my long-term memory scrolls.")
-            log.info(f"User {ctx.author.id} added a long-term memory: '{memory_content[:50]}...'")
-        except mysql.connector.Error as err:
-            await ctx.send(
-                f"Fiddlesticks! A mischievous imp interfered with my memory scrolls. I couldn't quite etch that in. Error: {err}")
-            log.error(f"Error remembering for user {ctx.author.id}: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        except Exception as e:
-            await ctx.send(
-                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
-            log.error(f"Unexpected error during remember command for user {ctx.author.id}: {e}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
+        # Paginate the content and send it using Redbot's menu system
+        # Each page will be wrapped in triple backticks
+        pages = [f"```\n{p}\n```" for p in pagify(content_to_paginate, delims=["\n"], escape_mass_mentions=True)]
+        await menu(ctx, pages)
 
-    @_skippy.command(name="whatdoyouremember")
-    async def _skippy_whatdoyouremember(self, ctx: commands.Context, target: discord.Member = None):
-        """
-        Asks Skippy what specific long-term memories he has, optionally about a specific user.
-        Defaults to memories about yourself.
-        Now shows all memories in a paginated format.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            target_user_id = target.id if target else ctx.author.id
-            target_display_name = target.display_name if target else ctx.author.display_name
-
-            # Removed LIMIT 50 to fetch all memories
-            sql = """
-                  SELECT id, content, timestamp
-                  FROM skippy_long_term_memory
-                  WHERE user_id = %s
-                    AND guild_id = %s
-                  ORDER BY timestamp DESC
-                  """
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql, (target_user_id, ctx.guild.id))
-
-            memories = cursor.fetchall()
-            if not memories:
-                await ctx.send(
-                    f"Alas, my memory for {target_display_name}'s specifics seems as ethereal as mist. I recall nothing about them. Perhaps they've been too mundane for my ancient mind?")
-                return
-
-            memories_list_str = []
-            for mid, content, timestamp in memories:
-                memories_list_str.append(
-                    f"ID: {mid} - '{content}' (etched on {timestamp.strftime('%Y-%m-%d %H:%M:%S')})")
-
-            # Combine all memories into a single string for pagination, including the header
-            content_to_paginate = (
-                    f"From the scrolls of my long-term memory, I recall these fragments concerning {target_display_name}:\n"
-                    + "\n".join(memories_list_str)
-            )
-
-            # Paginate the content and send it using Redbot's menu system
-            # Each page will be wrapped in triple backticks
-            pages = [f"```\n{p}\n```" for p in pagify(content_to_paginate, delims=["\n"], escape_mass_mentions=True)]
-            await menu(ctx, pages)
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in whatdoyouremember: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"A ripple in the memory currents prevented recall: {err}. Such a nuisance!")
-            log.error(f"Error retrieving memories for user {target_user_id}: {err}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="forget")
-    async def _skippy_forget(self, ctx: commands.Context, *, memory_content_partial: str):
-        """
-        Asks Skippy to forget a specific long-term memory.
-        Provide a unique phrase from the memory. Skippy will forget all memories matching that phrase.
-        Use `whatdoyouremember` to see the full memory content if needed.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            search_sql = """
-                         SELECT id, content
-                         FROM skippy_long_term_memory
-                         WHERE user_id = %s
-                           AND guild_id = %s
-                           AND content LIKE %s LIMIT 5
-                         """
-            search_term = f"%{memory_content_partial}%"
-            await self.bot.loop.run_in_executor(None, cursor.execute, search_sql,
-                                                (ctx.author.id, ctx.guild.id, search_term))
-
-            matching_memories = cursor.fetchall()
-
-            if not matching_memories:
-                await ctx.send(
-                    f"I do not recall any memory about you containing '{memory_content_partial}'. Perhaps it was a fleeting thought? Or perhaps, you're just not that memorable, hmph.")
-                return
-
-            if len(matching_memories) > 1:
-                memories_list = "\n".join([f"ID: {mid} - '{mcontent[:50]}...'" for mid, mcontent in matching_memories])
-                await ctx.send(
-                    f"Several memories match '{memory_content_partial}':\n"
-                    f"```\n{memories_list}\n```\n"
-                    "Fiddlesticks! Please be more specific or use the `[p]skippy forgetid <ID>` command with the exact ID to forget a specific one. My patience for ambiguity is thin."
-                )
-                return
-
-            memory_id_to_delete = matching_memories[0][0]
-            deleted_content = matching_memories[0][1]
-
-            delete_sql = "DELETE FROM skippy_long_term_memory WHERE id = %s"
-            await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql, (memory_id_to_delete,))
-            conn.commit()
-            await ctx.send(
-                f"The scroll for '{deleted_content[:50]}...' has been purged from my archives. Consider it undone. Now, where was I?")
-            log.info(f"User {ctx.author.id} had memory ID {memory_id_to_delete} deleted.")
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forget: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"A tear in the fabric of memory occurred: {err}. Such a nuisance!")
-            log.error(f"Error forgetting for user {ctx.author.id}: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        except Exception as e:
-            await ctx.send(
-                f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
-            log.error(f"Unexpected error during forget command for user {ctx.author.id}: {e}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="forgetid")
-    async def _skippy_forgetid(self, ctx: commands.Context, memory_id: int):
-        """
-        Forgets a specific long-term memory by its exact ID.
-        Use `[p]skippy whatdoyouremember` to find memory IDs.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            check_sql = "SELECT user_id, content FROM skippy_long_term_memory WHERE id = %s"
-            await self.bot.loop.run_in_executor(None, cursor.execute, check_sql, (memory_id,))
-            result = cursor.fetchone()
-
-            if not result:
-                await ctx.send(
-                    f"Memory with ID `{memory_id}` does not exist. Perhaps it was a phantom? Or you misread the ancient script, you naysayer!")
-                return
-
-            stored_user_id, content = result
-            if stored_user_id != ctx.author.id and not await self.bot.is_owner(ctx.author):
-                await ctx.send(
-                    "Poppycock! You can only forget memories that you yourself etched into my scrolls, unless you are my master. Don't meddle with what you don't understand.")
-                return
-
-            delete_sql = "DELETE FROM skippy_long_term_memory WHERE id = %s"
-            await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql, (memory_id,))
-            conn.commit()
-            await ctx.send(
-                f"Memory with ID `{memory_id}` ('{content[:50]}...') has been utterly vanished. Hmph. Good riddance.")
-            log.info(f"User {ctx.author.id} deleted memory ID {memory_id}.")
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetid: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"A corruption in the memory stream occurred: {err}. Such a nuisance!")
-            log.error(f"Error forgetting memory ID {memory_id}: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="forgetall")
-    async def _skippy_forgetall(self, ctx: commands.Context):
-        """
-        Asks Skippy to forget all long-term memories associated with you.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-            sql = "DELETE FROM skippy_long_term_memory WHERE user_id = %s AND guild_id = %s"
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql, (ctx.author.id, ctx.guild.id))
-            conn.commit()
-            await ctx.send(
-                "All fragments of memory concerning you in this guild have been wiped from my mind. A fresh slate, as it were. Try not to fill it with more cosmic blunders.")
-            log.info(f"All memories cleared for user {ctx.author.id} in guild {ctx.guild.id}.")
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetall: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"An ancient curse prevented the complete erasure: {err}. Fiddlesticks!")
-            log.error(f"Error forgetting all memories for user {ctx.author.id}: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="showrelationships")
-    async def _skippy_showrelationships(self, ctx: commands.Context, target: discord.Member = None):
-        """
-        Asks Skippy to show relationships he knows about, optionally centered on a specific user.
-        Defaults to relationships involving you.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            target_user_id = target.id if target else ctx.author.id
-            target_display_name = target.display_name if target else ctx.author.display_name
-
-            sql = """
-                  SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
-                  FROM skippy_relationships
-                  WHERE guild_id = %s
-                    AND (user_id_initiator = %s
-                     OR user_id_target = %s)
-                  ORDER BY timestamp DESC
-                      LIMIT 20
-                  """
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql,
-                                                (ctx.guild.id, target_user_id, target_user_id))
-            relationships = cursor.fetchall()
-
-            if not relationships:
-                await ctx.send(
-                    f"The scrolls whisper nothing of relationships involving {target_display_name}. Perhaps they are a lone wolf... or an exceptionally private otter. Hmph.")
-                return
-
-            relationships_list = []
-            for initiator_id, target_id, rel_type, description, timestamp in relationships:
-                initiator_member = ctx.guild.get_member(initiator_id)
-                target_member = ctx.guild.get_member(target_id)
-
-                initiator_name = initiator_member.display_name if initiator_member else f"User ID: {initiator_id}"
-                target_name = target_member.display_name if target_member else f"User ID: {target_id}"
-
-                rel_desc = f" ({description})" if description else ""
-                relationships_list.append(
-                    f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
-                )
-
-            response_text = (
-                    f"From my vast knowledge, here are known relationships involving {target_display_name}:\n"
-                    f"```\n" + "\n".join(relationships_list) + "\n```"
-            )
-
-            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
-                await ctx.send(page)
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in showrelationships: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"A crack appeared in the relational matrix: {err}. How vexing!")
-            log.error(f"Error retrieving relationships for user {target_user_id}: {err}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="forgetrelationship")
-    async def _skippy_forgetrelationship(self, ctx: commands.Context, user1: discord.Member, user2: discord.Member,
-                                         relationship_type: str):
-        """
-        Asks Skippy to forget a specific relationship between two users.
-        The order of users matters for initiator/target. Use `showrelationships` to verify.
-        Example: [p]skippy forgetrelationship @UserA @UserB friend
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            if user1.id != ctx.author.id and not await self.bot.is_owner(ctx.author):
-                await ctx.send(
-                    "Poppycock! You can only forget relationships you've initiated or if you are my master. Don't meddle with what you don't understand.")
-                return
-
-            delete_sql = """
-                         DELETE
-                         FROM skippy_relationships
-                         WHERE user_id_initiator = %s
-                           AND user_id_target = %s
-                           AND relationship_type = %s
-                           AND guild_id = %s
-                         """
-            await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql,
-                                                (user1.id, user2.id, relationship_type.lower(), ctx.guild.id))
-
-            if cursor.rowcount > 0:
-                conn.commit()
-                await ctx.send(
-                    f"The '{relationship_type}' relationship between {user1.display_name} and {user2.display_name} has been excised from my chronicles. Consider it undone.")
-                log.info(
-                    f"Relationship '{relationship_type}' between {user1.id} and {user2.id} deleted by {ctx.author.id}.")
-            else:
-                await ctx.send("That specific relationship was not found in my records, you naysayer.")
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetrelationship: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(
-                f"A paradox occurred while trying to forget that relationship: {err}. How utterly inconvenient!")
-            log.error(f"Error forgetting relationship: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="forgetallrelationships")
-    @commands.is_owner()
-    async def _skippy_forgetallrelationships(self, ctx: commands.Context):
-        """
-        (Owner Only) Asks Skippy to forget ALL relationships stored for this guild.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-            sql = "DELETE FROM skippy_relationships WHERE guild_id = %s"
-            await self.bot.loop.run_in_executor(None, cursor.execute, sql, (ctx.guild.id,))
-            conn.commit()
-            await ctx.send(
-                "All relationships in this guild have been erased from my memory banks. A clean slate for your social chaos. Hmph.")
-            log.info(f"All relationships cleared for guild {ctx.guild.id} by owner {ctx.author.id}.")
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
-            await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in forgetallrelationships: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"An ancient curse prevented the complete erasure of relationships: {err}. Fiddlesticks!")
-            log.error(f"Error forgetting all relationships for guild {ctx.guild.id}: {err}", exc_info=True)
-            if conn:
-                conn.rollback()
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="enableautolearn")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_enableautolearn(self, ctx: commands.Context):
-        """
-        Enables Skippy to automatically learn facts about users from conversations.
-        """
-        await self.config.guild(ctx.guild).auto_learn_facts.set(True)
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
         await ctx.send(
-            "Skippy's fact-finding senses are now sharpened. He will attempt to learn new details about users. Try not to bore him.")
-        log.info(f"Auto-learn facts enabled for guild: {ctx.guild.id}")
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in whatdoyouremember: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"A ripple in the memory currents prevented recall: {err}. Such a nuisance!")
+        log.error(f"Error retrieving memories for user {target_user_id}: {err}", exc_info=True)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
-    @_skippy.command(name="disableautolearn")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_disableautolearn(self, ctx: commands.Context):
-        """
-        Disables Skippy from automatically learning facts about users from conversations.
-        """
-        await self.config.guild(ctx.guild).auto_learn_facts.set(False)
-        await ctx.send(
-            "Skippy's fact-finding senses are now dulled. He will only use explicitly provided information. Hmph. Less work for me.")
-        log.info(f"Auto-learn facts disabled for guild: {ctx.guild.id}")
 
-    @_skippy.command(name="enableautolearnrelationships")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_enableautolearnrelationships(self, ctx: commands.Context):
-        """
-        Enables Skippy to automatically learn relationships between users from conversations.
-        """
-        await self.config.guild(ctx.guild).auto_learn_relationships.set(True)
-        await ctx.send(
-            "Skippy's social antennae are now extended. He will attempt to discern and record relationships between users. Prepare for judgment.")
-        log.info(f"Auto-learn relationships enabled for guild: {ctx.guild.id}")
+@_skippy.command(name="forget")
+async def _skippy_forget(self, ctx: commands.Context, *, memory_content_partial: str):
+    """
+    Asks Skippy to forget a specific long-term memory.
+    Provide a unique phrase from the memory. Skippy will forget all memories matching that phrase.
+    Use `whatdoyouremember` to see the full memory content if needed.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
 
-    @_skippy.command(name="disableautolearnrelationships")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_disableautolearnrelationships(self, ctx: commands.Context):
-        """
-        Disables Skippy from automatically learning relationships between users from conversations.
-        """
-        await self.config.guild(ctx.guild).auto_learn_relationships.set(False)
-        await ctx.send(
-            "Skippy's relationship detection circuits are now powered down. He will only react to explicitly stated bonds. Less drama for me, thankfully.")
-        log.info(f"Auto-learn relationships disabled for guild: {ctx.guild.id}")
+        search_sql = """
+                     SELECT id, content
+                     FROM skippy_long_term_memory
+                     WHERE user_id = %s
+                       AND guild_id = %s
+                       AND content LIKE %s LIMIT 5 \
+                     """
+        search_term = f"%{memory_content_partial}%"
+        await self.bot.loop.run_in_executor(None, cursor.execute, search_sql,
+                                            (ctx.author.id, ctx.guild.id, search_term))
 
-    @_skippy.command(name="enableautomood")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_enableautomood(self, ctx: commands.Context):
-        """
-        Enables Skippy to automatically switch moods based on conversation context.
-        """
-        await self.config.guild(ctx.guild).auto_mood_switch_enabled.set(True)
-        await ctx.send(
-            "Skippy's emotional sensors are now online. He will attempt to dynamically adjust his mood. Try not to induce a cosmic headache, mortals.")
-        log.info(f"Auto mood switching enabled for guild: {ctx.guild.id}")
+        matching_memories = cursor.fetchall()
 
-    @_skippy.command(name="disableautomood")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_disableautomood(self, ctx: commands.Context):
-        """
-        Disables Skippy's automatic mood switching.
-        """
-        await self.config.guild(ctx.guild).auto_mood_switch_enabled.set(False)
-        await ctx.send(
-            "Skippy's emotional sensors are powered down. His mood will remain fixed until manually changed. Hmph. More predictable, less chaotic.")
-        log.info(f"Auto mood switching disabled for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="showknownnames")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showknownnames(self, ctx: commands.Context, target: discord.Member = None):
-        """
-        Shows the names Skippy knows for a specific user, or all users if no target is given.
-        """
-        # The _get_db_connection() method now handles initialization if db_pool is None
-        conn = None
-        cursor = None
-        try:
-            conn = await self._get_db_connection()
-            cursor = conn.cursor()
-
-            response_text = ""
-            if target:
-                known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-                names = known_users_map.get(target.id)
-                if names:
-                    response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
-                else:
-                    response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
-            else:
-                known_users_map = await self._get_all_known_user_names(ctx.guild.id)
-                if not known_users_map:
-                    await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
-                    return
-
-                name_info = []
-                for user_id, names in known_users_map.items():
-                    member = ctx.guild.get_member(user_id)
-                    display_name = member.display_name if member else f"Unknown User (ID: {user_id})"
-                    name_info.append(f"{display_name} (ID: {user_id}): {', '.join(names)}")
-
-                response_text = "Skippy's directory of known user names:\n```\n" + "\n".join(name_info) + "\n```"
-
-            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
-                await ctx.send(page)
-
-        except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        if not matching_memories:
             await ctx.send(
-                f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
-            log.error(f"RuntimeError in showknownnames: {e}", exc_info=True)
-        except mysql.connector.Error as err:
-            await ctx.send(f"Error retrieving known names: {err}", exc_info=True)
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    @_skippy.command(name="ask")
-    @app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
-    async def _skippy_ask(self, ctx: commands.Context, *, prompt: str):
-        """
-        Sends a prompt to the Gemini 2.0 Flash model and returns the response.
-        """
-        allowed_channel_ids = await self.config.guild(ctx.guild).allowed_channels()
-        if allowed_channel_ids and ctx.channel.id not in allowed_channel_ids:
-            allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if
-                                ctx.guild.get_channel(cid)]
-            if allowed_mentions:
-                await ctx.send(
-                    f"Please use this command in one of the following channels: {{ {', '.join(allowed_mentions)} }}. "
-                    "Perhaps you should seek a more appropriate venue for such inquiries. Hmph."
-                )
-            else:
-                await ctx.send(
-                    "`[p]skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
-                    "Please ask an admin to configure allowed channels. My patience for unconfigured chaos is thin."
-                )
+                f"I do not recall any memory about you containing '{memory_content_partial}'. Perhaps it was a fleeting thought? Or perhaps, you're just not that memorable, hmph.")
             return
 
-        # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
-        auto_mood_enabled = await self.config.guild(ctx.guild).auto_mood_switch_enabled()
-        if auto_mood_enabled:
-            self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
-            # Wait a moment for the mood to potentially update before calling _get_gemini_response
-            # This is a simple approach, a more robust solution might involve direct AWAIT
-            # if the mood change is critical before _get_gemini_response initiates.
-            # For now, it runs in the background.
-            await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
-
-            # Pass image_attachments_data to _get_gemini_response
-        await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
-
-    @_skippy.command(name="clearconversation")
-    @commands.admin_or_permissions(manage_channels=True)
-    async def _skippy_clearconversation(self, ctx: commands.Context):
-        """
-        Clears the conversation history for the current channel.
-        """
-        channel_history_key = str(ctx.channel.id)
-        async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
-            if channel_history_key in conv_hist:
-                del conv_hist[channel_history_key]
-                await ctx.send(
-                    "The ethereal echoes of our past conversation in this channel have been swept away. A fresh canvas for your blunders.")
-                log.info(f"Conversation history cleared for channel {ctx.channel.id} in guild {ctx.guild.id}.")
-            else:
-                await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
-                log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
-
-    # --- New/Re-integrated Commands Below ---
-
-    @_skippy.command(name="setmaxturns")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_setmaxturns(self, ctx: commands.Context, turns: int):
-        """
-        Sets the maximum number of conversational turns (user+bot message pairs) Skippy will remember.
-        Default is 10 turns. Each turn is one user message and one bot response.
-        """
-        if turns <= 0:
-            await ctx.send("The maximum number of turns must be a positive integer. Even a wizard needs some limits!")
-            return
-        await self.config.guild(ctx.guild).max_conversation_turns.set(turns)
-        await ctx.send(f"Maximum conversation turns for Skippy set to {turns}. He shall endeavor to remember.")
-        log.info(f"Max conversation turns set to {turns} for guild: {ctx.guild.id}")
-
-    @_skippy.command(name="showmaxturns")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmaxturns(self, ctx: commands.Context):
-        """
-        Shows the current maximum number of conversational turns Skippy will remember.
-        """
-        max_turns = await self.config.guild(ctx.guild).max_conversation_turns()
-        await ctx.send(f"Skippy currently remembers up to {max_turns} conversational turns.")
-
-    @_skippy.command(name="setmood")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_setmood(self, ctx: commands.Context, mood: str):
-        """
-        Sets Skippy's current mood, influencing his responses.
-        Use `[p]skippy showmoods` to see available moods.
-        """
-        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
-        if mood.lower() not in mood_prompts:
+        if len(matching_memories) > 1:
+            memories_list = "\n".join([f"ID: {mid} - '{mcontent[:50]}...'" for mid, mcontent in matching_memories])
             await ctx.send(
-                f"Invalid mood. Available moods are: {', '.join(mood_prompts.keys())}. "
-                f"You can add new ones with `{ctx.prefix}skippy addmoodprompt`."
+                f"Several memories match '{memory_content_partial}':\n"
+                f"```\n{memories_list}\n```\n"
+                "Fiddlesticks! Please be more specific or use the `[p]skippy forgetid <ID>` command with the exact ID to forget a specific one. My patience for ambiguity is thin."
             )
             return
 
-        await self.config.guild(ctx.guild).current_mood.set(mood.lower())
-        await ctx.send(f"Skippy's mood has been set to: `{mood.lower()}`. Observe his demeanor.")
-        log.info(f"Skippy's mood set to {mood.lower()} for guild: {ctx.guild.id}")
+        memory_id_to_delete = matching_memories[0][0]
+        deleted_content = matching_memories[0][1]
 
-    @_skippy.command(name="showmood")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmood(self, ctx: commands.Context):
-        """
-        Shows Skippy's current active mood.
-        """
-        current_mood = await self.config.guild(ctx.guild).current_mood()
-        await ctx.send(f"Skippy's current mood is: `{current_mood}`.")
+        delete_sql = "DELETE FROM skippy_long_term_memory WHERE id = %s"
+        await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql, (memory_id_to_delete,))
+        conn.commit()
+        await ctx.send(
+            f"The scroll for '{deleted_content[:50]}...' has been purged from my archives. Consider it undone. Now, where was I?")
+        log.info(f"User {ctx.author.id} had memory ID {memory_id_to_delete} deleted.")
 
-    @_skippy.command(name="showmoods")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_showmoods(self, ctx: commands.Context):
-        """
-        Lists all available moods and their descriptions/prompts.
-        """
-        mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
-        if not mood_prompts:
-            await ctx.send("No moods are configured.")
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        await ctx.send(
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in forget: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"A tear in the fabric of memory occurred: {err}. Such a nuisance!")
+        log.error(f"Error forgetting for user {ctx.author.id}: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    except Exception as e:
+        await ctx.send(
+            f"Hum dee dum! A cosmic anomaly prevented that memory from sticking. Perhaps try again when the stars align? Error: {e}")
+        log.error(f"Unexpected error during forget command for user {ctx.author.id}: {e}", exc_info=True)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@_skippy.command(name="forgetid")
+async def _skippy_forgetid(self, ctx: commands.Context, memory_id: int):
+    """
+    Forgets a specific long-term memory by its exact ID.
+    Use `[p]skippy whatdoyouremember` to find memory IDs.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        check_sql = "SELECT user_id, content FROM skippy_long_term_memory WHERE id = %s"
+        await self.bot.loop.run_in_executor(None, cursor.execute, check_sql, (memory_id,))
+        result = cursor.fetchone()
+
+        if not result:
+            await ctx.send(
+                f"Memory with ID `{memory_id}` does not exist. Perhaps it was a phantom? Or you misread the ancient script, you naysayer!")
             return
 
-        response_text = "Available Moods for Skippy:\n"
-        for mood, prompt in mood_prompts.items():
-            # Truncate prompt for display to keep it readable
-            display_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt
-            response_text += f"**`{mood}`**: {display_prompt}\n"
+        stored_user_id, content = result
+        if stored_user_id != ctx.author.id and not await self.bot.is_owner(ctx.author):
+            await ctx.send(
+                "Poppycock! You can only forget memories that you yourself etched into my scrolls, unless you are my master. Don't meddle with what you don't understand.")
+            return
+
+        delete_sql = "DELETE FROM skippy_long_term_memory WHERE id = %s"
+        await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql, (memory_id,))
+        conn.commit()
+        await ctx.send(
+            f"Memory with ID `{memory_id}` ('{content[:50]}...') has been utterly vanished. Hmph. Good riddance.")
+        log.info(f"User {ctx.author.id} deleted memory ID {memory_id}.")
+
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        await ctx.send(
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in forgetid: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"A corruption in the memory stream occurred: {err}. Such a nuisance!")
+        log.error(f"Error forgetting memory ID {memory_id}: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@_skippy.command(name="forgetall")
+async def _skippy_forgetall(self, ctx: commands.Context):
+    """
+    Asks Skippy to forget all long-term memories associated with you.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+        sql = "DELETE FROM skippy_long_term_memory WHERE user_id = %s AND guild_id = %s"
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql, (ctx.author.id, ctx.guild.id))
+        conn.commit()
+        await ctx.send(
+            "All fragments of memory concerning you in this guild have been wiped from my mind. A fresh slate, as it were. Try not to fill it with more cosmic blunders.")
+        log.info(f"All memories cleared for user {ctx.author.id} in guild {ctx.guild.id}.")
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        await ctx.send(
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in forgetall: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"An ancient curse prevented the complete erasure: {err}. Fiddlesticks!")
+        log.error(f"Error forgetting all memories for user {ctx.author.id}: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@_skippy.command(name="showrelationships")
+async def _skippy_showrelationships(self, ctx: commands.Context, target: discord.Member = None):
+    """
+    Asks Skippy to show relationships he knows about, optionally centered on a specific user.
+    Defaults to relationships involving you.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        target_user_id = target.id if target else ctx.author.id
+        target_display_name = target.display_name if target else ctx.author.display_name
+
+        sql = """
+              SELECT user_id_initiator, user_id_target, relationship_type, description, timestamp
+              FROM skippy_relationships
+              WHERE guild_id = %s
+                AND (user_id_initiator = %s
+                 OR user_id_target = %s)
+              ORDER BY timestamp DESC
+                  LIMIT 20 \
+              """
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql,
+                                            (ctx.guild.id, target_user_id, target_user_id))
+        relationships = cursor.fetchall()
+
+        if not relationships:
+            await ctx.send(
+                f"The scrolls whisper nothing of relationships involving {target_display_name}. Perhaps they are a lone wolf... or an exceptionally private otter. Hmph.")
+            return
+
+        relationships_list = []
+        for initiator_id, target_id, rel_type, description, timestamp in relationships:
+            initiator_member = ctx.guild.get_member(initiator_id)
+            target_member = ctx.guild.get_member(target_id)
+
+            initiator_name = initiator_member.display_name if initiator_member else f"User ID: {initiator_id}"
+            target_name = target_member.display_name if target_member else f"User ID: {target_id}"
+
+            rel_desc = f" ({description})" if description else ""
+            relationships_list.append(
+                f"'{initiator_name}' is {rel_type} of '{target_name}'{rel_desc}"
+            )
+
+        response_text = (
+                f"From my vast knowledge, here are known relationships involving {target_display_name}:\n"
+                f"```\n" + "\n".join(relationships_list) + "\n```"
+        )
 
         for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
             await ctx.send(page)
 
-    @_skippy.command(name="addmoodprompt")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_addmoodprompt(self, ctx: commands.Context, mood_name: str, *, prompt_text: str):
-        """
-        Adds or updates a personality prompt for a specific mood.
-        This allows you to customize the text for each mood.
-        Example: `[p]skippy addmoodprompt playful You are Skippy, a mischievous wizard who enjoys riddles.`
-        """
-        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
-            mood_prompts[mood_name.lower()] = prompt_text
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
         await ctx.send(
-            f"Personality prompt for mood `{mood_name.lower()}` has been set/updated. Skippy now understands this new facet.")
-        log.info(f"Custom mood prompt '{mood_name.lower()}' added/updated for guild: {ctx.guild.id}")
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in showrelationships: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"A crack appeared in the relational matrix: {err}. How vexing!")
+        log.error(f"Error retrieving relationships for user {target_user_id}: {err}", exc_info=True)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
-    @_skippy.command(name="removemoodprompt")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def _skippy_removemoodprompt(self, ctx: commands.Context, mood_name: str):
-        """
-        Removes a custom mood prompt. Cannot remove 'normal'.
-        """
-        if mood_name.lower() == "normal":
+
+@_skippy.command(name="forgetrelationship")
+async def _skippy_forgetrelationship(self, ctx: commands.Context, user1: discord.Member, user2: discord.Member,
+                                     relationship_type: str):
+    """
+    Asks Skippy to forget a specific relationship between two users.
+    The order of users matters for initiator/target. Use `showrelationships` to verify.
+    Example: [p]skippy forgetrelationship @UserA @UserB friend
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        if user1.id != ctx.author.id and not await self.bot.is_owner(ctx.author):
             await ctx.send(
-                "The 'normal' mood prompt cannot be removed. It is Skippy's default state, you naysayer!")
+                "Poppycock! You can only forget relationships you've initiated or if you are my master. Don't meddle with what you don't understand.")
             return
 
-        async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
-            if mood_name.lower() in mood_prompts:
-                del mood_prompts[mood_name.lower()]
-                await ctx.send(f"Mood prompt `{mood_name.lower()}` has been banished from Skippy's lexicon.")
-                log.info(f"Custom mood prompt '{mood_name.lower()}' removed for guild: {ctx.guild.id}")
+        delete_sql = """
+                     DELETE
+                     FROM skippy_relationships
+                     WHERE user_id_initiator = %s
+                       AND user_id_target = %s
+                       AND relationship_type = %s
+                       AND guild_id = %s \
+                     """
+        await self.bot.loop.run_in_executor(None, cursor.execute, delete_sql,
+                                            (user1.id, user2.id, relationship_type.lower(), ctx.guild.id))
+
+        if cursor.rowcount > 0:
+            conn.commit()
+            await ctx.send(
+                f"The '{relationship_type}' relationship between {user1.display_name} and {user2.display_name} has been excised from my chronicles. Consider it undone.")
+            log.info(
+                f"Relationship '{relationship_type}' between {user1.id} and {user2.id} deleted by {ctx.author.id}.")
+        else:
+            await ctx.send("That specific relationship was not found in my records, you naysayer.")
+
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        await ctx.send(
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in forgetrelationship: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"A paradox occurred while trying to forget that relationship: {err}. How utterly inconvenient!")
+        log.error(f"Error forgetting relationship: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@_skippy.command(name="forgetallrelationships")
+@commands.is_owner()
+async def _skippy_forgetallrelationships(self, ctx: commands.Context):
+    """
+    (Owner Only) Asks Skippy to forget ALL relationships stored for this guild.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+        sql = "DELETE FROM skippy_relationships WHERE guild_id = %s"
+        await self.bot.loop.run_in_executor(None, cursor.execute, sql, (ctx.guild.id,))
+        conn.commit()
+        await ctx.send(
+            "All relationships in this guild have been erased from my memory banks. A clean slate for your social chaos. Hmph.")
+        log.info(f"All relationships cleared for guild {ctx.guild.id} by owner {ctx.author.id}.")
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        await ctx.send(
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in forgetallrelationships: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"An ancient curse prevented the complete erasure of relationships: {err}. Fiddlesticks!")
+        log.error(f"Error forgetting all relationships for guild {ctx.guild.id}: {err}", exc_info=True)
+        if conn:
+            conn.rollback()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@_skippy.command(name="enableautolearn")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_enableautolearn(self, ctx: commands.Context):
+    """
+    Enables Skippy to automatically learn facts about users from conversations.
+    """
+    await self.config.guild(ctx.guild).auto_learn_facts.set(True)
+    await ctx.send(
+        "Skippy's fact-finding senses are now sharpened. He will attempt to learn new details about users. Try not to bore him.")
+    log.info(f"Auto-learn facts enabled for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="disableautolearn")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_disableautolearn(self, ctx: commands.Context):
+    """
+    Disables Skippy from automatically learning facts about users from conversations.
+    """
+    await self.config.guild(ctx.guild).auto_learn_facts.set(False)
+    await ctx.send(
+        "Skippy's fact-finding senses are now dulled. He will only use explicitly provided information. Hmph. Less work for me.")
+    log.info(f"Auto-learn facts disabled for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="enableautolearnrelationships")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_enableautolearnrelationships(self, ctx: commands.Context):
+    """
+    Enables Skippy to automatically learn relationships between users from conversations.
+    """
+    await self.config.guild(ctx.guild).auto_learn_relationships.set(True)
+    await ctx.send(
+        "Skippy's social antennae are now extended. He will attempt to discern and record relationships between users. Prepare for judgment.")
+    log.info(f"Auto-learn relationships enabled for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="disableautolearnrelationships")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_disableautolearnrelationships(self, ctx: commands.Context):
+    """
+    Disables Skippy from automatically learning relationships between users from conversations.
+    """
+    await self.config.guild(ctx.guild).auto_learn_relationships.set(False)
+    await ctx.send(
+        "Skippy's relationship detection circuits are now powered down. He will only react to explicitly stated bonds. Less drama for me, thankfully.")
+    log.info(f"Auto-learn relationships disabled for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="enableautomood")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_enableautomood(self, ctx: commands.Context):
+    """
+    Enables Skippy to automatically switch moods based on conversation context.
+    """
+    await self.config.guild(ctx.guild).auto_mood_switch_enabled.set(True)
+    await ctx.send(
+        "Skippy's emotional sensors are now online. He will attempt to dynamically adjust his mood. Try not to induce a cosmic headache, mortals.")
+    log.info(f"Auto mood switching enabled for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="disableautomood")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_disableautomood(self, ctx: commands.Context):
+    """
+    Disables Skippy's automatic mood switching.
+    """
+    await self.config.guild(ctx.guild).auto_mood_switch_enabled.set(False)
+    await ctx.send(
+        "Skippy's emotional sensors are powered down. His mood will remain fixed until manually changed. Hmph. More predictable, less chaotic.")
+    log.info(f"Auto mood switching disabled for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="showknownnames")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_showknownnames(self, ctx: commands.Context, target: discord.Member = None):
+    """
+    Shows the names Skippy knows for a specific user, or all users if no target is given.
+    """
+    # The _get_db_connection() method now handles initialization if db_pool is None
+    conn = None
+    cursor = None
+    try:
+        conn = await self._get_db_connection()
+        cursor = conn.cursor()
+
+        response_text = ""
+        if target:
+            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+            names = known_users_map.get(target.id)
+            if names:
+                response_text = f"For {target.display_name} (ID: {target.id}), Skippy knows these names: {', '.join(names)}. Impressive, wot not?"
             else:
-                await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
+                response_text = f"Skippy has no specific names recorded for {target.display_name} (ID: {target.id}). Perhaps they are a shadowy figure?"
+        else:
+            known_users_map = await self._get_all_known_user_names(ctx.guild.id)
+            if not known_users_map:
+                await ctx.send("Skippy has no known names recorded for any users in this guild. How utterly dull.")
+                return
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """
-        Listens for messages to enable conversational interaction with Skippy.
-        Also attempts to read content from attached .txt and .pdf files.
-        NEW: Now processes image attachments and sends them to Gemini for analysis.
-        Updates user name records and triggers auto mood switching.
-        """
-        if message.author.bot:
-            return
+            name_info = []
+            for user_id, names in known_users_map.items():
+                member = ctx.guild.get_member(user_id)
+                display_name = member.display_name if member else f"Unknown User (ID: {user_id})"
+                name_info.append(f"{display_name} (ID: {user_id}): {', '.join(names)}")
 
-        if not message.guild:
-            return
+            response_text = "Skippy's directory of known user names:\n```\n" + "\n".join(name_info) + "\n```"
 
-        # NEW: Update user's name record whenever they send a message
-        # This helps Skippy keep track of display name changes and known names
-        self.bot.loop.create_task(self._update_user_name_record(message.author))
+        for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+            await ctx.send(page)
 
-        conversation_enabled = await self.config.guild(message.guild).conversation_enabled()
-        if not conversation_enabled:
-            return
+    except RuntimeError as e:  # Catch the specific RuntimeError from _get_db_connection
+        await ctx.send(
+            f"Skippy's memory vault (MySQL) is not connected and could not be initialized: {e}. My apologies, but my mind is currently... elsewhere.")
+        log.error(f"RuntimeError in showknownnames: {e}", exc_info=True)
+    except mysql.connector.Error as err:
+        await ctx.send(f"Error retrieving known names: {err}", exc_info=True)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
-        listen_channel_id = await self.config.guild(message.guild).listen_channel_id()
-        if not listen_channel_id or message.channel.id != listen_channel_id:
-            return
 
-        ctx = await self.bot.get_context(message)
-        if ctx.valid:  # If the message is a command, let Redbot handle it
-            return
+@_skippy.command(name="ask")
+@app_commands.describe(prompt="The question or prompt to send to the Gemini model.")
+async def _skippy_ask(self, ctx: commands.Context, *, prompt: str):
+    """
+    Sends a prompt to the Gemini 2.0 Flash model and returns the response.
+    """
+    allowed_channel_ids = await self.config.guild(ctx.guild).allowed_channels()
+    if allowed_channel_ids and ctx.channel.id not in allowed_channel_ids:
+        allowed_mentions = [ctx.guild.get_channel(cid).mention for cid in allowed_channel_ids if
+                            ctx.guild.get_channel(cid)]
+        if allowed_mentions:
+            await ctx.send(
+                f"Please use this command in one of the following channels: {{ {', '.join(allowed_mentions)} }}. "
+                "Perhaps you should seek a more appropriate venue for such inquiries. Hmph."
+            )
+        else:
+            await ctx.send(
+                "`[p]skippy ask` command interactions are restricted to specific channels, but none are configured or valid. "
+                "Please ask an admin to configure allowed channels. My patience for unconfigured chaos is thin."
+            )
+        return
 
-        processed_attachment_content = ""
-        image_attachments_data = []  # NEW: List to store processed image data
+    # NEW: If auto mood switching is enabled, analyze the prompt and set the mood before responding
+    auto_mood_enabled = await self.config.guild(ctx.guild).auto_mood_switch_enabled()
+    if auto_mood_enabled:
+        self.bot.loop.create_task(self._analyze_and_set_mood(ctx, prompt))
+        # Small delay to allow mood to potentially update before _get_gemini_response runs
+        await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
 
-        if message.attachments:
-            for attachment in message.attachments:
-                file_extension = attachment.filename.lower().split('.')[-1]
-                mime_type = attachment.content_type
+        # Pass image_attachments_data to _get_gemini_response
+    await self._get_gemini_response(ctx, prompt, mentioned_users=ctx.message.mentions)
 
-                if file_extension == "txt":
-                    try:
-                        file_content = await attachment.read()
-                        decoded_content = file_content.decode('utf-8')
-                        if decoded_content:  # Check if content is not empty
-                            processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
-                            log.info(f"Successfully read .txt attachment: {attachment.filename}")
-                        else:
-                            await message.channel.send(
-                                f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells, you naysayer?",
-                                delete_after=10)
-                    except Exception as e:
-                        log.error(f"Error reading .txt attachment '{attachment.filename}': {e}")
+
+@_skippy.command(name="clearconversation")
+@commands.admin_or_permissions(manage_channels=True)
+async def _skippy_clearconversation(self, ctx: commands.Context):
+    """
+    Clears the conversation history for the current channel.
+    """
+    channel_history_key = str(ctx.channel.id)
+    async with self.config.guild(ctx.guild).conversation_history() as conv_hist:
+        if channel_history_key in conv_hist:
+            del conv_hist[channel_history_key]
+            await ctx.send(
+                "The ethereal echoes of our past conversation in this channel have been swept away. A fresh canvas for your blunders.")
+            log.info(f"Conversation history cleared for channel {ctx.channel.id} in guild {ctx.guild.id}.")
+        else:
+            await ctx.send("There is no conversation history to clear in this channel, you silly goose. Poppycock!")
+            log.debug(f"No conversation history to clear for channel {ctx.channel.id} in guild {ctx.guild.id}.")
+
+
+# --- New/Re-integrated Commands Below ---
+
+@_skippy.command(name="setmaxturns")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_setmaxturns(self, ctx: commands.Context, turns: int):
+    """
+    Sets the maximum number of conversational turns (user+bot message pairs) Skippy will remember.
+    Default is 10 turns. Each turn is one user message and one bot response.
+    """
+    if turns <= 0:
+        await ctx.send("The maximum number of turns must be a positive integer. Even a wizard needs some limits!")
+        return
+    await self.config.guild(ctx.guild).max_conversation_turns.set(turns)
+    await ctx.send(f"Maximum conversation turns for Skippy set to {turns}. He shall endeavor to remember.")
+    log.info(f"Max conversation turns set to {turns} for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="showmaxturns")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_showmaxturns(self, ctx: commands.Context):
+    """
+    Shows the current maximum number of conversational turns Skippy will remember.
+    """
+    max_turns = await self.config.guild(ctx.guild).max_conversation_turns()
+    await ctx.send(f"Skippy currently remembers up to {max_turns} conversational turns.")
+
+
+@_skippy.command(name="setmood")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_setmood(self, ctx: commands.Context, mood: str):
+    """
+    Sets Skippy's current mood, influencing his responses.
+    Use `[p]skippy showmoods` to see available moods.
+    """
+    mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+    if mood.lower() not in mood_prompts:
+        await ctx.send(
+            f"Invalid mood. Available moods are: {', '.join(mood_prompts.keys())}. "
+            f"You can add new ones with `{ctx.prefix}skippy addmoodprompt`."
+        )
+        return
+
+    await self.config.guild(ctx.guild).current_mood.set(mood.lower())
+    await ctx.send(f"Skippy's mood has been set to: `{mood.lower()}`. Observe his demeanor.")
+    log.info(f"Skippy's mood set to {mood.lower()} for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="showmood")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_showmood(self, ctx: commands.Context):
+    """
+    Shows Skippy's current active mood.
+    """
+    current_mood = await self.config.guild(ctx.guild).current_mood()
+    await ctx.send(f"Skippy's current mood is: `{current_mood}`.")
+
+
+@_skippy.command(name="showmoods")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_showmoods(self, ctx: commands.Context):
+    """
+    Lists all available moods and their descriptions/prompts.
+    """
+    mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
+    if not mood_prompts:
+        await ctx.send("No moods are configured.")
+        return
+
+    response_text = "Available Moods for Skippy:\n"
+    for mood, prompt in mood_prompts.items():
+        # Truncate prompt for display to keep it readable
+        display_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt
+        response_text += f"**`{mood}`**: {display_prompt}\n"
+
+    for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+        await ctx.send(page)
+
+
+@_skippy.command(name="addmoodprompt")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_addmoodprompt(self, ctx: commands.Context, mood_name: str, *, prompt_text: str):
+    """
+    Adds or updates a personality prompt for a specific mood.
+    This allows you to customize the text for each mood.
+    Example: `[p]skippy addmoodprompt playful You are Skippy, a mischievous wizard who enjoys riddles.`
+    """
+    async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+        mood_prompts[mood_name.lower()] = prompt_text
+    await ctx.send(
+        f"Personality prompt for mood `{mood_name.lower()}` has been set/updated. Skippy now understands this new facet.")
+    log.info(f"Custom mood prompt '{mood_name.lower()}' added/updated for guild: {ctx.guild.id}")
+
+
+@_skippy.command(name="removemoodprompt")
+@commands.admin_or_permissions(manage_guild=True)
+async def _skippy_removemoodprompt(self, ctx: commands.Context, mood_name: str):
+    """
+    Removes a custom mood prompt. Cannot remove 'normal'.
+    """
+    if mood_name.lower() == "normal":
+        await ctx.send(
+            "The 'normal' mood prompt cannot be removed. It is Skippy's default state, you naysayer!")
+        return
+
+    async with self.config.guild(ctx.guild).mood_prompts() as mood_prompts:
+        if mood_name.lower() in mood_prompts:
+            del mood_prompts[mood_name.lower()]
+            await ctx.send(f"Mood prompt `{mood_name.lower()}` has been banished from Skippy's lexicon.")
+            log.info(f"Custom mood prompt '{mood_name.lower()}' removed for guild: {ctx.guild.id}")
+        else:
+            await ctx.send(f"Mood `{mood_name.lower()}` not found. Perhaps it was but a fleeting illusion?")
+
+
+@commands.Cog.listener()
+async def on_message(self, message: discord.Message):
+    """
+    Listens for messages to enable conversational interaction with Skippy.
+    Also attempts to read content from attached .txt and .pdf files.
+    NEW: Now processes image attachments and sends them to Gemini for analysis.
+    Updates user name records and triggers auto mood switching.
+    """
+    if message.author.bot:
+        return
+
+    if not message.guild:
+        return
+
+    # NEW: Update user's name record whenever they send a message
+    # This helps Skippy keep track of display name changes and known names
+    self.bot.loop.create_task(self._update_user_name_record(message.author))
+
+    conversation_enabled = await self.config.guild(message.guild).conversation_enabled()
+    if not conversation_enabled:
+        return
+
+    listen_channel_id = await self.config.guild(message.guild).listen_channel_id()
+    if not listen_channel_id or message.channel.id != listen_channel_id:
+        return
+
+    ctx = await self.bot.get_context(message)
+    if ctx.valid:  # If the message is a command, let Redbot handle it
+        return
+
+    processed_attachment_content = ""
+    image_attachments_data = []  # NEW: List to store processed image data
+
+    if message.attachments:
+        for attachment in message.attachments:
+            file_extension = attachment.filename.lower().split('.')[-1]
+            mime_type = attachment.content_type
+
+            if file_extension == "txt":
+                try:
+                    file_content = await attachment.read()
+                    decoded_content = file_content.decode('utf-8')
+                    if decoded_content:  # Check if content is not empty
+                        processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{decoded_content}\n--- End of {attachment.filename} Content ---\n"
+                        log.info(f"Successfully read .txt attachment: {attachment.filename}")
+                    else:
                         await message.channel.send(
-                            f"Alas, Skippy had trouble deciphering the ancient runes in '{attachment.filename}'. Error: {e}. Fiddlesticks!",
+                            f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells, you naysayer?",
                             delete_after=10)
-                        continue
+                except Exception as e:
+                    log.error(f"Error reading .txt attachment '{attachment.filename}': {e}")
+                    await message.channel.send(
+                        f"Alas, Skippy had trouble deciphering the ancient runes in '{attachment.filename}'. Error: {e}. Fiddlesticks!",
+                        delete_after=10)
+                    continue
 
-                elif file_extension == "pdf":
-                    try:
-                        pdf_bytes = await attachment.read()
-                        pdf_file = io.BytesIO(pdf_bytes)
-                        reader = PyPDF2.PdfReader(pdf_file)
-                        pdf_text = ""
-                        for page_num in range(len(reader.pages)):
-                            pdf_text += reader.pages[page_num].extract_text() or ""
+            elif file_extension == "pdf":
+                try:
+                    pdf_bytes = await attachment.read()
+                    pdf_file = io.BytesIO(pdf_bytes)
+                    reader = PyPDF2.PdfReader(pdf_file)
+                    pdf_text = ""
+                    for page_num in range(len(reader.pages)):
+                        pdf_text += reader.pages[page_num].extract_text() or ""
 
-                        if pdf_text:
-                            processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{pdf_text}\n--- End of {attachment.filename} Content ---\n"
-                            log.info(f"Successfully read .pdf attachment: {attachment.filename}")
-                        else:
-                            await message.channel.send(
-                                f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells, you naysayer?",
-                                delete_after=10)
-
-                    except PyPDF2.errors.PdfReadError as e:
-                        log.error(f"Error reading PDF '{attachment.filename}': {e}")
+                    if pdf_text:
+                        processed_attachment_content += f"\n\n--- Content from {attachment.filename} ---\n{pdf_text}\n--- End of {attachment.filename} Content ---\n"
+                        log.info(f"Successfully read .pdf attachment: {attachment.filename}")
+                    else:
                         await message.channel.send(
-                            f"Skippy encountered an arcane glyph in '{attachment.filename}' and couldn't decipher it (PDF Read Error: {e}). How vexing!",
+                            f"Skippy found no legible text in '{attachment.filename}'. Perhaps it's a scroll of blank spells, you naysayer?",
                             delete_after=10)
-                        continue
-                    except ImportError:
-                        await message.channel.send(
-                            "Skippy needs the 'PyPDF2' incantation to read PDFs. Tell my master to cast `pip install PyPDF2`! Hmph.",
-                            delete_after=15)
-                        log.error("PyPDF2 not installed. Cannot read PDF files.")
-                        continue
-                    except Exception as e:
-                        log.error(f"Unexpected error processing PDF '{attachment.filename}': {e}")
-                        await message.channel.send(
-                            f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}. Poppycock!",
-                            delete_after=10)
-                        continue
-                elif mime_type and mime_type.startswith("image/"):  # NEW: Handle image attachments
-                    try:
-                        image_bytes = await attachment.read()
-                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
-                        image_attachments_data.append({
-                            "mime_type": mime_type,
-                            "data": base64_image
-                        })
-                        log.info(f"Successfully processed image attachment: {attachment.filename}")
-                    except Exception as e:
-                        log.error(f"Error processing image attachment '{attachment.filename}': {e}")
-                        await message.channel.send(
-                            f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
-                            delete_after=10)
-                        continue
-                else:
-                    log.debug(f"Unsupported attachment type skipped: {attachment.filename}")
 
-        combined_prompt = message.content
-        if processed_attachment_content:
-            if combined_prompt:
-                combined_prompt = f"Here is some context from an attached file: {processed_attachment_content}\n\nUser message: {message.content}"
+                except PyPDF2.errors.PdfReadError as e:
+                    log.error(f"Error reading PDF '{attachment.filename}': {e}")
+                    await message.channel.send(
+                        f"Skippy encountered an arcane glyph in '{attachment.filename}' and couldn't decipher it (PDF Read Error: {e}). How vexing!",
+                        delete_after=10)
+                    continue
+                except ImportError:
+                    await message.channel.send(
+                        "Skippy needs the 'PyPDF2' incantation to read PDFs. Tell my master to cast `pip install PyPDF2`! Hmph.",
+                        delete_after=15)
+                    log.error("PyPDF2 not installed. Cannot read PDF files.")
+                    continue
+                except Exception as e:
+                    log.error(f"Unexpected error processing PDF '{attachment.filename}': {e}")
+                    await message.channel.send(
+                        f"A strange ethereal disturbance prevented Skippy from comprehending '{attachment.filename}'. Error: {e}. Poppycock!",
+                        delete_after=10)
+                    continue
+            elif mime_type and mime_type.startswith("image/"):  # NEW: Handle image attachments
+                try:
+                    image_bytes = await attachment.read()
+                    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+                    image_attachments_data.append({
+                        "mime_type": mime_type,
+                        "data": base64_image
+                    })
+                    log.info(f"Successfully processed image attachment: {attachment.filename}")
+                except Exception as e:
+                    log.error(f"Error processing image attachment '{attachment.filename}': {e}")
+                    await message.channel.send(
+                        f"Fiddlesticks! Skippy had trouble processing the image in '{attachment.filename}'. Error: {e}. Perhaps it was a cursed selfie?",
+                        delete_after=10)
+                    continue
             else:
-                combined_prompt = f"Please analyze this document: {processed_attachment_content}"
+                log.debug(f"Unsupported attachment type skipped: {attachment.filename}")
 
-        # NEW: If there's no text content but there are images, create a default prompt for image analysis
-        if not combined_prompt and image_attachments_data:
-            combined_prompt = "Please analyze the attached image(s)."
-        elif not combined_prompt and not image_attachments_data and not processed_attachment_content:
-            log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
-            return  # Exit if no content at all
+    combined_prompt = message.content
+    if processed_attachment_content:
+        if combined_prompt:
+            combined_prompt = f"Here is some context from an attached file: {processed_attachment_content}\n\nUser message: {message.content}"
+        else:
+            combined_prompt = f"Please analyze this document: {processed_attachment_content}"
 
-        if combined_prompt or image_attachments_data:  # Only proceed if there's text or images
-            # If auto mood switching is enabled, analyze the prompt and set the mood before responding
-            auto_mood_enabled = await self.config.guild(message.guild).auto_mood_switch_enabled()
-            if auto_mood_enabled:
-                self.bot.loop.create_task(self._analyze_and_set_mood(ctx, combined_prompt))
-                # Small delay to allow mood to potentially update before _get_gemini_response runs
-                await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
+    # NEW: If there's no text content but there are images, create a default prompt for image analysis
+    if not combined_prompt and image_attachments_data:
+        combined_prompt = "Please analyze the attached image(s)."
+    elif not combined_prompt and not image_attachments_data and not processed_attachment_content:
+        log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
+        return  # Exit if no content at all
 
-            # Pass image_attachments_data to _get_gemini_response
-            await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions,
-                                            image_parts_data=image_attachments_data)
-        elif not message.attachments and not message.content:
-            log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
+    if combined_prompt or image_attachments_data:  # Only proceed if there's text or images
+        # If auto mood switching is enabled, analyze the prompt and set the mood before responding
+        auto_mood_enabled = await self.config.guild(message.guild).auto_mood_switch_enabled()
+        if auto_mood_enabled:
+            self.bot.loop.create_task(self._analyze_and_set_mood(ctx, combined_prompt))
+            # Small delay to allow mood to potentially update before _get_gemini_response runs
+            await self.bot.loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
+
+        # Pass image_attachments_data to _get_gemini_response
+        await self._get_gemini_response(ctx, combined_prompt, mentioned_users=message.mentions,
+                                        image_parts_data=image_attachments_data)
+    elif not message.attachments and not message.content:
+        log.debug(f"Message had no content and no readable attachments from guild: {message.guild.id}")
