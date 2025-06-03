@@ -106,6 +106,7 @@ class Skippy(commands.Cog):
         self.session = aiohttp.ClientSession()
         self.db_pool = None
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.available_gemini_models = []  # NEW: To store dynamically fetched model names
         log.info("Skippy cog initialized.")
 
     async def red_delete_data_for_user(self, **kwargs):
@@ -171,7 +172,7 @@ class Skippy(commands.Cog):
     async def cog_load(self):
         """
         Called when the cog is loaded. Ensures hardcoded moods are always present in guild config.
-        Also initializes the MySQL connection pool.
+        Also initializes the MySQL connection pool and fetches available Gemini models.
         """
         log.info("Skippy cog loading...")
         for guild in self.bot.guilds:
@@ -182,6 +183,8 @@ class Skippy(commands.Cog):
 
         # Initialize DB pool when cog loads
         await self._init_db_pool()
+        # NEW: Fetch available Gemini models on cog load
+        self.bot.loop.create_task(self._fetch_available_gemini_models())
 
         log.info("Skippy cog loaded.")
 
@@ -537,6 +540,58 @@ class Skippy(commands.Cog):
                 conn.close()
         return known_users
 
+    async def _fetch_available_gemini_models(self):
+        """
+        Fetches the list of available Gemini models from the Google Generative Language API.
+        Updates self.available_gemini_models.
+        """
+        if not self.bot.guilds:
+            log.warning("No guilds available to fetch API key for model list. Skipping model fetch.")
+            return
+
+        # Try to get an API key from any guild's settings
+        api_key = None
+        for guild in self.bot.guilds:
+            guild_settings = await self.config.guild(guild).all()
+            if guild_settings.get("api_key"):
+                api_key = guild_settings["api_key"]
+                break
+
+        if not api_key:
+            log.warning("No Gemini API key found in any guild config. Cannot fetch available models.")
+            return
+
+        models_api_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+
+        try:
+            async with self.session.get(models_api_url, headers=headers) as response:
+                response.raise_for_status()
+                result = await response.json()
+
+            fetched_models = []
+            if "models" in result:
+                for model_info in result["models"]:
+                    # We are interested in the 'name' field, which is used in the API call
+                    # It's usually in the format 'models/model-name'
+                    model_name = model_info.get("name")
+                    if model_name and model_name.startswith("models/"):
+                        # Strip "models/" prefix for cleaner use
+                        fetched_models.append(model_name.replace("models/", ""))
+
+            if fetched_models:
+                self.available_gemini_models = sorted(list(set(fetched_models)))  # Deduplicate and sort
+                log.info(f"Successfully fetched {len(self.available_gemini_models)} available Gemini models.")
+            else:
+                log.warning("Fetched model list is empty or malformed.")
+
+        except aiohttp.ClientError as e:
+            log.error(f"HTTP error fetching Gemini models: {e}")
+        except json.JSONDecodeError as e:
+            log.error(f"JSON decode error fetching Gemini models: {e}")
+        except Exception as e:
+            log.error(f"Unexpected error fetching Gemini models: {e}", exc_info=True)
+
     async def _analyze_and_set_mood(self, ctx: commands.Context, user_message: str):
         """
         Analyzes the user's message to determine sentiment/context and
@@ -564,6 +619,8 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": mood_analysis_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
+        # Use the default model for mood analysis, as it's not user-configurable for this specific internal task
+        # It's safer to use a known stable model for internal tasks like mood analysis and fact extraction.
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         try:
@@ -625,6 +682,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": extraction_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
+        # Use a known stable model for internal tasks like mood analysis and fact extraction.
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
@@ -741,6 +799,7 @@ class Skippy(commands.Cog):
             "contents": [{"role": "user", "parts": [{"text": relationship_prompt}]}]
         }
         headers = {"Content-Type": "application/json"}
+        # Use a known stable model for internal tasks like mood analysis and fact extraction.
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
 
         conn = None
@@ -989,7 +1048,7 @@ class Skippy(commands.Cog):
         current_mood = guild_settings["current_mood"]
         guild_mood_prompts = await self.config.guild(ctx.guild).mood_prompts()
         soft_max_reply_sentences = guild_settings["soft_max_reply_sentences"]
-        api_model = guild_settings["gemini_model"]  # NEW: Get the configured model
+        api_model = guild_settings["gemini_model"]  # Get the configured model
 
         core_personality_prompt = guild_mood_prompts.get("normal", MOOD_PROMPTS["normal"])
         actual_personality_prompt = core_personality_prompt
@@ -1899,13 +1958,18 @@ class Skippy(commands.Cog):
         """
         Sets the Gemini language model Skippy will use for responses.
         Example: `[p]skippy setmodel gemini-1.5-flash-latest`
-        Current recommended models: `gemini-2.5-flash-preview-05-20`, `gemini-1.5-flash-latest`
+        Use `[p]skippy showmodel` to see available models.
         """
-        # Basic validation for common model names. You might want to expand this.
-        valid_models = ["gemini-2.5-flash-preview-05-20", "gemini-1.5-flash-latest", "gemini-pro"]
-        if model_name.lower() not in valid_models:
+        if not self.available_gemini_models:
+            await self._fetch_available_gemini_models()  # Try to fetch if not already populated
+            if not self.available_gemini_models:
+                await ctx.send(
+                    "Fiddlesticks! I couldn't retrieve the list of available Gemini models. Please ensure your API key is set correctly and try again later. My cosmic connection seems to be on the fritz!")
+                return
+
+        if model_name.lower() not in self.available_gemini_models:
             await ctx.send(
-                f"Poppycock! That model name seems unfamiliar. Please use one of the known models: {', '.join(valid_models)}. My cosmic knowledge is vast, but not infinite for every mortal's whim!")
+                f"Poppycock! That model name seems unfamiliar or is not available. Please use one of the currently known models: {', '.join(self.available_gemini_models)}. My cosmic knowledge is vast, but not infinite for every mortal's whim!")
             return
 
         await self.config.guild(ctx.guild).gemini_model.set(model_name.lower())
@@ -1917,10 +1981,20 @@ class Skippy(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def _skippy_showmodel(self, ctx: commands.Context):
         """
-        Shows the current Gemini language model Skippy is using.
+        Shows the current Gemini language model Skippy is using and lists all available models.
         """
         current_model = await self.config.guild(ctx.guild).gemini_model()
         await ctx.send(f"Skippy is currently channeling his cosmic wisdom through the `{current_model}` model.")
+
+        await self._fetch_available_gemini_models()  # Refresh the list before showing
+        if self.available_gemini_models:
+            response_text = "Currently available Gemini models:\n"
+            response_text += "```\n" + "\n".join(self.available_gemini_models) + "\n```"
+            for page in pagify(response_text, delims=["\n"], escape_mass_mentions=True):
+                await ctx.send(page)
+        else:
+            await ctx.send(
+                "Fiddlesticks! I couldn't retrieve the list of available Gemini models. My cosmic connection seems to be on the fritz!")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
