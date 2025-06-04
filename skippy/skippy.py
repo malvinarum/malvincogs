@@ -265,33 +265,15 @@ class Skippy(commands.Cog):
                 create_memory_table_sql = """
                                           CREATE TABLE IF NOT EXISTS skippy_long_term_memory
                                           (
-                                              id \
-                                              INT \
-                                              AUTO_INCREMENT \
-                                              PRIMARY \
-                                              KEY,
-                                              user_id \
-                                              BIGINT,
-                                              guild_id \
-                                              BIGINT,
-                                              content \
-                                              TEXT \
-                                              NOT \
-                                              NULL,
-                                              keywords \
-                                              VARCHAR \
-                                          ( \
-                                              255 \
-                                          ),
+                                              id INT AUTO_INCREMENT PRIMARY KEY,
+                                              user_id BIGINT,
+                                              guild_id BIGINT,
+                                              content TEXT NOT NULL,
+                                              keywords VARCHAR(255),
                                               embedding BLOB,
                                               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                                              INDEX idx_user_guild_memory \
-                                          ( \
-                                              user_id, \
-                                              guild_id, \
-                                              timestamp \
-                                          )
-                                              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                                              INDEX idx_user_guild_memory (user_id, guild_id, timestamp)
+                                              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                                           """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_memory_table_sql)
                 log.info("MySQL table 'skippy_long_term_memory' ensured to exist with inline index.")
@@ -316,52 +298,19 @@ class Skippy(commands.Cog):
                 create_relationships_table_sql = """
                                                  CREATE TABLE IF NOT EXISTS skippy_relationships
                                                  (
-                                                     id \
-                                                     INT \
-                                                     AUTO_INCREMENT \
-                                                     PRIMARY \
-                                                     KEY,
-                                                     user_id_initiator \
-                                                     BIGINT \
-                                                     NOT \
-                                                     NULL,
-                                                     user_id_target \
-                                                     BIGINT \
-                                                     NOT \
-                                                     NULL,
-                                                     relationship_type \
-                                                     VARCHAR \
-                                                 ( \
-                                                     100 \
-                                                 ) NOT NULL,
+                                                     id INT AUTO_INCREMENT PRIMARY KEY,
+                                                     user_id_initiator BIGINT NOT NULL,
+                                                     user_id_target BIGINT NOT NULL,
+                                                     relationship_type VARCHAR(100) NOT NULL,
                                                      description TEXT,
                                                      guild_id BIGINT,
                                                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                                                     UNIQUE KEY unique_relationship \
-                                                 ( \
-                                                     user_id_initiator, \
-                                                     user_id_target, \
-                                                     relationship_type, \
-                                                     guild_id \
-                                                 ),
-                                                     INDEX idx_guild_relationships \
-                                                 ( \
-                                                     guild_id \
-                                                 ),
-                                                     INDEX idx_initiator_relationships \
-                                                 ( \
-                                                     user_id_initiator \
-                                                 ),
-                                                     INDEX idx_target_relationships \
-                                                 ( \
-                                                     user_id_target \
-                                                 ),
-                                                     INDEX idx_users_relationships \
-                                                 ( \
-                                                     user_id_initiator, \
-                                                     user_id_target \
-                                                 )
-                                                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                                                     UNIQUE KEY unique_relationship (user_id_initiator, user_id_target, relationship_type, guild_id),
+                                                     INDEX idx_guild_relationships (guild_id),
+                                                     INDEX idx_initiator_relationships (user_id_initiator),
+                                                     INDEX idx_target_relationships (user_id_target),
+                                                     INDEX idx_users_relationships (user_id_initiator, user_id_target)
+                                                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                                                  """
                 await self.bot.loop.run_in_executor(None, cursor.execute, create_relationships_table_sql)
                 log.info("MySQL table 'skippy_relationships' ensured to exist with inline indexes.")
@@ -441,10 +390,7 @@ class Skippy(commands.Cog):
                          INSERT INTO skippy_user_names (user_id, guild_id, display_name, known_names)
                          VALUES (%s, %s, %s, %s) ON DUPLICATE KEY
                          UPDATE
-                             display_name = \
-                         VALUES (display_name), known_names = \
-                         VALUES (known_names), timestamp = \
-                         VALUES (timestamp)
+                             display_name = VALUES(display_name), known_names = VALUES(known_names), timestamp = VALUES(timestamp)
                          """
             await self.bot.loop.run_in_executor(None, cursor.execute, upsert_sql,
                                                 (member.id, member.guild.id, current_display_name, known_names_json))
@@ -818,9 +764,7 @@ class Skippy(commands.Cog):
                                      INSERT INTO skippy_relationships (user_id_initiator, user_id_target,
                                                                        relationship_type, description, guild_id)
                                      VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY
-                                     UPDATE description = \
-                                     VALUES (description), timestamp = \
-                                     VALUES (timestamp)
+                                     UPDATE description = VALUES(description), timestamp = VALUES(timestamp)
                                      """
                         await self.bot.loop.run_in_executor(None, cursor.execute, insert_sql,
                                                             (user1_id, user2_id, rel_type.lower(), description.strip(),
@@ -1102,6 +1046,17 @@ class Skippy(commands.Cog):
             async with self.session.post(api_url, headers=headers, data=json.dumps(payload)) as response:
                 response.raise_for_status()
                 result = await response.json()
+
+            # Check for finishReason first
+            finish_reason = result.get("candidates", [{}])[0].get("finishReason")
+            if finish_reason == "MAX_TOKENS":
+                # Handle MAX_TOKENS specifically
+                await ctx.send(
+                    "Fiddlesticks! My cosmic wisdom was cut short! The response was too long for the current parameters. "
+                    "Perhaps try a shorter prompt or reduce the conversation history."
+                )
+                log.warning(f"Gemini API response finished with MAX_TOKENS for guild: {ctx.guild.id}")
+                return None
 
             if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0][
                 "content"].get("parts"):
