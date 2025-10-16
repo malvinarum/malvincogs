@@ -33,8 +33,9 @@ class GiveawayFetcher:
         if not api_key:
             return None, "API key is not configured."
 
-        # ATTEMPTING USER-REQUESTED ENDPOINT: /v2/static/events
-        endpoint = f"{API_FSB_BASE_URL}/static/events"
+        # FINAL ATTEMPT AT A SINGLE-CALL ENDPOINT:
+        # Based on the Go client, this is the most logical name for the list of free games.
+        endpoint = f"{API_FSB_BASE_URL}/freegames"
         headers = {
             # FreeStuffBot API requires the key in the Authorization header
             "Authorization": f"Bearer {api_key}"
@@ -54,19 +55,15 @@ class GiveawayFetcher:
 
             data = response.json()
 
-            # This endpoint likely returns a list of events directly, not nested under 'giveaways'.
-            # If it's a list, return it. If it's an object, we'll need to figure out the key.
+            # This endpoint should return a list of game objects.
+            # We maintain the robust check for list/dict and common keys.
             if isinstance(data, list):
-                # We'll treat the list of events as the giveaways for this test.
                 return data, None
 
-            # If it's an object, we'll try to find a list within it (a common pattern)
-            # Since we don't know the exact key, let's try a few common ones or assume the top-level is what we need.
-            # If the user API key is only for the specific 'giveaways' endpoint, this might fail anyway.
-            # For robustness, we will try to extract the key, otherwise assume it's the list itself.
+            # If it's an object, we'll try to find a list within it (common pattern for APIs)
             if isinstance(data, dict):
-                # Try common keys for lists of items
-                return data.get('events', data.get('giveaways', [])), None
+                # Try common keys for lists of items (e.g., 'freegames', 'deals', 'giveaways', or 'events')
+                return data.get('freegames', data.get('deals', data.get('giveaways', data.get('events', [])))), None
 
             return [], None
 
