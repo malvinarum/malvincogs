@@ -29,6 +29,7 @@ class GiveawayFetcher:
     def _make_request(self, endpoint: str, api_key: str, params: Optional[Dict] = None) -> tuple[
         Optional[Dict or List], Optional[str]]:
         """Handles the HTTP request, error checking, and JSON parsing."""
+        # The API key must be sent in the Authorization header
         headers = {"Authorization": f"Bearer {api_key}"}
         try:
             response = requests.get(endpoint, headers=headers, params=params, timeout=10)
@@ -60,7 +61,8 @@ class GiveawayFetcher:
             return None, "API key is not configured."
 
         # --- Single Step: Get full list of Free Games from V1 API ---
-        # NEW ENDPOINT: Pivoting to the absolute simplest V1 endpoint path: /v1/free
+        # FIXED ENDPOINT: Reverting to '/v1/free', which triggered an expected 'Unauthorized' error,
+        # confirming the path exists and requires the API key.
         endpoint = f"{API_FSB_BASE_URL}/free"
         log.debug(f"Fetching free games from V1 endpoint: {endpoint}")
 
