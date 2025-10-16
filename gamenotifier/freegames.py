@@ -8,6 +8,7 @@ from discord.ext import tasks  # Re-import tasks for polling
 
 # We import core components from redbot.core
 from redbot.core import Config, commands, checks
+from redbot.core.bot import Red  # FIX: Import Red type hint
 from redbot.core.utils.chat_formatting import box, pagify, humanize_list
 
 # Setup logging for the cog
