@@ -160,6 +160,7 @@ class FreeGames(commands.Cog):
 
         # 1. Fetch current giveaways from API
         giveaways = self.fetcher.fetch_current_giveaways(api_key)
+
         if not giveaways:
             # Added a more specific warning for key status
             if not api_key:
@@ -167,6 +168,8 @@ class FreeGames(commands.Cog):
             else:
                 log.warning("Giveaway check failed: No data retrieved from API (check key validity or API status).")
             return
+
+        log.debug(f"Successfully fetched {len(giveaways)} active giveaways.")
 
         # 2. Iterate through all configured guilds
         all_guilds = await self.config.all_guilds()
@@ -186,7 +189,10 @@ class FreeGames(commands.Cog):
 
             # 3. Get previously announced IDs for this guild
             announced_ids: Set[str] = set(guild_data.get("announced_ids", []))
+            log.debug(f"Guild {guild_id} has {len(announced_ids)} IDs in history.")
             newly_announced_ids: List[str] = []
+
+            games_skipped_count = 0
 
             # 4. Find and announce new giveaways
             for giveaway in giveaways:
@@ -210,11 +216,17 @@ class FreeGames(commands.Cog):
                     except Exception as e:
                         log.error(f"Failed to announce giveaway {giveaway_id} in channel {channel_id}: {e}")
 
+                else:
+                    games_skipped_count += 1
+
             # 5. Save the updated list of announced IDs for the guild
             if newly_announced_ids:
                 updated_ids = list(announced_ids) + newly_announced_ids
                 await self.config.guild(guild).announced_ids.set(updated_ids)
-                log.info(f"Announced {len(newly_announced_ids)} new giveaways in guild {guild_id}.")
+                log.info(
+                    f"Announced {len(newly_announced_ids)} new giveaways in guild {guild_id}. Skipped {games_skipped_count} existing ones.")
+            else:
+                log.info(f"No new giveaways found for guild {guild_id}. Skipped {games_skipped_count} existing ones.")
 
     @giveaway_check.before_loop
     async def before_giveaway_check(self):
@@ -249,6 +261,20 @@ class FreeGames(commands.Cog):
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await ctx.send(f"Success! Free game announcements will now be posted in {channel.mention}.")
         log.info(f"Notification channel set to {channel.id} in guild {ctx.guild.id}")
+
+    @_freegames.command(name="reset")
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def freegames_reset(self, ctx: commands.Context):
+        """
+        Clears the list of previously announced giveaway IDs for this server.
+
+        Use this if you think the bot missed an announcement or want to
+        re-post all currently active giveaways.
+        """
+        await self.config.guild(ctx.guild).announced_ids.set([])
+        await ctx.send(
+            "Cleared the giveaway announcement history for this server. The next check will treat all active giveaways as new.")
 
     @_freegames.command(name="checknow")
     @checks.admin_or_permissions(manage_guild=True)
