@@ -6,7 +6,8 @@ from typing import List, Dict, Optional, Set
 import discord  # Import Discord for using Embeds
 
 from redbot.core import Config, commands, checks, app_commands
-from redbot.core import tasks
+# FIX: 'tasks' is now imported from redbot.core.commands in newer RedBot versions
+from redbot.core.commands import tasks
 from redbot.core.utils.chat_formatting import box, pagify, humanize_list
 
 # Setup logging for the cog
