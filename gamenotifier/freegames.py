@@ -290,6 +290,50 @@ class FreeGames(commands.Cog):
         await self.giveaway_check()
         await ctx.send("Check complete.")
 
+    @_freegames.command(name="testapi")
+    @checks.is_owner()
+    async def freegames_testapi(self, ctx: commands.Context):
+        """
+        Tests the connection to the FreeStuffBot API and prints response data structure. (Owner only)
+        """
+        await ctx.defer()
+
+        api_key = await self.config.api_key()
+        if not api_key:
+            return await ctx.send(
+                "❌ **Error:** The FreeStuffBot API key is not set. Please use `[p]freegames setkey <key>`.")
+
+        await ctx.send("Attempting to connect to FreeStuffBot API...")
+
+        giveaways = self.fetcher.fetch_current_giveaways(api_key)
+
+        if giveaways is None:
+            return await ctx.send(
+                "❌ **Error:** API request failed. Check your API key and RedBot console logs for connection errors.")
+
+        count = len(giveaways)
+
+        if count == 0:
+            return await ctx.send(
+                "⚠️ **API Test Successful:** The connection is working, but the API returned **0 active giveaways**.")
+
+        # Successfully received data, show the structure of the first item
+        first_giveaway = giveaways[0]
+
+        # Prepare a readable JSON string for the first item
+        try:
+            sample_data = json.dumps(first_giveaway, indent=2)
+            if len(sample_data) > 1900:  # Ensure it fits in a Discord message
+                sample_data = sample_data[:1900] + "\n... (truncated)"
+        except Exception:
+            sample_data = "Could not serialize sample data to JSON."
+
+        await ctx.send(
+            f"✅ **API Test Successful:** Found **{count}** active giveaways.\n"
+            f"**First Giveaway Item Data Structure:**\n"
+            f"{box(sample_data, lang='json')}"
+        )
+
     @_freegames.command(name="current")
     @commands.guild_only()
     async def freegames_current(self, ctx: commands.Context):
