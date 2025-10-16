@@ -4,133 +4,185 @@ import logging
 import requests
 from typing import List, Dict, Optional, Set
 import discord  # Import Discord for using Embeds
+from discord.ext import tasks  # Re-import tasks for polling
 
 # We import core components from redbot.core
 from redbot.core import Config, commands, checks
-# FIX: Import tasks directly from discord.ext for best compatibility across RedBot versions
-# Since we are moving to webhooks, the `tasks` and `app_commands` imports are no longer strictly needed for this file.
-# We will use the redbot webserver instead.
 from redbot.core.utils.chat_formatting import box, pagify, humanize_list
-
-# Import Red's web server components
-from redbot.core.app_commands import AppCommand
-from redbot.core.bot import Red
-from redbot.core.errors import CogLoadError
 
 # Setup logging for the cog
 log = logging.getLogger("red.freegames")
 
+# Constants
+API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v1"
+POLL_INTERVAL_MINUTES = 30
 
-# --- Webhook Handler (No longer need GiveawayFetcher class) ---
-# We are removing the GiveawayFetcher class and the API_FSB_BASE_URL constant.
+
+# --- Giveaway Fetcher (Reintroduced for Polling) ---
+
+class GiveawayFetcher:
+    """Handles API interaction and tracking of announced giveaways."""
+
+    def __init__(self, bot, config):
+        self.bot = bot
+        self.config = config
+
+    async def _get_api_key(self) -> Optional[str]:
+        """Retrieves the globally stored API key."""
+        return await self.config.api_key()
+
+    def _make_request(self, endpoint: str, api_key: str) -> tuple[Optional[List], Optional[str]]:
+        """Makes the authenticated API request to FreeStuffBot."""
+        # Authenticated request requires the Bearer token
+        headers = {"Authorization": f"Bearer {api_key}"}
+        full_url = f"{API_FSB_BASE_URL}/{endpoint}"
+
+        try:
+            response = requests.get(full_url, headers=headers, timeout=10)
+
+            # Handle non-success status codes (4xx/5xx)
+            if response.status_code == 401:
+                return None, f"HTTP Error 401: Unauthorized. Please check your API key is correct and valid."
+            if response.status_code >= 400:
+                return None, f"HTTP Error {response.status_code}: {response.reason}. Endpoint: {full_url}"
+
+            data = response.json()
+            # The /v1/free endpoint returns a list of giveaways
+            if isinstance(data, list):
+                return data, None
+            # If it's a dict, try to extract the list from common keys
+            if isinstance(data, dict):
+                return data.get('games', data.get('giveaways', data.get('deals', []))), None
+
+            return [], None
+
+        except requests.exceptions.RequestException as e:
+            return None, f"Connection Error: {e.__class__.__name__}: {e}"
+        except json.JSONDecodeError:
+            return None, "JSON Decoding Error: The API returned non-JSON data."
+
+    async def fetch_new_giveaways(self) -> List[Dict]:
+        """Fetches new giveaways and updates announced history."""
+        api_key = await self._get_api_key()
+        if not api_key:
+            log.warning("FreeGames cog: API key not set. Skipping fetch.")
+            return []
+
+        giveaways, error = await asyncio.to_thread(self._make_request, "free", api_key)
+
+        if error:
+            log.error(f"FreeGames API Fetch Error: {error}")
+            return []
+
+        if not giveaways:
+            return []
+
+        new_giveaways = []
+
+        # Get all announced IDs from all guilds
+        all_announced_ids = set()
+        for guild_id in await self.config.all_guilds():
+            guild_data = await self.config.guild_from_id(guild_id).all()
+            all_announced_ids.update(guild_data.get("announced_ids", []))
+
+        # Check for new giveaways
+        for giveaway in giveaways:
+            giveaway_id = str(giveaway.get("id"))
+            if giveaway_id and giveaway_id not in all_announced_ids:
+                new_giveaways.append(giveaway)
+
+        # Update history for all guilds with the new IDs
+        if new_giveaways:
+            new_ids = {str(g.get("id")) for g in new_giveaways}
+            for guild_id in await self.config.all_guilds():
+                async with self.config.guild_from_id(guild_id).announced_ids() as announced_ids:
+                    announced_ids.extend(list(new_ids))
+
+        return new_giveaways
+
 
 # --- RedBot Cog Implementation ---
 
 class FreeGames(commands.Cog):
     """
     A cog to track and notify about time-limited free game giveaways
-    via a FreeStuffBot webhook relay.
-
-    This cog uses Red's webserver component to listen for incoming webhooks.
+    via the FreeStuffBot REST API.
     """
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # Use a global identifier for the API key, as it's common across all guilds
         self.config = Config.get_conf(self, identifier=147789053890256247, force_registration=True)
 
-        # Global configuration defaults (for Webhook Secret)
+        # Global configuration defaults (for API Key)
         default_global = {
-            # The API key is replaced by the webhook secret used for validation
-            "webhook_secret": "",
-            "webhook_url": None  # Red's public URL for the cog's endpoint
+            "api_key": ""  # REST API Key for polling
         }
         self.config.register_global(**default_global)
 
         # Guild configuration defaults
         default_guild = {
             "channel_id": None,  # Channel to send notifications to
-            # We don't need announced_ids in the webhook model as the source should only send new data.
+            "announced_ids": []  # List of giveaway IDs already announced
         }
         self.config.register_guild(**default_guild)
 
-        # Ensure webserver is loaded
-        if not self.bot.get_cog("Webserver"):
-            raise CogLoadError("The Webserver cog is not loaded. This cog requires it to receive webhooks.")
+        self.fetcher = GiveawayFetcher(bot, self.config)
 
-        # Register the webhook handler
-        self.bot.get_cog("Webserver").register_routes(self.app_commands)
-
-        log.info("FreeGames cog initialized and webhook route registered.")
+        # Start the polling loop
+        self.giveaway_poller.start()
+        log.info("FreeGames cog initialized and polling task started.")
 
     def cog_unload(self):
         """Clean up when the cog is unloaded."""
-        # Unregister the webhook handler
-        if self.bot.get_cog("Webserver"):
-            self.bot.get_cog("Webserver").unregister_routes(self.app_commands)
-        log.info("FreeGames cog webhook route unregistered.")
+        # Stop the polling loop
+        self.giveaway_poller.stop()
+        log.info("FreeGames cog polling task stopped.")
 
-    # --- Webhook Routes (Using Red's app_commands) ---
-    @property
-    def app_commands(self) -> List[AppCommand]:
-        """Defines the public web routes for this cog."""
-        return [
-            AppCommand(
-                "POST",
-                "/freegames/webhook/{guild_id}",
-                self.handle_webhook,
-                json_body=True,
-                secret=self.config.webhook_secret  # Use the configured secret for signing/validation
-            )
-        ]
+    @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
+    async def giveaway_poller(self):
+        """The main loop that checks the API for new giveaways."""
+        await self.bot.wait_until_ready()
 
-    async def handle_webhook(self, data: Dict, guild_id: int):
-        """
-        Handles incoming webhook payloads from FreeStuffBot.
-        The data payload is expected to be a list of giveaway objects.
-        """
-        log.debug(f"Received webhook for guild {guild_id}. Data type: {type(data)}")
+        log.debug("Starting giveaway check...")
 
-        if not isinstance(data, list):
-            log.warning(f"Webhook data for guild {guild_id} was not a list. Skipping.")
+        new_giveaways = await self.fetcher.fetch_new_giveaways()
+
+        if not new_giveaways:
+            log.debug("No new giveaways found.")
             return
 
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            log.warning(f"Received webhook for non-existent guild ID: {guild_id}. Skipping.")
-            return
+        log.info(f"Found {len(new_giveaways)} new giveaways. Announcing...")
 
-        guild_data = await self.config.guild(guild).all()
-        channel_id = guild_data.get("channel_id")
+        # Announce new giveaways in all configured channels
+        all_guilds_data = await self.config.all_guilds()
 
-        if not channel_id:
-            log.info(f"Guild {guild_id} has no announcement channel set. Skipping webhook processing.")
-            return
+        for guild_id, guild_data in all_guilds_data.items():
+            channel_id = guild_data.get("channel_id")
+            if not channel_id:
+                continue
 
-        channel = guild.get_channel(channel_id)
-        if not channel:
-            log.warning(f"Announcement channel {channel_id} not found in guild {guild_id}. Skipping.")
-            return
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                continue
 
-        # Process all giveaways in the payload
-        for giveaway in data:
-            try:
-                embed = self._format_giveaway(giveaway)
-                await channel.send(content="🚨 **NEW FREE GAME ALERT!** 🚨", embed=embed)
-                await asyncio.sleep(0.5)  # Small delay
-            except Exception as e:
-                log.error(f"Failed to announce webhook giveaway in channel {channel_id}: {e}")
+            channel = guild.get_channel(channel_id)
+            if not channel or not channel.permissions_for(guild.me).send_messages:
+                log.warning(f"Cannot send messages in channel {channel_id} in guild {guild_id}.")
+                continue
 
-        log.info(f"Successfully processed {len(data)} giveaways via webhook for guild {guild_id}.")
-        return {"status": "ok", "message": f"Processed {len(data)} giveaways."}, 200  # Return standard success response
+            for giveaway in new_giveaways:
+                try:
+                    embed = self._format_giveaway(giveaway)
+                    await channel.send(content="🚨 **NEW FREE GAME ALERT!** 🚨", embed=embed)
+                    await asyncio.sleep(0.5)  # Small delay to respect rate limits
+                except Exception as e:
+                    log.error(f"Failed to announce giveaway {giveaway.get('id')} in channel {channel_id}: {e}")
 
     # --- Utility Methods ---
 
     def _format_giveaway(self, giveaway: Dict) -> discord.Embed:
         """
-        Formats a single giveaway item (using FreeStuffBot keys)
-        into a clean Discord embed, designed to mimic the user's provided example.
-        (This method remains mostly unchanged as the payload keys are likely the same)
+        Formats a single giveaway item into a clean Discord embed.
         """
         # Mapping FreeStuffBot keys to embed fields
         title = giveaway.get('title', 'Unknown Title')
@@ -139,90 +191,58 @@ class FreeGames(commands.Cog):
         end_date = str(giveaway.get('end_date', 'Ongoing'))
         worth = giveaway.get('original_price', 'Free')
         open_url = giveaway.get('link', '#')
-        image_url = giveaway.get('image', None)  # Renamed to image_url for clarity
+        image_url = giveaway.get('image', None)
 
         # Determine the status text (e.g., "Free to keep" vs. "Free until...")
         status_text = ""
         # Check if end_date is meaningful
         if end_date and end_date.lower() not in ["ongoing", "n/a", "tbd", "none"]:
-            # If there's an end date, make it prominent
             status_text = f"**Free until:** {end_date}"
         elif worth and worth.lower() == 'free':
-            # Assume if it's 'Free' and no end date, it's 'Free to Keep'
             status_text = "**Free to Keep Forever!**"
         else:
             status_text = "**Active Giveaway**"
 
         # Create the embed
         embed = discord.Embed(
-            # Title is the game name
             title=title,
-            # Use a neutral dark color to match a sleek Discord look
             color=0x2F3136,
-            url=open_url  # URL for the title link
+            url=open_url
         )
 
-        # Set Author to be the alert message
-        embed.set_author(name="🚨 NEW FREE GAME ALERT!", icon_url="https://i.imgur.com/8Q0N6jY.png")  # Simple alert icon
+        embed.set_author(name="🚨 NEW FREE GAME ALERT!", icon_url="https://i.imgur.com/8Q0N6jY.png")
 
-        # Use the description to display the status and link information
         embed.description = (
             f"{status_text}\n"
             f"Platform: **{platform}** | Value: **{worth}**\n\n"
             f"[**Click here to claim this giveaway!**]({open_url})"
         )
 
-        # Use set_image for the primary visual (matching the user's example)
         if image_url:
             embed.set_image(url=image_url)
 
-        # Add the requested footer
         embed.set_footer(text=f"Game notifier by Malvinarum | Source: FreeStuffBot")
 
         return embed
 
-    # --- Commands (Modified for Webhook setup) ---
+    # --- Commands (Restored for REST API setup) ---
 
     @commands.group(name="freegames", invoke_without_command=True)
     @commands.guild_only()
     async def _freegames(self, ctx: commands.Context):
-        """Manages the Free Games Giveaway Webhook Notifier."""
+        """Manages the Free Games Giveaway Polling Notifier."""
         await ctx.send_help(ctx.command)
 
-    @_freegames.command(name="setsecret")
+    @_freegames.command(name="setkey")
     @checks.is_owner()
-    async def freegames_setsecret(self, ctx: commands.Context, secret: str):
+    async def freegames_setkey(self, ctx: commands.Context, key: str):
         """
-        Sets the webhook secret for validating incoming FreeStuffBot webhooks (Owner only).
+        Sets the FreeStuffBot REST API key (Owner only).
 
-        This secret must match the one configured on the FreeStuffBot service.
+        This key is required for the bot to poll the API for new giveaways.
         """
-        await self.config.webhook_secret.set(secret)
-        await ctx.send("FreeStuffBot Webhook Secret has been successfully updated.")
-
-    @_freegames.command(name="geturl")
-    @checks.is_owner()
-    async def freegames_geturl(self, ctx: commands.Context):
-        """
-        Gets the full public URL for the FreeStuffBot webhook. (Owner only)
-
-        You must copy this URL into the FreeStuffBot settings.
-        """
-        webserver_cog = self.bot.get_cog("Webserver")
-        if not webserver_cog or not webserver_cog.public_url:
-            return await ctx.send(
-                "❌ **Error:** Webserver cog is not configured or its public URL is unknown. Cannot generate the endpoint URL.")
-
-        # The URL for this guild is the public URL + the route defined in app_commands
-        guild_id = ctx.guild.id
-        webhook_path = f"/freegames/webhook/{guild_id}"
-        full_url = webserver_cog.public_url.rstrip('/') + webhook_path
-
-        await ctx.send(
-            f"✅ **Your Guild's Webhook URL (for FreeStuffBot):**\n"
-            f"You need to copy this URL and paste it into your FreeStuffBot configuration.\n"
-            f"{box(full_url)}"
-        )
+        await self.config.api_key.set(key)
+        await ctx.send("FreeStuffBot REST API Key has been successfully updated.")
 
     @_freegames.command(name="setchannel")
     @checks.admin_or_permissions(manage_guild=True)
@@ -232,8 +252,7 @@ class FreeGames(commands.Cog):
         Sets the channel for free game giveaway announcements.
         """
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
-        await ctx.send(
-            f"Success! Free game announcements will now be posted in {channel.mention} when a webhook is received.")
+        await ctx.send(f"Success! Free game announcements will now be posted in {channel.mention}.")
         log.info(f"Notification channel set to {channel.id} in guild {ctx.guild.id}")
 
     @_freegames.command(name="reset")
@@ -241,58 +260,36 @@ class FreeGames(commands.Cog):
     @commands.guild_only()
     async def freegames_reset(self, ctx: commands.Context):
         """
-        This command is no longer strictly necessary with webhooks, but remains
-        as a placeholder for maintenance.
-        """
-        await ctx.send("The webhook model does not rely on a history list, but this command is kept for compatibility.")
+        Clears the list of already-announced giveaways for this server.
 
-    @_freegames.command(name="checkapi")  # Renamed from checknow
+        The cog will re-announce all currently active giveaways after this.
+        """
+        await self.config.guild(ctx.guild).announced_ids.set([])
+        await ctx.send(
+            "The announced game history for this server has been cleared. The bot will re-announce all currently active giveaways on the next check.")
+
+    @_freegames.command(name="checkapi")
     @checks.is_owner()
-    async def freegames_checkapi(self, ctx: commands.Context,
-                                 key: Optional[str] = None):  # Combined into one command with optional key
+    async def freegames_checkapi(self, ctx: commands.Context, key: Optional[str] = None):
         """
         Manually tests the REST API connection and checks the data format.
 
-        Since this cog is webhook-based, this requires your REST API key
-        for a one-time test: `[p]freegames checkapi <your_rest_api_key>` (Owner only).
+        Optionally provide the API key as an argument for a one-time test:
+        `[p]freegames checkapi <your_rest_api_key>` (Owner only).
+        If no key is provided, it uses the key set with `[p]freegames setkey`.
         """
-        await ctx.send(
-            "⚠️ Since this cog is now webhook-based, this command performs a **one-time REST API fetch** for testing the data format only.")
-
-        if key is None:
-            # If no key is provided, send the instructional message and return.
-            return await ctx.send(
-                "❌ **Test Skipped:** Please re-run this command with your REST API Key as an argument, e.g., `[p]freegames checkapi <your_rest_api_key>` if you need to test the data structure.")
-
         await ctx.defer()
 
-        # Temporary fetcher class implementation just for this command
-        class TempFetcher:
-            def _make_request(self, endpoint: str, api_key: str) -> tuple[Optional[List], Optional[str]]:
-                headers = {"Authorization": f"Bearer {api_key}"}
-                try:
-                    response = requests.get(endpoint, headers=headers, timeout=10)
-                    if response.status_code >= 400:
-                        return None, f"HTTP Error {response.status_code}: {response.reason}. Endpoint: {endpoint}"
-                    data = response.json()
-                    if isinstance(data, list):
-                        return data, None
-                    if isinstance(data, dict):
-                        # Check common keys: 'games', 'giveaways', 'deals'
-                        return data.get('games', data.get('giveaways', data.get('deals', []))), None
-                    return [], None
-                except requests.exceptions.RequestException as e:
-                    return None, f"Connection Error: {e.__class__.__name__}: {e}"
-                except json.JSONDecodeError:
-                    return None, "JSON Decoding Error: The API returned non-JSON data."
+        api_key = key or await self.config.api_key()
 
-        temp_fetcher = TempFetcher()
-        API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v1"
-        endpoint = f"{API_FSB_BASE_URL}/free"
+        if not api_key:
+            return await ctx.send(
+                "❌ **Test Skipped:** No API key provided or set. Use `[p]freegames setkey <key>` first, or provide the key as an argument.")
 
         await ctx.send("Attempting manual connection to FreeStuffBot API for format check...")
 
-        giveaways, error = temp_fetcher._make_request(endpoint, key)
+        # Use the fetcher class's request method
+        giveaways, error = await asyncio.to_thread(self.fetcher._make_request, "free", api_key)
 
         if error:
             return await ctx.send(f"❌ **Error:** Manual API request failed. **Reason:** {error}")
@@ -321,10 +318,8 @@ class FreeGames(commands.Cog):
     @commands.guild_only()
     async def freegames_current(self, ctx: commands.Context):
         """
-        The 'current' command is **not available** in the webhook model.
-
-        The webhook only pushes *new* giveaways. To view current giveaways,
-        you should use the original REST API (e.g., in a browser or API tool).
+        The 'current' command is no longer necessary, as the polling will
+        continuously update. This command is kept as a placeholder.
         """
         await ctx.send(
-            "⚠️ This command is disabled in the webhook-based cog. The bot relies on the FreeStuffBot service to push *new* giveaways only.")
+            "⚠️ This command is deprecated. The cog automatically polls the API every 30 minutes for new giveaways.")
