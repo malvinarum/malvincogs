@@ -23,59 +23,84 @@ API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v2"
 class GiveawayFetcher:
     """
     Utility class to interact with the FreeStuffBot API for time-limited giveaways.
+    Implements the two-step process identified from the official Go client.
     """
 
-    def fetch_current_giveaways(self, api_key: str) -> tuple[Optional[List[Dict]], Optional[str]]:
-        """
-        Fetches a list of time-limited game giveaways using the provided API key.
-        Returns a tuple: (list of giveaways, error message string or None).
-        """
-        if not api_key:
-            return None, "API key is not configured."
-
-        # FINAL ATTEMPT AT A SINGLE-CALL ENDPOINT:
-        # Based on the Go client, this is the most logical name for the list of free games.
-        endpoint = f"{API_FSB_BASE_URL}/freegames"
-        headers = {
-            # FreeStuffBot API requires the key in the Authorization header
-            "Authorization": f"Bearer {api_key}"
-        }
-
-        log.debug(f"Fetching limited-time giveaways from: {endpoint}")
-
+    def _make_request(self, endpoint: str, api_key: str, params: Optional[Dict] = None) -> tuple[
+        Optional[Dict or List], Optional[str]]:
+        """Handles the HTTP request, error checking, and JSON parsing."""
+        headers = {"Authorization": f"Bearer {api_key}"}
         try:
-            response = requests.get(endpoint, headers=headers, timeout=10)
+            response = requests.get(endpoint, headers=headers, params=params, timeout=10)
 
             # Check for HTTP errors (4xx or 5xx)
             if response.status_code >= 400:
-                error_msg = f"HTTP Error {response.status_code}: {response.reason}. Check if your API key is valid."
-                # Log a sample of the response text for deeper debugging
+                error_msg = f"HTTP Error {response.status_code}: {response.reason}. Endpoint: {endpoint}"
                 log.error(f"API fetch failed: {error_msg}. Response text sample: {response.text[:200]}")
                 return None, error_msg
 
-            data = response.json()
-
-            # This endpoint should return a list of game objects.
-            # We maintain the robust check for list/dict and common keys.
-            if isinstance(data, list):
-                return data, None
-
-            # If it's an object, we'll try to find a list within it (common pattern for APIs)
-            if isinstance(data, dict):
-                # Try common keys for lists of items (e.g., 'freegames', 'deals', 'giveaways', or 'events')
-                return data.get('freegames', data.get('deals', data.get('giveaways', data.get('events', [])))), None
-
-            return [], None
-
+            # Return the JSON data on success
+            return response.json(), None
 
         except requests.exceptions.RequestException as e:
-            error_msg = f"Connection Error (Check Firewall/Internet): {e.__class__.__name__}: {e}"
+            error_msg = f"Connection Error: {e.__class__.__name__}: {e}"
             log.error(error_msg)
             return None, error_msg
         except json.JSONDecodeError:
             error_msg = "JSON Decoding Error: The API returned non-JSON data."
             log.error(error_msg)
             return None, error_msg
+
+    def fetch_current_giveaways(self, api_key: str) -> tuple[Optional[List[Dict]], Optional[str]]:
+        """
+        Fetches a list of time-limited game giveaways using the official two-step process.
+        Returns a tuple: (list of giveaways, error message string or None).
+        """
+        if not api_key:
+            return None, "API key is not configured."
+
+        # --- STEP 1: Get list of Free Game IDs ---
+        id_endpoint = f"{API_FSB_BASE_URL}/games/ids"
+        id_params = {"category": "free"}
+        log.debug(f"STEP 1: Fetching game IDs from: {id_endpoint}")
+
+        id_data, error = self._make_request(id_endpoint, api_key, params=id_params)
+
+        if error:
+            return None, f"Failed to get game IDs: {error}"
+
+        # ID data should be a list of IDs (int or str)
+        if not isinstance(id_data, list):
+            log.warning("ID endpoint returned non-list data structure.")
+            return [], None
+
+        game_ids = [str(id) for id in id_data]
+        if not game_ids:
+            log.info("API returned 0 active free game IDs.")
+            return [], None
+
+            # --- STEP 2: Get full Game Info for the IDs ---
+        info_endpoint = f"{API_FSB_BASE_URL}/games/info"
+
+        # The API likely takes a comma-separated list of IDs in the query string
+        info_params = {"ids": ",".join(game_ids)}
+
+        log.debug(f"STEP 2: Fetching game info for {len(game_ids)} IDs.")
+
+        giveaway_data, error = self._make_request(info_endpoint, api_key, params=info_params)
+
+        if error:
+            return None, f"Failed to get game info: {error}"
+
+        # The Info endpoint should return a list of game objects.
+        if isinstance(giveaway_data, list):
+            return giveaway_data, None
+
+        # If it's a dict, we'll try to find a list within it (e.g., if it's wrapped)
+        if isinstance(giveaway_data, dict):
+            return giveaway_data.get('games', giveaway_data.get('giveaways', [])), None
+
+        return [], None
 
 
 # --- RedBot Cog Implementation ---
@@ -124,14 +149,16 @@ class FreeGames(commands.Cog):
         # Mapping FreeStuffBot keys to embed fields
         title = giveaway.get('title', 'Unknown Title')
         platform = giveaway.get('platform', 'N/A')
-        end_date = giveaway.get('end_date', 'Ongoing')
+        # FIX: The end_date might be null or missing, so we safely handle that and convert it to a string if present.
+        end_date = str(giveaway.get('end_date', 'Ongoing'))
         worth = giveaway.get('original_price', 'Free')
         open_url = giveaway.get('link', '#')
         image_url = giveaway.get('image', None)  # Renamed to image_url for clarity
 
         # Determine the status text (e.g., "Free to keep" vs. "Free until...")
         status_text = ""
-        if end_date and end_date.lower() not in ["ongoing", "n/a", "tbd"]:
+        # Check if end_date is meaningful
+        if end_date and end_date.lower() not in ["ongoing", "n/a", "tbd", "none"]:
             # If there's an end date, make it prominent
             status_text = f"**Free until:** {end_date}"
         elif worth and worth.lower() == 'free':
@@ -180,7 +207,7 @@ class FreeGames(commands.Cog):
         api_key = await self.config.api_key()
 
         # 1. Fetch current giveaways from API
-        # Updated to handle the new tuple return (giveaways, error)
+        # Now uses the robust two-step fetching logic
         giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
         if error:
@@ -323,7 +350,7 @@ class FreeGames(commands.Cog):
 
         await ctx.send("Attempting to connect to FreeStuffBot API...")
 
-        # Updated to handle the new tuple return (giveaways, error)
+        # Using the new two-step fetching logic
         giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
         if error:
@@ -365,7 +392,7 @@ class FreeGames(commands.Cog):
         if not api_key:
             return await ctx.send("The FreeStuffBot API key is not set. Please use `[p]freegames setkey <key>`.")
 
-        # Updated to handle the new tuple return (giveaways, error)
+        # Using the new two-step fetching logic
         giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
         if error:
