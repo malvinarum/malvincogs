@@ -11,5 +11,8 @@
         "api",
         "utility"
     ],
+    "requirements": [
+        "requests"
+    ],
     "end_user_data_statement": "This cog stores guild IDs and a list of giveaway IDs that have already been announced in each guild to prevent spamming duplicate notifications. No personal data is stored."
 }
