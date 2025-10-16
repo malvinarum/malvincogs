@@ -16,14 +16,14 @@ log = logging.getLogger("red.freegames")
 
 # --- Helper Class for API Interactions ---
 
-# New Base URL for the FreeStuffBot API
-API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v2"
+# Base URL for the FreeStuffBot API is currently V1
+API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v1"
 
 
 class GiveawayFetcher:
     """
     Utility class to interact with the FreeStuffBot API for time-limited giveaways.
-    Implements the two-step process identified from the official Go client.
+    Now implements a simpler, single-step V1 process.
     """
 
     def _make_request(self, endpoint: str, api_key: str, params: Optional[Dict] = None) -> tuple[
@@ -53,53 +53,32 @@ class GiveawayFetcher:
 
     def fetch_current_giveaways(self, api_key: str) -> tuple[Optional[List[Dict]], Optional[str]]:
         """
-        Fetches a list of time-limited game giveaways using the official two-step process.
+        Fetches a list of time-limited game giveaways using the new V1 single-step process.
         Returns a tuple: (list of giveaways, error message string or None).
         """
         if not api_key:
             return None, "API key is not configured."
 
-        # --- STEP 1: Get list of Free Game IDs ---
-        id_endpoint = f"{API_FSB_BASE_URL}/games/ids"
-        id_params = {"category": "free"}
-        log.debug(f"STEP 1: Fetching game IDs from: {id_endpoint}")
+        # --- Single Step: Get full list of Free Games from V1 API ---
+        # NEW ENDPOINT: Pivoting to the absolute simplest V1 endpoint path: /v1/free
+        endpoint = f"{API_FSB_BASE_URL}/free"
+        log.debug(f"Fetching free games from V1 endpoint: {endpoint}")
 
-        id_data, error = self._make_request(id_endpoint, api_key, params=id_params)
-
-        if error:
-            return None, f"Failed to get game IDs: {error}"
-
-        # ID data should be a list of IDs (int or str)
-        if not isinstance(id_data, list):
-            log.warning("ID endpoint returned non-list data structure.")
-            return [], None
-
-        game_ids = [str(id) for id in id_data]
-        if not game_ids:
-            log.info("API returned 0 active free game IDs.")
-            return [], None
-
-            # --- STEP 2: Get full Game Info for the IDs ---
-        info_endpoint = f"{API_FSB_BASE_URL}/games/info"
-
-        # The API likely takes a comma-separated list of IDs in the query string
-        info_params = {"ids": ",".join(game_ids)}
-
-        log.debug(f"STEP 2: Fetching game info for {len(game_ids)} IDs.")
-
-        giveaway_data, error = self._make_request(info_endpoint, api_key, params=info_params)
+        giveaway_data, error = self._make_request(endpoint, api_key)
 
         if error:
-            return None, f"Failed to get game info: {error}"
+            return None, error  # Return error directly
 
-        # The Info endpoint should return a list of game objects.
+        # The V1 endpoint should return a list of game objects directly.
         if isinstance(giveaway_data, list):
             return giveaway_data, None
 
-        # If it's a dict, we'll try to find a list within it (e.g., if it's wrapped)
+        # If it's a dict, we'll try to find a list within it (common in V1 APIs)
         if isinstance(giveaway_data, dict):
-            return giveaway_data.get('games', giveaway_data.get('giveaways', [])), None
+            # Check common keys: 'games', 'giveaways', 'deals'
+            return giveaway_data.get('games', giveaway_data.get('giveaways', giveaway_data.get('deals', []))), None
 
+        # Fallback if the data format is unexpected
         return [], None
 
 
@@ -350,7 +329,7 @@ class FreeGames(commands.Cog):
 
         await ctx.send("Attempting to connect to FreeStuffBot API...")
 
-        # Using the new two-step fetching logic
+        # Using the new V1 single-step fetching logic
         giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
         if error:
@@ -392,7 +371,7 @@ class FreeGames(commands.Cog):
         if not api_key:
             return await ctx.send("The FreeStuffBot API key is not set. Please use `[p]freegames setkey <key>`.")
 
-        # Using the new two-step fetching logic
+        # Using the new V1 single-step fetching logic
         giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
         if error:
