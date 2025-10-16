@@ -33,7 +33,8 @@ class GiveawayFetcher:
         if not api_key:
             return None, "API key is not configured."
 
-        endpoint = f"{API_FSB_BASE_URL}/giveaways"
+        # CORRECTED: The actual endpoint for active giveaways is usually /v2/freegames, not /v2/giveaways.
+        endpoint = f"{API_FSB_BASE_URL}/freegames"
         headers = {
             # FreeStuffBot API requires the key in the Authorization header
             "Authorization": f"Bearer {api_key}"
@@ -53,6 +54,7 @@ class GiveawayFetcher:
 
             data = response.json()
             # FreeStuffBot API returns an object with a 'giveaways' array
+            # Note: The key is likely 'giveaways' even if the endpoint is 'freegames'
             return data.get('giveaways', []), None
 
         except requests.exceptions.RequestException as e:
