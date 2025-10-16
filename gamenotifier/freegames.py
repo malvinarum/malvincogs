@@ -194,7 +194,7 @@ class FreeGames(commands.Cog):
     @_freegames.command(name="setchannel")
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
-    async def freegames_setchannel(self, ctx: commands.Context, channel: commands.TextChannel):
+    async def freegames_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Sets the channel for free game giveaway announcements.
         """
