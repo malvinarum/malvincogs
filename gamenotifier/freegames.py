@@ -15,7 +15,7 @@ from redbot.core.utils.chat_formatting import box, pagify, humanize_list
 log = logging.getLogger("red.freegames")
 
 # Constants
-API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v1"
+API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v2/static/events"
 POLL_INTERVAL_MINUTES = 30
 
 
