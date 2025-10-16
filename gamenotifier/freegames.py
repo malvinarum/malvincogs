@@ -72,8 +72,8 @@ class FreeGames(commands.Cog):
 
         # Global configuration defaults (for API Key)
         default_global = {
-            # Using the key provided by the user as the initial default
-            "api_key": "fsb_S4YGUQ_PPgdE1VNuotkwYCq"
+            # The API key is now set to an empty string. Owner must use [p]freegames setkey <key> to configure.
+            "api_key": ""
         }
         self.config.register_global(**default_global)
 
@@ -150,7 +150,11 @@ class FreeGames(commands.Cog):
         # 1. Fetch current giveaways from API
         giveaways = self.fetcher.fetch_current_giveaways(api_key)
         if not giveaways:
-            log.warning("Giveaway check failed: No data retrieved from API or API key missing.")
+            # Added a more specific warning for key status
+            if not api_key:
+                log.warning("Giveaway check skipped: FreeStuffBot API key is not configured.")
+            else:
+                log.warning("Giveaway check failed: No data retrieved from API (check key validity or API status).")
             return
 
         # 2. Iterate through all configured guilds
@@ -175,6 +179,7 @@ class FreeGames(commands.Cog):
 
             # 4. Find and announce new giveaways
             for giveaway in giveaways:
+                # Assuming 'id' is the unique identifier for persistence
                 giveaway_id = str(giveaway.get("id"))
 
                 if giveaway_id not in announced_ids:
