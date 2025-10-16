@@ -246,29 +246,24 @@ class FreeGames(commands.Cog):
         """
         await ctx.send("The webhook model does not rely on a history list, but this command is kept for compatibility.")
 
-    @_freegames.command(name="checknow")
+    @_freegames.command(name="checkapi")  # Renamed from checknow
     @checks.is_owner()
-    async def freegames_checknow(self, ctx: commands.Context):
+    async def freegames_checkapi(self, ctx: commands.Context,
+                                 key: Optional[str] = None):  # Combined into one command with optional key
         """
-        Since we are using webhooks, this command is now a manual API fetch for testing purposes.
-        (Owner only)
+        Manually tests the REST API connection and checks the data format.
+
+        Since this cog is webhook-based, this requires your REST API key
+        for a one-time test: `[p]freegames checkapi <your_rest_api_key>` (Owner only).
         """
         await ctx.send(
             "⚠️ Since this cog is now webhook-based, this command performs a **one-time REST API fetch** for testing the data format only.")
 
-        # We need a temporary fetcher for this test command only.
+        if key is None:
+            # If no key is provided, send the instructional message and return.
+            return await ctx.send(
+                "❌ **Test Skipped:** Please re-run this command with your REST API Key as an argument, e.g., `[p]freegames checkapi <your_rest_api_key>` if you need to test the data structure.")
 
-        # NOTE: We must use the V1 API for testing as it was confirmed to exist.
-        # Since the cog no longer stores the API key, we must ask the owner for it if they want to use this command.
-        return await ctx.send(
-            "❌ **Test Skipped:** Please re-run this command with your REST API Key as an argument, e.g., `[p]freegames checknow <your_rest_api_key>` if you need to test the data structure.")
-
-    @_freegames.command(name="checknow", hidden=True)
-    @checks.is_owner()
-    async def freegames_checknow_with_key(self, ctx: commands.Context, key: str):
-        """
-        Manual test fetch using the REST API (Owner only).
-        """
         await ctx.defer()
 
         # Temporary fetcher class implementation just for this command
