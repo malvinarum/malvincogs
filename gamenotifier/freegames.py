@@ -98,41 +98,52 @@ class FreeGames(commands.Cog):
     def _format_giveaway(self, giveaway: Dict) -> discord.Embed:
         """
         Formats a single giveaway item (using FreeStuffBot keys)
-        into a clean Discord embed with the requested footer.
+        into a clean Discord embed, designed to mimic the user's provided example.
         """
-        # Mapping FreeStuffBot keys to embed fields (assuming typical keys)
+        # Mapping FreeStuffBot keys to embed fields
         title = giveaway.get('title', 'Unknown Title')
         platform = giveaway.get('platform', 'N/A')
         end_date = giveaway.get('end_date', 'Ongoing')
         worth = giveaway.get('original_price', 'Free')
         open_url = giveaway.get('link', '#')
-        thumbnail = giveaway.get('image', None)
-        description_full = giveaway.get('description', 'No description available')
+        image_url = giveaway.get('image', None)  # Renamed to image_url for clarity
+
+        # Determine the status text (e.g., "Free to keep" vs. "Free until...")
+        status_text = ""
+        if end_date and end_date.lower() not in ["ongoing", "n/a", "tbd"]:
+            # If there's an end date, make it prominent
+            status_text = f"**Free until:** {end_date}"
+        elif worth and worth.lower() == 'free':
+            # Assume if it's 'Free' and no end date, it's 'Free to Keep'
+            status_text = "**Free to Keep Forever!**"
+        else:
+            status_text = "**Active Giveaway**"
 
         # Create the embed
         embed = discord.Embed(
+            # Title is the game name
             title=title,
-            description=description_full[:300] + "..." if len(description_full) > 300 else description_full,
-            # Keep description concise
-            url=open_url,
-            color=0x4CAF50  # Green color for 'free'
+            # Use a neutral dark color to match a sleek Discord look
+            color=0x2F3136,
+            url=open_url  # URL for the title link
         )
 
-        embed.set_author(name=f"Free Game Alert! ({platform})", url=open_url)
+        # Set Author to be the alert message
+        embed.set_author(name="🚨 NEW FREE GAME ALERT!", icon_url="https://i.imgur.com/8Q0N6jY.png")  # Simple alert icon
 
-        # Add fields
-        embed.add_field(name="Platform", value=platform, inline=True)
-        embed.add_field(name="Value", value=worth, inline=True)
+        # Use the description to display the status and link information
+        embed.description = (
+            f"{status_text}\n"
+            f"Platform: **{platform}** | Value: **{worth}**\n\n"
+            f"[**Click here to claim this giveaway!**]({open_url})"
+        )
 
-        # Check if end_date is available and not just an empty string/None
-        if end_date and end_date.lower() not in ["ongoing", "n/a", "tbd"]:
-            embed.add_field(name="Ends", value=end_date, inline=False)
-
-        if thumbnail:
-            embed.set_thumbnail(url=thumbnail)
+        # Use set_image for the primary visual (matching the user's example)
+        if image_url:
+            embed.set_image(url=image_url)
 
         # Add the requested footer
-        embed.set_footer(text="Game notifier by Malvinarum")
+        embed.set_footer(text=f"Game notifier by Malvinarum | Source: FreeStuffBot")
 
         return embed
 
