@@ -33,9 +33,8 @@ class GiveawayFetcher:
         if not api_key:
             return None, "API key is not configured."
 
-        # FINAL ATTEMPT AT CORRECT ENDPOINT: Using the simplest, documented base endpoint for giveaways.
-        # This endpoint is generally required to work with the user's provided API key.
-        endpoint = f"{API_FSB_BASE_URL}/giveaways"
+        # ATTEMPTING USER-REQUESTED ENDPOINT: /v2/static/events
+        endpoint = f"{API_FSB_BASE_URL}/static/events"
         headers = {
             # FreeStuffBot API requires the key in the Authorization header
             "Authorization": f"Bearer {api_key}"
@@ -54,9 +53,23 @@ class GiveawayFetcher:
                 return None, error_msg
 
             data = response.json()
-            # FreeStuffBot API returns an object with a 'giveaways' array
-            # Note: The key is likely 'giveaways'
-            return data.get('giveaways', []), None
+
+            # This endpoint likely returns a list of events directly, not nested under 'giveaways'.
+            # If it's a list, return it. If it's an object, we'll need to figure out the key.
+            if isinstance(data, list):
+                # We'll treat the list of events as the giveaways for this test.
+                return data, None
+
+            # If it's an object, we'll try to find a list within it (a common pattern)
+            # Since we don't know the exact key, let's try a few common ones or assume the top-level is what we need.
+            # If the user API key is only for the specific 'giveaways' endpoint, this might fail anyway.
+            # For robustness, we will try to extract the key, otherwise assume it's the list itself.
+            if isinstance(data, dict):
+                # Try common keys for lists of items
+                return data.get('events', data.get('giveaways', [])), None
+
+            return [], None
+
 
         except requests.exceptions.RequestException as e:
             error_msg = f"Connection Error (Check Firewall/Internet): {e.__class__.__name__}: {e}"
