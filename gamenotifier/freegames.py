@@ -16,38 +16,44 @@ log = logging.getLogger("red.freegames")
 
 # --- Helper Class for API Interactions ---
 
-# Base URLs for the APIs
-API_GP_BASE_URL = "https://www.gamerpower.com/api"
+# New Base URL for the FreeStuffBot API
+API_FSB_BASE_URL = "https://api.freestuffbot.xyz/v2"
 
 
 class GiveawayFetcher:
     """
-    Utility class to interact with the GamerPower API for time-limited giveaways.
-    This replaces the separate helper file and is internal to the cog.
+    Utility class to interact with the FreeStuffBot API for time-limited giveaways.
     """
 
-    def fetch_current_giveaways(self) -> Optional[List[Dict]]:
+    def fetch_current_giveaways(self, api_key: str) -> Optional[List[Dict]]:
         """
-        Fetches a list of time-limited game giveaways, filtered for full games.
+        Fetches a list of time-limited game giveaways using the provided API key.
         """
-        # Filter by type=game to get only full game giveaways (not loot/keys/beta access)
-        # Sort by popularity to get the most relevant ones first
-        endpoint = f"{API_GP_BASE_URL}/giveaways?type=game&sort-by=popularity"
+        if not api_key:
+            log.warning("FreeStuffBot API key is not set. Cannot fetch giveaways.")
+            return None
+
+        endpoint = f"{API_FSB_BASE_URL}/giveaways"
+        headers = {
+            # FreeStuffBot API requires the key in the Authorization header
+            "Authorization": f"Bearer {api_key}"
+        }
+
         log.debug(f"Fetching limited-time giveaways from: {endpoint}")
 
         try:
-            response = requests.get(endpoint, timeout=10)
+            response = requests.get(endpoint, headers=headers, timeout=10)
             response.raise_for_status()  # Raises an exception for bad status codes (4xx or 5xx)
 
             data = response.json()
-            # GamerPower API returns a list of dictionaries for giveaways
-            return data
+            # FreeStuffBot API returns an object with a 'giveaways' array
+            return data.get('giveaways', [])
 
         except requests.exceptions.RequestException as e:
             log.error(f"An error occurred while fetching giveaway data: {e}")
             return None
         except json.JSONDecodeError:
-            log.error("Error: Could not decode JSON response from GamerPower API.")
+            log.error("Error: Could not decode JSON response from FreeStuffBot API.")
             return None
 
 
@@ -56,13 +62,20 @@ class GiveawayFetcher:
 class FreeGames(commands.Cog):
     """
     A cog to track and notify about time-limited free game giveaways
-    from various platforms (via GamerPower API).
+    from various platforms (via FreeStuffBot API).
     """
 
     def __init__(self, bot):
         self.bot = bot
-        # Use RedBot's config system for persistent storage
+        # Use a global identifier for the API key, as it's common across all guilds
         self.config = Config.get_conf(self, identifier=147789053890256247, force_registration=True)
+
+        # Global configuration defaults (for API Key)
+        default_global = {
+            # Using the key provided by the user as the initial default
+            "api_key": "fsb_S4YGUQ_PPgdE1VNuotkwYCq"
+        }
+        self.config.register_global(**default_global)
 
         # Guild configuration defaults
         default_guild = {
@@ -83,14 +96,17 @@ class FreeGames(commands.Cog):
     # --- Utility Methods ---
 
     def _format_giveaway(self, giveaway: Dict) -> discord.Embed:
-        """Formats a single giveaway item into a clean Discord embed with the requested footer."""
+        """
+        Formats a single giveaway item (using FreeStuffBot keys)
+        into a clean Discord embed with the requested footer.
+        """
+        # Mapping FreeStuffBot keys to embed fields (assuming typical keys)
         title = giveaway.get('title', 'Unknown Title')
-        platform = giveaway.get('platforms', 'N/A')
+        platform = giveaway.get('platform', 'N/A')
         end_date = giveaway.get('end_date', 'Ongoing')
-        worth = giveaway.get('worth', 'Free')
-        open_url = giveaway.get('open_giveaway_url', '#')
-        thumbnail = giveaway.get('thumbnail', None)  # Use the thumbnail image from the API
-
+        worth = giveaway.get('original_price', 'Free')
+        open_url = giveaway.get('link', '#')
+        thumbnail = giveaway.get('image', None)
         description_full = giveaway.get('description', 'No description available')
 
         # Create the embed
@@ -102,12 +118,15 @@ class FreeGames(commands.Cog):
             color=0x4CAF50  # Green color for 'free'
         )
 
-        embed.set_author(name="Free Game Alert!", url=open_url)
+        embed.set_author(name=f"Free Game Alert! ({platform})", url=open_url)
 
         # Add fields
-        embed.add_field(name="Platform(s)", value=platform, inline=True)
+        embed.add_field(name="Platform", value=platform, inline=True)
         embed.add_field(name="Value", value=worth, inline=True)
-        embed.add_field(name="Ends", value=end_date, inline=False)
+
+        # Check if end_date is available and not just an empty string/None
+        if end_date and end_date.lower() not in ["ongoing", "n/a", "tbd"]:
+            embed.add_field(name="Ends", value=end_date, inline=False)
 
         if thumbnail:
             embed.set_thumbnail(url=thumbnail)
@@ -126,10 +145,12 @@ class FreeGames(commands.Cog):
         """
         log.debug("Starting giveaway check task.")
 
+        api_key = await self.config.api_key()
+
         # 1. Fetch current giveaways from API
-        giveaways = self.fetcher.fetch_current_giveaways()
+        giveaways = self.fetcher.fetch_current_giveaways(api_key)
         if not giveaways:
-            log.warning("Giveaway check failed: No data retrieved from API.")
+            log.warning("Giveaway check failed: No data retrieved from API or API key missing.")
             return
 
         # 2. Iterate through all configured guilds
@@ -191,6 +212,17 @@ class FreeGames(commands.Cog):
         """Manages the Free Games Giveaway Notifier."""
         await ctx.send_help(ctx.command)
 
+    @_freegames.command(name="setkey")
+    @checks.is_owner()
+    async def freegames_setkey(self, ctx: commands.Context, key: str):
+        """
+        Sets the FreeStuffBot REST API Key (Owner only).
+
+        This key is required to fetch giveaway data.
+        """
+        await self.config.api_key.set(key)
+        await ctx.send("FreeStuffBot REST API key has been successfully updated.")
+
     @_freegames.command(name="setchannel")
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
@@ -223,10 +255,16 @@ class FreeGames(commands.Cog):
         Displays all currently active game giveaways (up to 5).
         """
         await ctx.defer()
-        giveaways = self.fetcher.fetch_current_giveaways()
+
+        api_key = await self.config.api_key()
+        if not api_key:
+            return await ctx.send("The FreeStuffBot API key is not set. Please use `[p]freegames setkey <key>`.")
+
+        giveaways = self.fetcher.fetch_current_giveaways(api_key)
 
         if not giveaways:
-            return await ctx.send("I couldn't retrieve any active giveaways right now. The API might be down.")
+            return await ctx.send(
+                "I couldn't retrieve any active giveaways right now. The API might be down or your API key is invalid.")
 
         await ctx.send("✨ **TOP 5 CURRENT ACTIVE GAME GIVEAWAYS** ✨")
 
