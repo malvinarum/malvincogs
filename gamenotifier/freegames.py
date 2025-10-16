@@ -25,13 +25,13 @@ class GiveawayFetcher:
     Utility class to interact with the FreeStuffBot API for time-limited giveaways.
     """
 
-    def fetch_current_giveaways(self, api_key: str) -> Optional[List[Dict]]:
+    def fetch_current_giveaways(self, api_key: str) -> tuple[Optional[List[Dict]], Optional[str]]:
         """
         Fetches a list of time-limited game giveaways using the provided API key.
+        Returns a tuple: (list of giveaways, error message string or None).
         """
         if not api_key:
-            log.warning("FreeStuffBot API key is not set. Cannot fetch giveaways.")
-            return None
+            return None, "API key is not configured."
 
         endpoint = f"{API_FSB_BASE_URL}/giveaways"
         headers = {
@@ -43,18 +43,26 @@ class GiveawayFetcher:
 
         try:
             response = requests.get(endpoint, headers=headers, timeout=10)
-            response.raise_for_status()  # Raises an exception for bad status codes (4xx or 5xx)
+
+            # Check for HTTP errors (4xx or 5xx)
+            if response.status_code >= 400:
+                error_msg = f"HTTP Error {response.status_code}: {response.reason}. Check if your API key is valid."
+                # Log a sample of the response text for deeper debugging
+                log.error(f"API fetch failed: {error_msg}. Response text sample: {response.text[:200]}")
+                return None, error_msg
 
             data = response.json()
             # FreeStuffBot API returns an object with a 'giveaways' array
-            return data.get('giveaways', [])
+            return data.get('giveaways', []), None
 
         except requests.exceptions.RequestException as e:
-            log.error(f"An error occurred while fetching giveaway data: {e}")
-            return None
+            error_msg = f"Connection Error (Check Firewall/Internet): {e.__class__.__name__}: {e}"
+            log.error(error_msg)
+            return None, error_msg
         except json.JSONDecodeError:
-            log.error("Error: Could not decode JSON response from FreeStuffBot API.")
-            return None
+            error_msg = "JSON Decoding Error: The API returned non-JSON data."
+            log.error(error_msg)
+            return None, error_msg
 
 
 # --- RedBot Cog Implementation ---
@@ -159,14 +167,11 @@ class FreeGames(commands.Cog):
         api_key = await self.config.api_key()
 
         # 1. Fetch current giveaways from API
-        giveaways = self.fetcher.fetch_current_giveaways(api_key)
+        # Updated to handle the new tuple return (giveaways, error)
+        giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
-        if not giveaways:
-            # Added a more specific warning for key status
-            if not api_key:
-                log.warning("Giveaway check skipped: FreeStuffBot API key is not configured.")
-            else:
-                log.warning("Giveaway check failed: No data retrieved from API (check key validity or API status).")
+        if error:
+            log.warning(f"Giveaway check skipped due to API error: {error}")
             return
 
         log.debug(f"Successfully fetched {len(giveaways)} active giveaways.")
@@ -305,11 +310,12 @@ class FreeGames(commands.Cog):
 
         await ctx.send("Attempting to connect to FreeStuffBot API...")
 
-        giveaways = self.fetcher.fetch_current_giveaways(api_key)
+        # Updated to handle the new tuple return (giveaways, error)
+        giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
-        if giveaways is None:
-            return await ctx.send(
-                "❌ **Error:** API request failed. Check your API key and RedBot console logs for connection errors.")
+        if error:
+            # If there's an error, display the specific reason
+            return await ctx.send(f"❌ **Error:** API request failed. **Reason:** {error}")
 
         count = len(giveaways)
 
@@ -346,11 +352,11 @@ class FreeGames(commands.Cog):
         if not api_key:
             return await ctx.send("The FreeStuffBot API key is not set. Please use `[p]freegames setkey <key>`.")
 
-        giveaways = self.fetcher.fetch_current_giveaways(api_key)
+        # Updated to handle the new tuple return (giveaways, error)
+        giveaways, error = self.fetcher.fetch_current_giveaways(api_key)
 
-        if not giveaways:
-            return await ctx.send(
-                "I couldn't retrieve any active giveaways right now. The API might be down or your API key is invalid.")
+        if error:
+            return await ctx.send(f"I couldn't retrieve any active giveaways right now. **Error:** {error}")
 
         await ctx.send("✨ **TOP 5 CURRENT ACTIVE GAME GIVEAWAYS** ✨")
 
