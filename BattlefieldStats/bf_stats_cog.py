@@ -41,6 +41,10 @@ class BattlefieldStats(commands.Cog):
 
         full_url = self.API_BASE_URL + game_info["path"]
 
+        # Clean the player name if it contains a hashtag (e.g., Malvinarum#1234)
+        if "#" in player_name:
+            player_name = player_name.split("#")[0]
+
         try:
             async with aiohttp.ClientSession() as session:
 
@@ -76,10 +80,15 @@ class BattlefieldStats(commands.Cog):
     async def _process_response(self, response, player_name, platform_api, game_info):
         """Helper to process the API response."""
         if response.status == 200:
-            data = await response.json()
+            try:
+                data = await response.json()
+            except aiohttp.ContentTypeError:
+                text = await response.text()
+                # Sometimes the API returns plain text on error even with a 200 status
+                return None, f"API returned non-JSON data for 200 status. Raw response start: {text[:100]}..."
 
             # Check for a 'message' key indicating a non-standard 200 error (e.g., API found game but not player)
-            if isinstance(data, dict) and data.get('message') == 'Player not found.':
+            if isinstance(data, dict) and data.get('message', '').lower().startswith('player not found'):
                 return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (API message)"
 
             # The BF6 endpoint returns an array for player stats, so we must extract the first item
