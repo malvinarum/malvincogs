@@ -137,6 +137,46 @@ class RSSFeed(commands.Cog):
             else:
                 await ctx.send(f"Error: Feed URL `{url}` not found in configuration.")
 
+    @rss_settings.command(name="test")
+    async def test_feed(self, ctx: commands.Context, *, url: str):
+        """Simulates a new post for a configured RSS feed to test the posting functionality."""
+        feeds = await self.config.feeds()
+
+        if url not in feeds:
+            return await ctx.send(f"Error: Feed URL `{url}` is not currently monitored. Please use `[p]rss add` first.")
+
+        data = feeds[url]
+        channel_id = data.get("channel_id")
+
+        if not channel_id:
+            return await ctx.send(f"Error: Feed URL `{url}` has no associated channel.")
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return await ctx.send(f"Error: Could not find the configured channel ID `{channel_id}`.")
+
+        # --- Simulate a new post with current timestamp ---
+        test_title = f"RSS Test Post - {ctx.author.name}"
+        test_link = f"https://test.link/rss-test-{ctx.message.created_at.timestamp()}"
+
+        embed = discord.Embed(
+            title=test_title,
+            description=(
+                "This is a simulated test post to verify that the bot is correctly configured "
+                f"to post updates for the feed `{url}` to this channel."
+            ),
+            url=test_link,
+            color=await ctx.embed_color()
+        )
+        embed.set_footer(text=f"Simulated update time: {ctx.message.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+        try:
+            await channel.send(embed=embed)
+            await ctx.send(
+                f"Test post successfully sent to {channel.mention}. Please check that channel for the test embed.")
+        except Exception as e:
+            await ctx.send(f"Failed to send test post to {channel.mention}: {e}")
+
     @rss_settings.command(name="status")
     async def get_status(self, ctx: commands.Context):
         """Shows the current list of all monitored RSS feeds and their configurations."""
