@@ -1,22 +1,10 @@
 {
     "name": "BattlefieldStats",
-    "author": [
-        "Malvinarum"
-    ],
     "description": "Retrieves and displays Battlefield player statistics from the GameTools Network API for BF1, BFV, and BF2042.",
     "end_user_data_statement": "This cog does not store any end user data.",
     "min_bot_version": "3.5.0",
-    "min_python_version": "3.9",
     "required_cogs": {},
     "requirements": [
         "aiohttp"
     ],
-    "short": "Battlefield Stats",
-    "tags": [
-        "battlefield",
-        "stats",
-        "games",
-        "api"
-    ],
-    "type": "SHARED"
 }
