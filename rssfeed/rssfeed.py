@@ -77,17 +77,12 @@ class RSSFeed(commands.Cog):
 
         return embed
 
-    async def _process_feed(self, feed_url: str, data: dict, force_post: bool = False) -> bool:
+    async def _process_feed(self, feed_url: str, data: dict, force_post: bool = False) -> str:
         """
         Fetches, processes, and posts the latest entry for a single feed.
 
-        Args:
-            feed_url: The URL of the RSS feed.
-            data: The configuration data for this feed (channel_id, last_entry_link).
-            force_post: If True, posts the latest entry even if the link matches the last_entry_link.
-
         Returns:
-            True if a post was sent, False otherwise.
+            A status string: "SUCCESS", "NO_NEW_POST", "NO_ENTRIES", "NO_LINK", or "ERROR".
         """
         channel_id = data.get("channel_id")
         last_link = data.get("last_entry_link")
@@ -95,7 +90,9 @@ class RSSFeed(commands.Cog):
         channel = self.bot.get_channel(channel_id)
         if not channel:
             print(f"RSSFeed: Configured channel ID {channel_id} for feed {feed_url} not found.")
-            return False
+            # For the checker, we don't return an error status here, as the task loop
+            # doesn't need to report channel errors back to the user context.
+            return "ERROR"
 
         try:
             # Add User-Agent header to prevent blocking by some servers (like rss.app)
@@ -106,8 +103,8 @@ class RSSFeed(commands.Cog):
 
             if not feed.entries:
                 print(f"RSSFeed: Feed {feed_url} returned no entries.")
-                # This return is what caused the issue in postlatest, but it's correct for a check
-                return False
+                # Return specific status for no entries
+                return "NO_ENTRIES"
 
             latest_entry = feed.entries[0]
 
@@ -124,9 +121,10 @@ class RSSFeed(commands.Cog):
                     ("http://", "https://")):
                 print(
                     f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post.")
-                return False
+                # Return specific status for no valid link
+                return "NO_LINK"
 
-            # --- END FIX: Robust link extraction and validation ---
+                # --- END FIX: Robust link extraction and validation ---
 
             is_new = latest_link != last_link
 
@@ -143,15 +141,15 @@ class RSSFeed(commands.Cog):
                 data["last_entry_link"] = latest_link
                 await self.config.feeds.set_raw(feed_url, value=data)
 
-                return True
+                return "SUCCESS"
             else:
                 # Log that the check occurred, but no new posts were found
                 print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
-                return False
+                return "NO_NEW_POST"
 
         except Exception as e:
             print(f"An error occurred during RSS feed check for {feed_url}: {e}")
-            return False
+            return "ERROR"
 
     @tasks.loop(minutes=5.0)
     async def rss_checker(self):
@@ -168,6 +166,7 @@ class RSSFeed(commands.Cog):
 
         for feed_url, data in all_feeds.items():
             # Process the feed, but only post if a new link is found
+            # The result is logged inside _process_feed.
             await self._process_feed(feed_url, data, force_post=False)
 
     @rss_checker.before_loop
@@ -203,32 +202,28 @@ class RSSFeed(commands.Cog):
 
         data = feeds[url]
 
-        # --- NEW PRE-CHECK: Fetch the feed data outside of _process_feed for a better error message ---
-        request_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
-        }
-        try:
-            feed = feedparser.parse(url, request_headers=request_headers)
-            if not feed.entries:
-                return await ctx.send(f"Error: Feed URL `{url}` returned no entries. Cannot post latest.")
-        except Exception as e:
-            return await ctx.send(f"Error fetching feed `{url}`: {e}")
-        # --- END NEW PRE-CHECK ---
+        # --- Simplified Logic: Rely entirely on _process_feed for fetching and errors ---
+        # The redundant pre-check is removed, which was causing the error message
 
         await ctx.send(f"Forcing post of the latest entry for `{url}`...")
 
-        try:
-            # Process the feed, forcing a post (force_post=True)
-            # The _process_feed will handle the actual sending and config update
-            posted = await self._process_feed(url, data, force_post=True)
+        # Call the refactored _process_feed with force_post=True
+        result = await self._process_feed(url, data, force_post=True)
 
-            if posted:
-                await ctx.send(f"Successfully posted the latest entry from `{url}` to the configured channel.")
-            else:
-                # If posted is False here, it means the robust link extraction inside _process_feed failed
-                await ctx.send(f"No valid link could be extracted from the latest entry in feed `{url}`. Cannot post.")
-        except Exception as e:
-            await ctx.send(f"Failed to post latest entry for `{url}`: {e}")
+        if result == "SUCCESS":
+            await ctx.send(f"Successfully posted the latest entry from `{url}` to the configured channel.")
+        elif result == "NO_ENTRIES":
+            await ctx.send(
+                f"Error: Feed URL `{url}` was reachable but contained no entries. This could be a temporary issue with the source.")
+        elif result == "NO_LINK":
+            await ctx.send(
+                f"Error: Feed URL `{url}` contained an entry, but no valid link could be extracted. Cannot post.")
+        elif result == "ERROR":
+            await ctx.send(
+                f"Failed to post latest entry for `{url}` due to a parsing or connection error. Check console for details.")
+        else:
+            # If force_post=True, NO_NEW_POST should never be returned, but handle it just in case.
+            await ctx.send(f"An unexpected state occurred while processing `{url}`.")
 
     @rss_settings.command(name="deleteall")
     async def delete_all_feeds(self, ctx: commands.Context):
