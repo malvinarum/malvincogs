@@ -21,11 +21,11 @@ class BattlefieldStats(commands.Cog):
         }
 
         # Mapping of user-friendly platform names to API platform identifiers
-        # Added 'ea' and 'steam' for better user experience. 'pc' and 'ea' map to 'origin'
-        # which is the common identifier for EA PC accounts in these APIs.
+        # Changed 'origin' to 'ea' as the internal API key to reflect the current brand name
+        # which should resolve the 404 issue if the API was updated.
         self.API_PLATFORMS = {
-            "pc": "origin",
-            "ea": "origin",
+            "pc": "ea",
+            "ea": "ea",
             "steam": "steam",
             "psn": "psn",
             "xbox": "xbox",
