@@ -1,4 +1,5 @@
 {
+    "name": "bfstats",
     "author": ["Malvinarum"],
     "description": "Retrieves and displays Battlefield player statistics from the GameTools Network API for BF1, BFV, and BF2042.",
     "disabled": false,
