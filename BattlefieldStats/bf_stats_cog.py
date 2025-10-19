@@ -2,188 +2,189 @@ import aiohttp
 import asyncio
 import discord
 from redbot.core import commands
-from redbot.core.utils.menus import menu, DEFAULT_CONTROLS
-
-# Define the base URL for the GameTools API
-API_BASE_URL = "https://api.gametools.network/bfstats/"
+from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 
 class BattlefieldStats(commands.Cog):
-    """
-    Retrieves and displays Battlefield player statistics from GameTools Network API.
-    Supports BF1, BFV, and BF2042.
-    """
+    """Retrieves and displays Battlefield player statistics."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.session = aiohttp.ClientSession()
-
-    def cog_unload(self):
-        # Clean up the aiohttp session when the cog is unloaded
-        asyncio.create_task(self.session.close())
-
-    async def get_bf_stats(self, player: str, platform: str, game: str):
-        """
-        Fetches the player stats from the GameTools API.
-
-        Args:
-            player (str): The player's name.
-            platform (str): The platform (pc, psn, xbox).
-            game (str): The Battlefield game (bfv, bf1, bf2042).
-
-        Returns:
-            dict: The JSON data from the API, or None on failure.
-        """
-        params = {
-            "player": player,
-            "platform": platform,
-            "game": game,
-            "lang": "en"  # Use English language for stats
+        # Mapping of user-friendly game names to API identifiers, methods, and paths
+        self.API_GAMES = {
+            "bfv": {"api_name": "BFV", "api_id": 20847, "method": "GET", "path": "bf/stats/"},
+            "bf1": {"api_name": "BF1", "api_id": 10011, "method": "GET", "path": "bf/stats/"},
+            "bf2042": {"api_name": "BF2042", "api_id": 33024, "method": "GET", "path": "bf/stats/"},
+            "bf4": {"api_name": "BF4", "api_id": 2048, "method": "GET", "path": "bf/stats/"},
+            # NEW: Battlefield 6 uses a dedicated POST endpoint and API name
+            "bf6": {"api_name": "BF6", "api_id": 33025, "method": "POST", "path": "bf6/stats/"},
         }
 
+        # Mapping of user-friendly platform names to API platform identifiers
+        self.API_PLATFORMS = {
+            "pc": "pc",
+            "psn": "psn",
+            "xbox": "xbox",
+        }
+        # Base URL is static, path changes based on game
+        self.API_BASE_URL = "https://api.gametools.network/"
+
+    async def fetch_stats(self, player_name: str, platform: str, game: str):
+        """Fetches stats data from the GameTools API, handling GET for old games and POST for BF6."""
+        game_info = self.API_GAMES.get(game.lower())
+        platform_api = self.API_PLATFORMS.get(platform.lower())
+
+        if not game_info:
+            return None, f"Invalid game specified. Choose from: {', '.join(self.API_GAMES.keys())}"
+        if not platform_api:
+            return None, f"Invalid platform specified. Choose from: {', '.join(self.API_PLATFORMS.keys())}"
+
+        full_url = self.API_BASE_URL + game_info["path"]
+
         try:
-            async with self.session.get(API_BASE_URL, params=params) as response:
-                if response.status != 200:
-                    # The API might return non-200 for player not found or API errors
-                    data = await response.json()
-                    # Check for specific error message structure from the API
-                    if data.get('error') == 'Player not found':
-                        return "Player Not Found"
-                    return f"API Error (Status {response.status}): {data.get('error', 'Unknown Error')}"
+            async with aiohttp.ClientSession() as session:
 
-                return await response.json()
+                if game_info["method"] == "GET":
+                    # Standard parameters for older games (BFV, BF1, BF2042, BF4)
+                    params = {
+                        "player": player_name,
+                        "platform": platform_api,
+                        "game": game_info["api_name"],
+                        "skip_battlelog": "true",
+                        "metadata": "true",
+                        "all_platforms": "false",
+                        "raw": "false",
+                    }
+                    async with session.get(full_url, params=params) as response:
+                        return await self._process_response(response, player_name, platform_api, game_info)
 
-        except aiohttp.ClientError as e:
-            return f"Network Error: Could not connect to the stats API. ({e})"
+                elif game_info["method"] == "POST":
+                    # Specific body structure required for BF6 (using the bf6/stats/ endpoint)
+                    json_payload = {
+                        "game": game_info["api_name"],
+                        "platform": platform_api,
+                        "player": player_name,
+                    }
+                    async with session.post(full_url, json=json_payload) as response:
+                        return await self._process_response(response, player_name, platform_api, game_info)
+
         except asyncio.TimeoutError:
-            return "Timeout Error: The API took too long to respond."
+            return None, "The request timed out. The GameTools API may be slow right now."
         except Exception as e:
-            return f"An unexpected error occurred: {e}"
+            return None, f"An unexpected error occurred: {type(e).__name__}: {e}"
 
-    @commands.command(name="bfstats")
-    @commands.cooldown(1, 10, commands.BucketType.user)
-    async def get_stats_command(self, ctx: commands.Context, player: str, platform: str, game: str = "bfv"):
+    async def _process_response(self, response, player_name, platform_api, game_info):
+        """Helper to process the API response."""
+        if response.status == 200:
+            data = await response.json()
+            # The BF6 endpoint returns an array for player stats, so we must extract the first item
+            if game_info["api_name"] == "BF6" and isinstance(data, list) and data:
+                return data[0], None
+            elif isinstance(data, dict):
+                return data, None
+            else:
+                # Handle unexpected structure like empty list or strange dict
+                return None, f"API returned unexpected data structure for **{game_info['api_name']}**."
+
+        elif response.status == 404:
+            return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**."
+        else:
+            text = await response.text()
+            return None, f"API error: {response.status} - {text[:100]}..."
+
+    @commands.command()
+    async def bfstats(self, ctx, player: str, platform: str, game: str = "bfv"):
         """
-        Checks a player's Battlefield stats.
+        Displays a player's Battlefield statistics.
 
-        <player>: The player's name (e.g., 'your_name').
-        <platform>: The platform ('pc', 'psn', or 'xbox').
-        <game>: The game ('bfv', 'bf1', or 'bf2042'). Defaults to 'bfv'.
+        Usage: [p]bfstats <player_name> <platform> [game]
 
-        Example: [p]bfstats JohnDoe pc bfv
+        Platform options: PC, PSN, XBOX
+        Game options: BFV (default), BF1, BF4, BF2042, BF6
         """
-
-        # Validate platform input
-        valid_platforms = ["pc", "psn", "xbox"]
-        platform = platform.lower()
-        if platform not in valid_platforms:
-            return await ctx.send(
-                f"Invalid platform specified. Please use one of: {', '.join(valid_platforms)}"
-            )
-
-        # Validate game input
-        valid_games = ["bfv", "bf1", "bf2042"]
-        game = game.lower()
-        if game not in valid_games:
-            return await ctx.send(
-                f"Invalid game specified. Please use one of: {', '.join(valid_games)}"
-            )
-
         await ctx.trigger_typing()
 
-        data = await self.get_bf_stats(player, platform, game)
+        data, error = await self.fetch_stats(player, platform, game)
 
-        # Check if data is an error string
-        if isinstance(data, str):
-            if data == "Player Not Found":
-                return await ctx.send(
-                    f"Player **{player}** on platform **{platform.upper()}** for **{game.upper()}** was not found."
-                )
-            return await ctx.send(data)
+        if error:
+            return await ctx.send(f"❌ Error: {error}")
 
-        # --- Data Formatting and Embed Generation ---
+        # --- Data Parsing and Formatting ---
+        game_id = self.API_GAMES.get(game.lower())["api_id"]
+        game_name = self.API_GAMES.get(game.lower())["api_name"]
 
-        # Utility function for safely retrieving values
-        def get_value(key, default="N/A"):
-            return data.get(key, default)
+        player_name = data.get("userName", player)
+        avatar_url = data.get("avatar")
 
-        # Set the title and color based on the game
-        game_map = {
-            "bfv": {"title": "Battlefield V Stats", "color": discord.Color.dark_green()},
-            "bf1": {"title": "Battlefield 1 Stats", "color": discord.Color.gold()},
-            "bf2042": {"title": "Battlefield 2042 Stats", "color": discord.Color.blue()},
-        }
+        # Determine the correct rank field based on game ID
+        rank = data.get("rank")
+        # BF2042 and BF6 (new games) might use a dedicated rankName field
+        if game_id in [33024, 33025]:
+            rank_name = data.get("rankName", "N/A")
+            rank_display = f"{rank} ({rank_name})"
+        elif rank is not None:
+            rank_display = str(rank)
+        else:
+            rank_display = "N/A"
 
-        info = game_map.get(game, {"title": "Battlefield Stats", "color": discord.Color.default()})
+        # --- Create Pages ---
 
-        # --- Page 1: Overview ---
+        # Page 1: Core Combat Stats (K/D, KPM, Score)
         embed1 = discord.Embed(
-            title=f"{info['title']} for {get_value('userName')}",
-            description=f"Platform: **{platform.upper()}** | Rank: **{get_value('rank')}**",
-            color=info['color']
+            title=f"📊 Battlefield Stats: {player_name} ({game_name})",
+            color=discord.Color.dark_green()
         )
+        embed1.set_thumbnail(url=avatar_url or "https://placehold.co/100x100/1e88e5/ffffff?text=BF")
+        embed1.set_footer(text=f"Platform: {platform.upper()} | Rank: {rank_display}")
 
-        # Add basic stats
-        embed1.add_field(name="K/D Ratio", value=get_value('kdr'), inline=True)
-        embed1.add_field(name="Kills", value=f"{int(get_value('kills', 0)):,}", inline=True)
-        embed1.add_field(name="Deaths", value=f"{int(get_value('deaths', 0)):,}", inline=True)
+        # Core Metrics
+        embed1.add_field(name="Kills", value=f"`{data.get('kills', 'N/A')}`", inline=True)
+        embed1.add_field(name="Deaths", value=f"`{data.get('deaths', 'N/A')}`", inline=True)
+        embed1.add_field(name="K/D Ratio", value=f"`{data.get('kdRatio', 'N/A')}`", inline=True)
 
-        embed1.add_field(name="Win/Loss %", value=get_value('wlr'), inline=True)
-        embed1.add_field(name="Headshots", value=f"{int(get_value('headshots', 0)):,}", inline=True)
-        embed1.add_field(name="Skill Rating", value=get_value('skill', 'N/A'), inline=True)
+        embed1.add_field(name="Kills Per Minute", value=f"`{data.get('kpm', 'N/A')}`", inline=True)
+        embed1.add_field(name="Time Played", value=f"`{data.get('timePlayed', 'N/A')}`", inline=True)
+        embed1.add_field(name="Total Score", value=f"`{data.get('score', 'N/A')}`", inline=True)
 
-        embed1.add_field(name="Time Played", value=get_value('timePlayed', 'N/A'), inline=False)
+        # Win/Loss
+        wins = data.get('wins', 0)
+        losses = data.get('losses', 0)
+        win_loss_ratio = data.get('wlRatio', 'N/A')
 
-        if get_value('avatar'):
-            embed1.set_thumbnail(url=get_value('avatar'))
-        embed1.set_footer(text=f"Data provided by api.gametools.network | Page 1/2: Overview")
+        embed1.add_field(name="Wins / Losses", value=f"`{wins} / {losses}`", inline=True)
+        embed1.add_field(name="W/L Ratio", value=f"`{win_loss_ratio}`", inline=True)
+        embed1.add_field(name="\u200b", value="\u200b", inline=True)  # Spacer
 
-        # --- Page 2: Score and Best Class ---
+        # Page 2: Game-Specific Details (Best Class, SPM, Headshots)
         embed2 = discord.Embed(
-            title=f"{info['title']} - Scores & Class",
-            description=f"Summary stats for {get_value('userName')}.",
-            color=info['color']
+            title=f"🎯 Player Achievements: {player_name} ({game_name})",
+            color=discord.Color.dark_green()
         )
+        embed2.set_thumbnail(url=avatar_url or "https://placehold.co/100x100/1e88e5/ffffff?text=BF")
+        embed2.set_footer(text=f"Platform: {platform.upper()} | Rank: {rank_display}")
 
-        # Score Breakdown
-        embed2.add_field(name="Total Score", value=f"{int(get_value('score', 0)):,}", inline=True)
-        embed2.add_field(name="Score/Min (SPM)", value=get_value('spm'), inline=True)
-        embed2.add_field(name="Kills/Min (KPM)", value=get_value('kpm'), inline=True)
+        best_class = data.get("bestClass", "N/A")
+        embed2.add_field(name="Best Class", value=f"**{best_class}**", inline=True)
+        embed2.add_field(name="Score Per Minute (SPM)", value=f"`{data.get('spm', 'N/A')}`", inline=True)
+        embed2.add_field(name="Headshots", value=f"`{data.get('headshots', 'N/A')}`", inline=True)
 
-        # Best Class
-        best_class = get_value('bestClass', 'N/A')
-        class_score = get_value('bestClassScore', 'N/A')
-        embed2.add_field(name="Best Class", value=best_class, inline=True)
-        if best_class != 'N/A' and class_score != 'N/A':
-            embed2.add_field(name="Class Score", value=f"{int(class_score):,}", inline=True)
+        # BF2042 and BF6 specific details
+        if game_id in [33024, 33025]:
+            # New games often use different keys for vehicle/gadget kills
+            embed2.add_field(name="Best Weapon", value=f"`{data.get('bestWeapon', 'N/A')}`", inline=True)
+            embed2.add_field(name="Revives", value=f"`{data.get('revives', 'N/A')}`", inline=True)
+            embed2.add_field(name="Gadget Kills", value=f"`{data.get('gadgetKills', 'N/A')}`", inline=True)
 
-        # Separator field
-        embed2.add_field(name="\u200b", value="\u200b", inline=False)
+        # General details for older games
+        else:
+            embed2.add_field(name="Heals", value=f"`{data.get('heals', 'N/A')}`", inline=True)
+            embed2.add_field(name="Resupplies", value=f"`{data.get('resupplies', 'N/A')}`", inline=True)
+            embed2.add_field(name="Vehicles Destroyed", value=f"`{data.get('vehiclesDestroyed', 'N/A')}`", inline=True)
 
-        # Best Weapon (optional, API response might vary)
-        try:
-            best_weapon = data['bestWeapon']['weaponName']
-            weapon_kills = int(data['bestWeapon']['kills'])
-            embed2.add_field(name="Best Weapon", value=best_weapon, inline=True)
-            embed2.add_field(name="Weapon Kills", value=f"{weapon_kills:,}", inline=True)
-        except (KeyError, TypeError):
-            embed2.add_field(name="Best Weapon", value="N/A", inline=True)
-            embed2.add_field(name="Weapon Kills", value="N/A", inline=True)
-
-        if get_value('avatar'):
-            embed2.set_thumbnail(url=get_value('avatar'))
-        embed2.set_footer(text=f"Data provided by api.gametools.network | Page 2/2: Score & Class")
-
-        # Use the Redbot menu utility for pagination
+        # --- Display Menu ---
         pages = [embed1, embed2]
-        await menu(ctx, pages, DEFAULT_CONTROLS)
-
-    # Alias for common mistake
-    @commands.command(name="bf2042stats", hidden=True)
-    async def bf2042_alias(self, ctx: commands.Context, player: str, platform: str):
-        """Alias for [p]bfstats <player> <platform> bf2042"""
-        await ctx.invoke(self.get_stats_command, player, platform, "bf2042")
+        await menu(ctx, pages, DEFAULT_CONTROLS, timeout=60)
 
 
-def setup(bot):
-    bot.add_cog(BattlefieldStats(bot))
+async def setup(bot):
+    await bot.add_cog(BattlefieldStats(bot))
