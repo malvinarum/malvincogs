@@ -102,9 +102,9 @@ class BattlefieldStats(commands.Cog):
         Platform options: PC, PSN, XBOX
         Game options: BFV (default), BF1, BF4, BF2042, BF6
         """
-        await ctx.channel.trigger_typing()  # CORRECTED LINE: Used ctx.channel.trigger_typing()
+        async with ctx.typing():  # CORRECTED LINE: Used ctx.typing() as a context manager
 
-        data, error = await self.fetch_stats(player, platform, game)
+            data, error = await self.fetch_stats(player, platform, game)
 
         if error:
             return await ctx.send(f"❌ Error: {error}")
