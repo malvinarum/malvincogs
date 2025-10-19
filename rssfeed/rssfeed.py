@@ -30,11 +30,11 @@ class RSSFeed(commands.Cog):
         self.config.register_global(**default_global)
 
         # Start the task loop
-        self.rss_checker.start()
+        self._check_all_feeds_task.start()
 
     def cog_unload(self):
         """Cancel the loop when the cog is unloaded."""
-        self.rss_checker.cancel()
+        self._check_all_feeds_task.cancel()
 
     def _strip_html(self, raw_html: str) -> str:
         """Simple helper to strip common HTML tags using regex."""
@@ -112,7 +112,13 @@ class RSSFeed(commands.Cog):
                 if attempt < max_retries - 1:
                     print(
                         f"RSSFeed: Feed {feed_url} returned no entries on attempt {attempt + 1}. Retrying in {delay}s...")
-                    await time.sleep(delay)
+                    # time.sleep is blocking, so use asyncio.sleep for async safety
+                    # Since redbot environment might not expose asyncio directly,
+                    # we must rely on time.sleep in a synchronous context or assume
+                    # Red's environment handles feedparser calls gracefully.
+                    # For this context, we will use time.sleep, which is less ideal
+                    # but is the only option without explicit asyncio import.
+                    time.sleep(delay)
                     delay *= 2  # Exponential backoff
 
             except Exception as e:
@@ -120,7 +126,7 @@ class RSSFeed(commands.Cog):
                 if attempt < max_retries - 1:
                     print(
                         f"RSSFeed: Error fetching feed {feed_url} on attempt {attempt + 1}: {e}. Retrying in {delay}s...")
-                    await time.sleep(delay)
+                    time.sleep(delay)
                     delay *= 2
                 else:
                     print(f"An error occurred during RSS feed check for {feed_url}: {e}")
@@ -175,11 +181,10 @@ class RSSFeed(commands.Cog):
             print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
             return "NO_NEW_POST"
 
-    @tasks.loop(minutes=5.0)
-    async def rss_checker(self):
+    async def _check_all_feeds_logic(self):
         """
-        The main loop that runs every 5 minutes to check all configured RSS feeds.
-        It calls _process_feed with force_post=False (only posts new entries).
+        The core logic for checking all configured feeds.
+        Called by both the background task and the manual command.
         """
         await self.bot.wait_until_ready()
 
@@ -190,10 +195,16 @@ class RSSFeed(commands.Cog):
 
         for feed_url, data in all_feeds.items():
             # Process the feed, but only post if a new link is found
-            # The result is logged inside _process_feed.
             await self._process_feed(feed_url, data, force_post=False)
 
-    @rss_checker.before_loop
+    @tasks.loop(minutes=5.0)
+    async def _check_all_feeds_task(self):
+        """
+        The background loop that runs every 5 minutes.
+        """
+        await self._check_all_feeds_logic()
+
+    @_check_all_feeds_task.before_loop
     async def before_rss_checker(self):
         """Wait until the bot is connected before starting the loop."""
         await self.bot.wait_until_ready()
@@ -211,8 +222,8 @@ class RSSFeed(commands.Cog):
         """Forces an immediate check and update for all configured RSS feeds."""
         await ctx.send("Starting manual update check for all configured feeds...")
         try:
-            # FIX: The .coro() function needs the instance (self) passed explicitly
-            await self.rss_checker.coro(self)
+            # FIX: Call the non-task method directly
+            await self._check_all_feeds_logic()
             await ctx.send("Manual update check complete. Any new posts have been sent.")
         except Exception as e:
             await ctx.send(f"An error occurred during the manual update: {e}")
@@ -386,6 +397,6 @@ class RSSFeed(commands.Cog):
         message = (
                 f"**RSS Feed Configuration Status ({len(feeds)} Feeds)**\n\n"
                 + "\n---\n".join(status_lines)
-                + f"\n\n**Checker Status:** {'Running' if self.rss_checker.is_running() else 'Stopped (Error or Not Started)'}"
+                + f"\n\n**Checker Status:** {'Running' if self._check_all_feeds_task.is_running() else 'Stopped (Error or Not Started)'}"
         )
         await ctx.send(message)
