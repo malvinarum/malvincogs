@@ -29,8 +29,8 @@ class BattlefieldStats(commands.Cog):
         # Base URL is static, path changes based on game
         self.API_BASE_URL = "https://api.gametools.network/"
 
-    async def fetch_stats(self, player_name: str, platform: str, game: str):
-        """Fetches stats data from the GameTools API, handling GET for old games and POST for BF6."""
+    async def fetch_stats(self, player_input: str, platform: str, game: str):
+        """Fetches stats data from the GameTools API, handling GET for old games and POST for BF6, supporting player ID lookup."""
         game_info = self.API_GAMES.get(game.lower())
         platform_api = self.API_PLATFORMS.get(platform.lower())
 
@@ -41,9 +41,13 @@ class BattlefieldStats(commands.Cog):
 
         full_url = self.API_BASE_URL + game_info["path"]
 
-        # Clean the player name if it contains a hashtag (e.g., Malvinarum#1234)
-        if "#" in player_name:
-            player_name = player_name.split("#")[0]
+        # --- Player Name/ID Handling ---
+        # Determine if we are looking up by numeric ID (e.g., 3140987150)
+        is_id_lookup = player_input.isdigit()
+
+        # Set the correct parameter key and value
+        param_key = "playerid" if is_id_lookup else "player"
+        param_value = player_input  # Pass the input exactly as the user provided it
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -51,33 +55,35 @@ class BattlefieldStats(commands.Cog):
                 if game_info["method"] == "GET":
                     # Standard parameters for older games (BFV, BF1, BF2042, BF4)
                     params = {
-                        "player": player_name,
                         "platform": platform_api,
                         "game": game_info["api_name"],
                         "skip_battlelog": "true",
                         "metadata": "true",
                         "all_platforms": "false",
                         "raw": "false",
+                        param_key: param_value,  # Dynamically insert player or playerid
                     }
+
                     async with session.get(full_url, params=params) as response:
-                        return await self._process_response(response, player_name, platform_api, game_info)
+                        return await self._process_response(response, player_input, platform_api, game_info)
 
                 elif game_info["method"] == "POST":
                     # Specific body structure required for BF6 (using the bf6/stats/ endpoint)
                     json_payload = {
                         "game": game_info["api_name"],
                         "platform": platform_api,
-                        "player": player_name,
+                        param_key: param_value,  # Dynamically insert player or playerid
                     }
+
                     async with session.post(full_url, json=json_payload) as response:
-                        return await self._process_response(response, player_name, platform_api, game_info)
+                        return await self._process_response(response, player_input, platform_api, game_info)
 
         except asyncio.TimeoutError:
             return None, "The request timed out. The GameTools API may be slow right now."
         except Exception as e:
             return None, f"An unexpected error occurred: {type(e).__name__}: {e}"
 
-    async def _process_response(self, response, player_name, platform_api, game_info):
+    async def _process_response(self, response, player_input, platform_api, game_info):
         """Helper to process the API response."""
         if response.status == 200:
             try:
@@ -89,7 +95,7 @@ class BattlefieldStats(commands.Cog):
 
             # Check for a 'message' key indicating a non-standard 200 error (e.g., API found game but not player)
             if isinstance(data, dict) and data.get('message', '').lower().startswith('player not found'):
-                return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (API message)"
+                return None, f"Player **{player_input}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (API message)"
 
             # The BF6 endpoint returns an array for player stats, so we must extract the first item
             if game_info["api_name"] == "BF6" and isinstance(data, list) and data:
@@ -102,7 +108,7 @@ class BattlefieldStats(commands.Cog):
 
         elif response.status == 404:
             # Standard 404 for player not found
-            return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (404 error)"
+            return None, f"Player **{player_input}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (404 error)"
         else:
             text = await response.text()
             return None, f"API error: {response.status} - {text[:100]}..."
@@ -112,7 +118,7 @@ class BattlefieldStats(commands.Cog):
         """
         Displays a player's Battlefield statistics.
 
-        Usage: [p]bfstats <player_name> <platform> [game]
+        Usage: [p]bfstats <player_name/player_id> <platform> [game]
 
         Platform options: PC, PSN, XBOX
         Game options: BFV (default), BF1, BF4, BF2042, BF6
