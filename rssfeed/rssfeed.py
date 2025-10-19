@@ -106,11 +106,12 @@ class RSSFeed(commands.Cog):
 
             if not feed.entries:
                 print(f"RSSFeed: Feed {feed_url} returned no entries.")
+                # This return is what caused the issue in postlatest, but it's correct for a check
                 return False
 
             latest_entry = feed.entries[0]
 
-            # --- START FIX: Robust link extraction ---
+            # --- START FIX: Robust link extraction and validation ---
             latest_link = latest_entry.get("link")
 
             # Fallback 1: Try 'guid' if 'link' is missing or empty
@@ -118,12 +119,14 @@ class RSSFeed(commands.Cog):
                 latest_link = latest_entry.get("guid")
 
             # Fallback 2: Check if link is still invalid
-            if not latest_link or not latest_link.startswith(("http://", "https://")):
+            # Ensure latest_link is a non-empty string and starts with a protocol
+            if not latest_link or not isinstance(latest_link, str) or not latest_link.startswith(
+                    ("http://", "https://")):
                 print(
                     f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post.")
                 return False
 
-            # --- END FIX: Robust link extraction ---
+            # --- END FIX: Robust link extraction and validation ---
 
             is_new = latest_link != last_link
 
@@ -198,19 +201,32 @@ class RSSFeed(commands.Cog):
         if url not in feeds:
             return await ctx.send(f"Error: Feed URL `{url}` is not currently monitored. Please use `[p]rss add` first.")
 
-        # Get a fresh copy of the data from the config
         data = feeds[url]
+
+        # --- NEW PRE-CHECK: Fetch the feed data outside of _process_feed for a better error message ---
+        request_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+        }
+        try:
+            feed = feedparser.parse(url, request_headers=request_headers)
+            if not feed.entries:
+                return await ctx.send(f"Error: Feed URL `{url}` returned no entries. Cannot post latest.")
+        except Exception as e:
+            return await ctx.send(f"Error fetching feed `{url}`: {e}")
+        # --- END NEW PRE-CHECK ---
 
         await ctx.send(f"Forcing post of the latest entry for `{url}`...")
 
         try:
             # Process the feed, forcing a post (force_post=True)
+            # The _process_feed will handle the actual sending and config update
             posted = await self._process_feed(url, data, force_post=True)
 
             if posted:
                 await ctx.send(f"Successfully posted the latest entry from `{url}` to the configured channel.")
             else:
-                await ctx.send(f"No valid entry was found to post for `{url}`.")
+                # If posted is False here, it means the robust link extraction inside _process_feed failed
+                await ctx.send(f"No valid link could be extracted from the latest entry in feed `{url}`. Cannot post.")
         except Exception as e:
             await ctx.send(f"Failed to post latest entry for `{url}`: {e}")
 
