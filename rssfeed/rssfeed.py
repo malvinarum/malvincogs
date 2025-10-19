@@ -90,66 +90,90 @@ class RSSFeed(commands.Cog):
         channel = self.bot.get_channel(channel_id)
         if not channel:
             print(f"RSSFeed: Configured channel ID {channel_id} for feed {feed_url} not found.")
-            # For the checker, we don't return an error status here, as the task loop
-            # doesn't need to report channel errors back to the user context.
             return "ERROR"
 
-        try:
-            # Add User-Agent header to prevent blocking by some servers (like rss.app)
-            request_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
-            }
-            feed = feedparser.parse(feed_url, request_headers=request_headers)
+            # --- START FIX: Add Retry Logic for unreliable feeds ---
+        max_retries = 3
+        delay = 2  # Initial delay in seconds
 
-            if not feed.entries:
-                print(f"RSSFeed: Feed {feed_url} returned no entries.")
-                # Return specific status for no entries
-                return "NO_ENTRIES"
+        feed = None
+        for attempt in range(max_retries):
+            try:
+                request_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+                }
+                # Use feedparser to fetch and parse the feed
+                feed = feedparser.parse(feed_url, request_headers=request_headers)
 
-            latest_entry = feed.entries[0]
+                if feed.entries:
+                    break  # Success: entries found, exit retry loop
 
-            # --- START FIX: Robust link extraction and validation ---
-            latest_link = latest_entry.get("link")
+                # If no entries found, and it's not the last attempt, log and wait
+                if attempt < max_retries - 1:
+                    print(
+                        f"RSSFeed: Feed {feed_url} returned no entries on attempt {attempt + 1}. Retrying in {delay}s...")
+                    await time.sleep(delay)
+                    delay *= 2  # Exponential backoff
 
-            # Fallback 1: Try 'guid' if 'link' is missing or empty
-            if not latest_link:
-                latest_link = latest_entry.get("guid")
+            except Exception as e:
+                # If fetching fails entirely (e.g., DNS error, connection issue), retry
+                if attempt < max_retries - 1:
+                    print(
+                        f"RSSFeed: Error fetching feed {feed_url} on attempt {attempt + 1}: {e}. Retrying in {delay}s...")
+                    await time.sleep(delay)
+                    delay *= 2
+                else:
+                    print(f"An error occurred during RSS feed check for {feed_url}: {e}")
+                    return "ERROR"  # Final failure
 
-            # Fallback 2: Check if link is still invalid
-            # Ensure latest_link is a non-empty string and starts with a protocol
-            if not latest_link or not isinstance(latest_link, str) or not latest_link.startswith(
-                    ("http://", "https://")):
-                print(
-                    f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post.")
-                # Return specific status for no valid link
-                return "NO_LINK"
+        if not feed or not feed.entries:
+            # If loop finished without finding entries after all retries
+            return "NO_ENTRIES"
+            # --- END FIX: Add Retry Logic for unreliable feeds ---
 
-                # --- END FIX: Robust link extraction and validation ---
+        latest_entry = feed.entries[0]
 
-            is_new = latest_link != last_link
+        # --- START: Robust link extraction and validation ---
+        latest_link = latest_entry.get("link")
 
-            # Post if it's new OR if we were explicitly told to force a post
-            if is_new or force_post:
-                # 1. Create the embed
-                embed = self._create_rss_embed(latest_entry, feed_url)
+        # Fallback 1: Try 'guid' if 'link' is missing or empty
+        if not latest_link:
+            latest_link = latest_entry.get("guid")
 
-                # 2. Send the embed
+        # Fallback 2: Check if link is still invalid
+        # Ensure latest_link is a non-empty string and starts with a protocol
+        if not latest_link or not isinstance(latest_link, str) or not latest_link.startswith(("http://", "https://")):
+            print(
+                f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post.")
+            # Return specific status for no valid link
+            return "NO_LINK"
+
+            # --- END: Robust link extraction and validation ---
+
+        is_new = latest_link != last_link
+
+        # Post if it's new OR if we were explicitly told to force a post
+        if is_new or force_post:
+            # 1. Create the embed
+            embed = self._create_rss_embed(latest_entry, feed_url)
+
+            # 2. Send the embed
+            try:
                 await channel.send(embed=embed)
+            except Exception as e:
+                print(f"Failed to send message to channel {channel_id}: {e}")
+                return "ERROR"
 
-                # 3. Update the last_entry_link in the configuration for this specific feed
-                # We update the last link if a post happened (either new or forced)
-                data["last_entry_link"] = latest_link
-                await self.config.feeds.set_raw(feed_url, value=data)
+            # 3. Update the last_entry_link in the configuration for this specific feed
+            # We update the last link if a post happened (either new or forced)
+            data["last_entry_link"] = latest_link
+            await self.config.feeds.set_raw(feed_url, value=data)
 
-                return "SUCCESS"
-            else:
-                # Log that the check occurred, but no new posts were found
-                print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
-                return "NO_NEW_POST"
-
-        except Exception as e:
-            print(f"An error occurred during RSS feed check for {feed_url}: {e}")
-            return "ERROR"
+            return "SUCCESS"
+        else:
+            # Log that the check occurred, but no new posts were found
+            print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
+            return "NO_NEW_POST"
 
     @tasks.loop(minutes=5.0)
     async def rss_checker(self):
@@ -202,9 +226,6 @@ class RSSFeed(commands.Cog):
 
         data = feeds[url]
 
-        # --- Simplified Logic: Rely entirely on _process_feed for fetching and errors ---
-        # The redundant pre-check is removed, which was causing the error message
-
         await ctx.send(f"Forcing post of the latest entry for `{url}`...")
 
         # Call the refactored _process_feed with force_post=True
@@ -214,7 +235,7 @@ class RSSFeed(commands.Cog):
             await ctx.send(f"Successfully posted the latest entry from `{url}` to the configured channel.")
         elif result == "NO_ENTRIES":
             await ctx.send(
-                f"Error: Feed URL `{url}` was reachable but contained no entries. This could be a temporary issue with the source.")
+                f"Error: Feed URL `{url}` was reachable but contained no entries after multiple retries. The source may be temporarily empty or inaccessible.")
         elif result == "NO_LINK":
             await ctx.send(
                 f"Error: Feed URL `{url}` contained an entry, but no valid link could be extracted. Cannot post.")
