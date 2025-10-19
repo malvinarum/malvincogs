@@ -1,10 +1,9 @@
 import discord
 from redbot.core import Config, commands
 from discord.ext import tasks  # FIX: We use discord.ext.tasks for the loop utility
+import feedparser  # This is required for the functionality below!
+import time  # Used for timestamp in checker loop
 
-
-# Note: You will need to install feedparser if you want to uncomment the logic below:
-# import feedparser
 
 class RSSFeed(commands.Cog):
     """
@@ -13,6 +12,9 @@ class RSSFeed(commands.Cog):
 
     # Unique identifier for configuration storage
     IDENTIFIER = 1234567890
+
+    # Static footer part required for all embeds
+    FOOTER_TEXT_AUTHOR = " | RSS Feed by Malvinarum"
 
     def __init__(self, bot):
         self.bot = bot
@@ -33,12 +35,41 @@ class RSSFeed(commands.Cog):
         """Cancel the loop when the cog is unloaded."""
         self.rss_checker.cancel()
 
+    def _create_rss_embed(self, entry, feed_url: str) -> discord.Embed:
+        """Helper to create a consistent embed style for new RSS entries."""
+
+        # Ensure title and link are present
+        title = entry.get("title", f"New Post from {feed_url}")
+        link = entry.get("link", feed_url)
+        summary = entry.get("summary", "Click the link for details.")
+
+        embed = discord.Embed(
+            title=title,
+            description=summary,
+            url=link,
+            color=discord.Color.blue()  # A consistent color for RSS updates
+        )
+
+        # Set the publication date if available, otherwise use current time
+        pub_time = entry.get("published_parsed")
+        if pub_time:
+            # Format the time from struct_time object
+            time_str = time.strftime('%Y-%m-%d %H:%M:%S UTC', pub_time)
+        else:
+            # Use current time if publish time is not available
+            time_str = discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+
+        # Apply the required footer text
+        footer_text = f"Published: {time_str}{self.FOOTER_TEXT_AUTHOR}"
+        embed.set_footer(text=footer_text)
+
+        return embed
+
     @tasks.loop(minutes=5.0)
     async def rss_checker(self):
         """
         The main loop that runs every 5 minutes to check all configured RSS feeds.
         """
-        # Wait until the bot is fully ready before doing anything
         await self.bot.wait_until_ready()
 
         all_feeds = await self.config.feeds()
@@ -46,7 +77,6 @@ class RSSFeed(commands.Cog):
         if not all_feeds:
             return
 
-        # Iterate over all configured feeds
         for feed_url, data in all_feeds.items():
             channel_id = data.get("channel_id")
             last_link = data.get("last_entry_link")
@@ -61,30 +91,29 @@ class RSSFeed(commands.Cog):
                 continue
 
             try:
-                # IMPORTANT: For this to work, you must install 'feedparser'
-                # (e.g., pip install feedparser)
+                feed = feedparser.parse(feed_url)
+                if not feed.entries:
+                    continue
 
-                # --- Uncomment and implement actual functionality ---
-                # feed = feedparser.parse(feed_url)
-                # if not feed.entries:
-                #     continue
+                latest_entry = feed.entries[0]
+                latest_link = latest_entry.link
 
-                # latest_entry = feed.entries[0]
-                # latest_link = latest_entry.link
+                if latest_link != last_link:
+                    # New entry found
 
-                # if latest_link != last_link:
-                #     # New entry found
-                #     message = f"**New Post:** {latest_entry.title}\n{latest_link}"
-                #     await channel.send(message)
+                    # 1. Create the embed using the helper function
+                    embed = self._create_rss_embed(latest_entry, feed_url)
 
-                #     # Update the last_entry_link in the configuration for this specific feed
-                #     data["last_entry_link"] = latest_link
-                #     await self.config.feeds.set_raw(feed_url, value=data)
-                # -----------------------------------------------------------
+                    # 2. Send the embed
+                    await channel.send(embed=embed)
 
-                # Placeholder for testing the loop logic until feedparser is integrated
-                print(
-                    f"RSSFeed Checker: Successfully checked configured feed {feed_url} posted to channel {channel.name}.")
+                    # 3. Update the last_entry_link in the configuration for this specific feed
+                    data["last_entry_link"] = latest_link
+                    await self.config.feeds.set_raw(feed_url, value=data)
+
+                else:
+                    # Log that the check occurred, but no new posts were found
+                    print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
 
             except Exception as e:
                 print(f"An error occurred during RSS feed check for {feed_url}: {e}")
@@ -168,7 +197,9 @@ class RSSFeed(commands.Cog):
             url=test_link,
             color=await ctx.embed_color()
         )
-        embed.set_footer(text=f"Simulated update time: {ctx.message.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        # Apply the required footer text for the test command
+        footer_text = f"Simulated update time: {ctx.message.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC{self.FOOTER_TEXT_AUTHOR}"
+        embed.set_footer(text=footer_text)
 
         try:
             await channel.send(embed=embed)
