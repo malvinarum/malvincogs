@@ -1,0 +1,21 @@
+{
+    "name": "RSSFeed",
+    "author": [
+        "Malvinarum"
+    ],
+    "short": "Posts updates from RSS/Atom feeds to Discord channels.",
+    "description": "A cog that automatically checks configured RSS and Atom feeds on a schedule and publishes new entries to designated Discord channels, using embeds for clean formatting.",
+    "tags": [
+        "rss",
+        "feed",
+        "news",
+        "automation"
+    ],
+    "min_bot_version": "3.5.0",
+    "required_system_packages": [],
+    "requirements": [
+        "feedparser",
+        "python-dateutil"
+    ],
+    "end_user_data_statement": "This cog stores a list of RSS/Atom feed URLs, the Discord channel IDs they should be posted to, and the timestamp of the last published item for each feed to prevent duplicate posts. This data is stored globally and is necessary for the cog's functionality."
+}
