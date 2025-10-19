@@ -21,8 +21,9 @@ class BattlefieldStats(commands.Cog):
         }
 
         # Mapping of user-friendly platform names to API platform identifiers
+        # NOTE: Changing 'pc' to 'origin' as many EA APIs require the platform to be 'origin' for PC players.
         self.API_PLATFORMS = {
-            "pc": "pc",
+            "pc": "origin",
             "psn": "psn",
             "xbox": "xbox",
         }
