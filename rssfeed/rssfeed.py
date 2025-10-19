@@ -47,6 +47,7 @@ class RSSFeed(commands.Cog):
         """Helper to create a consistent embed style for new RSS entries."""
 
         # Ensure title and link are present
+        # Use link or feed_url as a fallback for the URL property in the embed
         title = entry.get("title", f"New Post from {feed_url}")
         link = entry.get("link", feed_url)
 
@@ -97,20 +98,32 @@ class RSSFeed(commands.Cog):
             return False
 
         try:
-            # --- FIX: Add User-Agent header to prevent blocking by some servers (like rss.app) ---
+            # Add User-Agent header to prevent blocking by some servers (like rss.app)
             request_headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
             }
             feed = feedparser.parse(feed_url, request_headers=request_headers)
-            # --- END FIX ---
 
             if not feed.entries:
                 print(f"RSSFeed: Feed {feed_url} returned no entries.")
-                # This could also be a server error, so we continue to the next feed
                 return False
 
             latest_entry = feed.entries[0]
-            latest_link = latest_entry.link
+
+            # --- START FIX: Robust link extraction ---
+            latest_link = latest_entry.get("link")
+
+            # Fallback 1: Try 'guid' if 'link' is missing or empty
+            if not latest_link:
+                latest_link = latest_entry.get("guid")
+
+            # Fallback 2: Check if link is still invalid
+            if not latest_link or not latest_link.startswith(("http://", "https://")):
+                print(
+                    f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post.")
+                return False
+
+            # --- END FIX: Robust link extraction ---
 
             is_new = latest_link != last_link
 
