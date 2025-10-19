@@ -3,6 +3,7 @@ from redbot.core import Config, commands
 from discord.ext import tasks  # FIX: We use discord.ext.tasks for the loop utility
 import feedparser  # This is required for the functionality below!
 import time  # Used for timestamp in checker loop
+import re  # Added for stripping HTML tags
 
 
 class RSSFeed(commands.Cog):
@@ -35,13 +36,23 @@ class RSSFeed(commands.Cog):
         """Cancel the loop when the cog is unloaded."""
         self.rss_checker.cancel()
 
+    def _strip_html(self, raw_html: str) -> str:
+        """Simple helper to strip common HTML tags using regex."""
+        # Regex to match and remove any HTML tag
+        cleanr = re.compile('<.*?>')
+        cleantext = re.sub(cleanr, '', raw_html)
+        return cleantext.strip()
+
     def _create_rss_embed(self, entry, feed_url: str) -> discord.Embed:
         """Helper to create a consistent embed style for new RSS entries."""
 
         # Ensure title and link are present
         title = entry.get("title", f"New Post from {feed_url}")
         link = entry.get("link", feed_url)
-        summary = entry.get("summary", "Click the link for details.")
+
+        # Get summary and strip HTML tags before using it in the embed description
+        raw_summary = entry.get("summary", "Click the link for details.")
+        summary = self._strip_html(raw_summary)
 
         embed = discord.Embed(
             title=title,
@@ -188,18 +199,21 @@ class RSSFeed(commands.Cog):
         test_title = f"RSS Test Post - {ctx.author.name}"
         test_link = f"https://test.link/rss-test-{ctx.message.created_at.timestamp()}"
 
-        embed = discord.Embed(
-            title=test_title,
-            description=(
-                "This is a simulated test post to verify that the bot is correctly configured "
-                f"to post updates for the feed `{url}` to this channel."
+        # Create a simulated entry dictionary for the helper function
+        simulated_entry = {
+            "title": test_title,
+            "link": test_link,
+            "summary": (
+                "This is a simulated test post to verify that the bot is correctly configured. "
+                "This text simulates the summary field retrieved from the RSS feed."
             ),
-            url=test_link,
-            color=await ctx.embed_color()
-        )
-        # Apply the required footer text for the test command
-        footer_text = f"Simulated update time: {ctx.message.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC{self.FOOTER_TEXT_AUTHOR}"
-        embed.set_footer(text=footer_text)
+            "published_parsed": ctx.message.created_at.timetuple()
+        }
+
+        # Use the unified embed creation helper
+        embed = self._create_rss_embed(simulated_entry, url)
+        # Manually override the color for the test command if needed, though using the helper's color is fine
+        embed.color = await ctx.embed_color()
 
         try:
             await channel.send(embed=embed)
