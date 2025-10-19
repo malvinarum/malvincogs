@@ -214,6 +214,34 @@ class RSSFeed(commands.Cog):
         except Exception as e:
             await ctx.send(f"Failed to post latest entry for `{url}`: {e}")
 
+    @rss_settings.command(name="deleteall")
+    async def delete_all_feeds(self, ctx: commands.Context):
+        """Deletes ALL configured RSS feeds after confirmation."""
+        await ctx.send(
+            "⚠️ **WARNING** ⚠️\n"
+            "This command will delete **ALL** configured RSS feeds globally.\n"
+            "To confirm, type `yes` within 30 seconds."
+        )
+
+        def check(m):
+            # Check if the message is from the same author, in the same channel, and contains 'yes'
+            return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == 'yes'
+
+        try:
+            # Wait for the user to confirm for 30 seconds
+            confirmation = await self.bot.wait_for('message', check=check, timeout=30.0)
+
+            # Confirmation received
+            if confirmation:
+                # Clear all feeds by setting the 'feeds' dictionary to an empty dictionary
+                await self.config.feeds.set({})
+                await ctx.send("✅ **Success!** All monitored RSS feeds have been deleted.")
+
+        except TimeoutError:
+            await ctx.send("❌ Confirmation timed out. No feeds were deleted.")
+        except Exception as e:
+            await ctx.send(f"An error occurred during deletion: {e}")
+
     # --- END NEW COMMANDS ---
 
     @rss_settings.command(name="add")
