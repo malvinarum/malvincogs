@@ -166,7 +166,8 @@ class RSSFeed(commands.Cog):
         await ctx.send("Starting manual update check for all configured feeds...")
         try:
             # Immediately run the loop's core function
-            await self.rss_checker.coro()
+            # FIX: Call the task object directly to properly pass 'self'
+            await self.rss_checker()
             await ctx.send("Manual update check complete. Any new posts have been sent.")
         except Exception as e:
             await ctx.send(f"An error occurred during the manual update: {e}")
