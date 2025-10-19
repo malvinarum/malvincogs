@@ -77,6 +77,11 @@ class BattlefieldStats(commands.Cog):
         """Helper to process the API response."""
         if response.status == 200:
             data = await response.json()
+
+            # Check for a 'message' key indicating a non-standard 200 error (e.g., API found game but not player)
+            if isinstance(data, dict) and data.get('message') == 'Player not found.':
+                return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (API message)"
+
             # The BF6 endpoint returns an array for player stats, so we must extract the first item
             if game_info["api_name"] == "BF6" and isinstance(data, list) and data:
                 return data[0], None
@@ -87,7 +92,8 @@ class BattlefieldStats(commands.Cog):
                 return None, f"API returned unexpected data structure for **{game_info['api_name']}**."
 
         elif response.status == 404:
-            return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**."
+            # Standard 404 for player not found
+            return None, f"Player **{player_name}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (404 error)"
         else:
             text = await response.text()
             return None, f"API error: {response.status} - {text[:100]}..."
@@ -102,12 +108,13 @@ class BattlefieldStats(commands.Cog):
         Platform options: PC, PSN, XBOX
         Game options: BFV (default), BF1, BF4, BF2042, BF6
         """
-        async with ctx.typing():  # CORRECTED LINE: Used ctx.typing() as a context manager
+        async with ctx.typing():  # Typing indicator is now robust
 
             data, error = await self.fetch_stats(player, platform, game)
 
         if error:
-            return await ctx.send(f"❌ Error: {error}")
+            # We now append the raw input in the error message to remind the user of their exact query
+            return await ctx.send(f"❌ Error for `!bfstats {player} {platform} {game}`: {error}")
 
         # --- Data Parsing and Formatting ---
         game_id = self.API_GAMES.get(game.lower())["api_id"]
