@@ -1,9 +1,9 @@
 import discord
 from redbot.core import Config, commands
-from discord.ext import tasks  # FIX: We use discord.ext.tasks for the loop utility
-import feedparser  # This is required for the functionality below!
-import time  # Used for timestamp in checker loop
-import re  # Added for stripping HTML tags
+from discord.ext import tasks
+import feedparser
+import time
+import re
 
 
 class RSSFeed(commands.Cog):
@@ -76,10 +76,65 @@ class RSSFeed(commands.Cog):
 
         return embed
 
+    async def _process_feed(self, feed_url: str, data: dict, force_post: bool = False) -> bool:
+        """
+        Fetches, processes, and posts the latest entry for a single feed.
+
+        Args:
+            feed_url: The URL of the RSS feed.
+            data: The configuration data for this feed (channel_id, last_entry_link).
+            force_post: If True, posts the latest entry even if the link matches the last_entry_link.
+
+        Returns:
+            True if a post was sent, False otherwise.
+        """
+        channel_id = data.get("channel_id")
+        last_link = data.get("last_entry_link")
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            print(f"RSSFeed: Configured channel ID {channel_id} for feed {feed_url} not found.")
+            return False
+
+        try:
+            feed = feedparser.parse(feed_url)
+            if not feed.entries:
+                print(f"RSSFeed: Feed {feed_url} returned no entries.")
+                return False
+
+            latest_entry = feed.entries[0]
+            latest_link = latest_entry.link
+
+            is_new = latest_link != last_link
+
+            # Post if it's new OR if we were explicitly told to force a post
+            if is_new or force_post:
+                # 1. Create the embed
+                embed = self._create_rss_embed(latest_entry, feed_url)
+
+                # 2. Send the embed
+                await channel.send(embed=embed)
+
+                # 3. Update the last_entry_link in the configuration for this specific feed
+                # We update the last link if a post happened (either new or forced)
+                data["last_entry_link"] = latest_link
+                await self.config.feeds.set_raw(feed_url, value=data)
+
+                return True
+            else:
+                # Log that the check occurred, but no new posts were found
+                print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
+                return False
+
+        except Exception as e:
+            print(f"An error occurred during RSS feed check for {feed_url}: {e}")
+            return False
+
     @tasks.loop(minutes=5.0)
     async def rss_checker(self):
         """
         The main loop that runs every 5 minutes to check all configured RSS feeds.
+        It calls _process_feed with force_post=False (only posts new entries).
         """
         await self.bot.wait_until_ready()
 
@@ -89,45 +144,8 @@ class RSSFeed(commands.Cog):
             return
 
         for feed_url, data in all_feeds.items():
-            channel_id = data.get("channel_id")
-            last_link = data.get("last_entry_link")
-
-            if not channel_id:
-                print(f"RSSFeed: Feed {feed_url} is missing a channel ID.")
-                continue
-
-            channel = self.bot.get_channel(channel_id)
-            if not channel:
-                print(f"RSSFeed: Configured channel ID {channel_id} for feed {feed_url} not found.")
-                continue
-
-            try:
-                feed = feedparser.parse(feed_url)
-                if not feed.entries:
-                    continue
-
-                latest_entry = feed.entries[0]
-                latest_link = latest_entry.link
-
-                if latest_link != last_link:
-                    # New entry found
-
-                    # 1. Create the embed using the helper function
-                    embed = self._create_rss_embed(latest_entry, feed_url)
-
-                    # 2. Send the embed
-                    await channel.send(embed=embed)
-
-                    # 3. Update the last_entry_link in the configuration for this specific feed
-                    data["last_entry_link"] = latest_link
-                    await self.config.feeds.set_raw(feed_url, value=data)
-
-                else:
-                    # Log that the check occurred, but no new posts were found
-                    print(f"RSSFeed Checker: Checked feed {feed_url}. No new posts.")
-
-            except Exception as e:
-                print(f"An error occurred during RSS feed check for {feed_url}: {e}")
+            # Process the feed, but only post if a new link is found
+            await self._process_feed(feed_url, data, force_post=False)
 
     @rss_checker.before_loop
     async def before_rss_checker(self):
@@ -139,6 +157,44 @@ class RSSFeed(commands.Cog):
     async def rss_settings(self, ctx: commands.Context):
         """Manage multiple RSS feed configurations (URL, posting channel, and removal)."""
         pass
+
+    # --- NEW COMMANDS ---
+
+    @rss_settings.command(name="updateall")
+    async def update_all_feeds(self, ctx: commands.Context):
+        """Forces an immediate check and update for all configured RSS feeds."""
+        await ctx.send("Starting manual update check for all configured feeds...")
+        try:
+            # Immediately run the loop's core function
+            await self.rss_checker.coro()
+            await ctx.send("Manual update check complete. Any new posts have been sent.")
+        except Exception as e:
+            await ctx.send(f"An error occurred during the manual update: {e}")
+
+    @rss_settings.command(name="postlatest")
+    async def post_latest_entry(self, ctx: commands.Context, *, url: str):
+        """Forces a post of the absolute latest entry for the given feed, even if it was already posted."""
+        feeds = await self.config.feeds()
+        if url not in feeds:
+            return await ctx.send(f"Error: Feed URL `{url}` is not currently monitored. Please use `[p]rss add` first.")
+
+        # Get a fresh copy of the data from the config
+        data = feeds[url]
+
+        await ctx.send(f"Forcing post of the latest entry for `{url}`...")
+
+        try:
+            # Process the feed, forcing a post (force_post=True)
+            posted = await self._process_feed(url, data, force_post=True)
+
+            if posted:
+                await ctx.send(f"Successfully posted the latest entry from `{url}` to the configured channel.")
+            else:
+                await ctx.send(f"No valid entry was found to post for `{url}`.")
+        except Exception as e:
+            await ctx.send(f"Failed to post latest entry for `{url}`: {e}")
+
+    # --- END NEW COMMANDS ---
 
     @rss_settings.command(name="add")
     async def add_feed(self, ctx: commands.Context, channel: discord.TextChannel, *, url: str):
@@ -205,14 +261,15 @@ class RSSFeed(commands.Cog):
             "link": test_link,
             "summary": (
                 "This is a simulated test post to verify that the bot is correctly configured. "
-                "This text simulates the summary field retrieved from the RSS feed."
+                "This text simulates the summary field retrieved from the RSS feed. No actual data will be posted."
             ),
+            # Use current time struct for the test entry
             "published_parsed": ctx.message.created_at.timetuple()
         }
 
         # Use the unified embed creation helper
         embed = self._create_rss_embed(simulated_entry, url)
-        # Manually override the color for the test command if needed, though using the helper's color is fine
+        # Manually override the color for the test command
         embed.color = await ctx.embed_color()
 
         try:
