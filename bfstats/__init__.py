@@ -1,7 +1,12 @@
-from .bf_stats_cog import BattlefieldStats, setup
+from .bf_stats_cog import BattlefieldStats
 
-# This file is used by Redbot to find and load the cog's setup function.
-# It makes the entire directory structure (e.g., /bfstats/bf_stats_cog.py)
-# work as a single package.
+async def setup(bot):
+    """
+    Adds the BattlefieldStats cog to the bot.
+    """
+    await bot.add_cog(BattlefieldStats(bot))
+
+# Optional: You can include an async def teardown(bot) function here for cleanup
+# if necessary, but it's not strictly required for this simple cog.
 
 __red_end_user_data_statement__ = "This cog does not store any end user data."
