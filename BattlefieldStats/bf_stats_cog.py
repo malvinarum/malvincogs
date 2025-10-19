@@ -8,6 +8,9 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 class BattlefieldStats(commands.Cog):
     """Retrieves and displays Battlefield player statistics."""
 
+    # Class-level flag for debugging - Set to True to output request details on error
+    DEBUG_MODE = True
+
     def __init__(self, bot):
         self.bot = bot
         # Mapping of user-friendly game names to API identifiers, methods, and paths
@@ -68,8 +71,15 @@ class BattlefieldStats(commands.Cog):
                         param_key: param_value,  # Dynamically insert player or playerid
                     }
 
+                    if self.DEBUG_MODE:
+                        # For GET, the request data is the query string parameters
+                        print(
+                            f"DEBUG GET Request URL: {full_url}?{aiohttp.client.URL(full_url).update_query(params).query_string}")
+
                     async with session.get(full_url, params=params) as response:
-                        return await self._process_response(response, player_input, platform_api, game_info)
+                        # Pass request data along for debugging in case of error
+                        return await self._process_response(response, player_input, platform_api, game_info, full_url,
+                                                            params)
 
                 elif game_info["method"] == "POST":
                     # Specific body structure required for BF6 (using the bf6/stats/ endpoint)
@@ -79,16 +89,39 @@ class BattlefieldStats(commands.Cog):
                         param_key: param_value,  # Dynamically insert player or playerid
                     }
 
+                    if self.DEBUG_MODE:
+                        # For POST, the request data is the JSON payload
+                        print(f"DEBUG POST Request URL: {full_url}, Payload: {json_payload}")
+
                     async with session.post(full_url, json=json_payload) as response:
-                        return await self._process_response(response, player_input, platform_api, game_info)
+                        # Pass request data along for debugging in case of error
+                        return await self._process_response(response, player_input, platform_api, game_info, full_url,
+                                                            json_payload)
 
         except asyncio.TimeoutError:
             return None, "The request timed out. The GameTools API may be slow right now."
         except Exception as e:
             return None, f"An unexpected error occurred: {type(e).__name__}: {e}"
 
-    async def _process_response(self, response, player_input, platform_api, game_info):
-        """Helper to process the API response."""
+    async def _process_response(self, response, player_input, platform_api, game_info, url, request_data):
+        """Helper to process the API response, now includes request data for debugging on non-200 status."""
+
+        debug_info = ""
+        # Only prepare debug info if the status is not 200 and debug mode is on
+        if self.DEBUG_MODE and response.status != 200:
+            # Construct request details string
+            request_details = f"URL: {url}"
+            if isinstance(request_data, dict):
+                request_details += f" | Data: {request_data}"
+
+            try:
+                # Attempt to read the raw response body
+                raw_text = await response.text()
+                # Format the debug information to be appended to the error message
+                debug_info = f"\n\n**DEBUG INFO (Status {response.status}):**\nRequest Details: `{request_details}`\nRaw Response: `{raw_text[:200]}...`"
+            except Exception:
+                debug_info = f"\n\n**DEBUG INFO (Status {response.status}):**\nRequest Details: `{request_details}`\n(Could not read raw response text)"
+
         if response.status == 200:
             try:
                 data = await response.json()
@@ -99,7 +132,7 @@ class BattlefieldStats(commands.Cog):
 
             # Check for a 'message' key indicating a non-standard 200 error (e.g., API found game but not player)
             if isinstance(data, dict) and data.get('message', '').lower().startswith('player not found'):
-                return None, f"Player **{player_input}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (API message)"
+                return None, f"Player **{player_input}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (API message){debug_info}"
 
             # The BF6 endpoint returns an array for player stats, so we must extract the first item
             if game_info["api_name"] == "BF6" and isinstance(data, list) and data:
@@ -111,11 +144,11 @@ class BattlefieldStats(commands.Cog):
                 return None, f"API returned unexpected data structure for **{game_info['api_name']}**."
 
         elif response.status == 404:
-            # Standard 404 for player not found
-            return None, f"Player **{player_input}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (404 error)"
+            # Standard 404 for player not found, append debug info
+            return None, f"Player **{player_input}** not found on **{platform_api.upper()}** for **{game_info['api_name']}**. (404 error){debug_info}"
         else:
-            text = await response.text()
-            return None, f"API error: {response.status} - {text[:100]}..."
+            # Other non-200 status, append debug info
+            return None, f"API error: {response.status} - {await response.text()[:100]}...{debug_info}"
 
     @commands.command()
     async def bfstats(self, ctx, player: str, platform: str, game: str = "bfv"):
