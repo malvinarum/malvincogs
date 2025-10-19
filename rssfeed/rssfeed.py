@@ -92,7 +92,7 @@ class RSSFeed(commands.Cog):
             print(f"RSSFeed: Configured channel ID {channel_id} for feed {feed_url} not found.")
             return "ERROR"
 
-            # --- START FIX: Add Retry Logic for unreliable feeds ---
+            # --- START: Add Retry Logic for unreliable feeds ---
         max_retries = 3
         delay = 2  # Initial delay in seconds
 
@@ -129,7 +129,7 @@ class RSSFeed(commands.Cog):
         if not feed or not feed.entries:
             # If loop finished without finding entries after all retries
             return "NO_ENTRIES"
-            # --- END FIX: Add Retry Logic for unreliable feeds ---
+            # --- END: Add Retry Logic for unreliable feeds ---
 
         latest_entry = feed.entries[0]
 
@@ -211,8 +211,8 @@ class RSSFeed(commands.Cog):
         """Forces an immediate check and update for all configured RSS feeds."""
         await ctx.send("Starting manual update check for all configured feeds...")
         try:
-            # FIX: Use .coro() to call the function inside the task loop
-            await self.rss_checker.coro()
+            # FIX: The .coro() function needs the instance (self) passed explicitly
+            await self.rss_checker.coro(self)
             await ctx.send("Manual update check complete. Any new posts have been sent.")
         except Exception as e:
             await ctx.send(f"An error occurred during the manual update: {e}")
