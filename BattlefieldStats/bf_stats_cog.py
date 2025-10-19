@@ -21,9 +21,12 @@ class BattlefieldStats(commands.Cog):
         }
 
         # Mapping of user-friendly platform names to API platform identifiers
-        # NOTE: Changing 'pc' to 'origin' as many EA APIs require the platform to be 'origin' for PC players.
+        # Added 'ea' and 'steam' for better user experience. 'pc' and 'ea' map to 'origin'
+        # which is the common identifier for EA PC accounts in these APIs.
         self.API_PLATFORMS = {
             "pc": "origin",
+            "ea": "origin",
+            "steam": "steam",
             "psn": "psn",
             "xbox": "xbox",
         }
@@ -121,7 +124,7 @@ class BattlefieldStats(commands.Cog):
 
         Usage: [p]bfstats <player_name/player_id> <platform> [game]
 
-        Platform options: PC, PSN, XBOX
+        Platform options: PC, EA, Steam, PSN, XBOX
         Game options: BFV (default), BF1, BF4, BF2042, BF6
         """
         async with ctx.typing():  # Typing indicator is now robust
