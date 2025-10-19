@@ -97,9 +97,16 @@ class RSSFeed(commands.Cog):
             return False
 
         try:
-            feed = feedparser.parse(feed_url)
+            # --- FIX: Add User-Agent header to prevent blocking by some servers (like rss.app) ---
+            request_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+            }
+            feed = feedparser.parse(feed_url, request_headers=request_headers)
+            # --- END FIX ---
+
             if not feed.entries:
                 print(f"RSSFeed: Feed {feed_url} returned no entries.")
+                # This could also be a server error, so we continue to the next feed
                 return False
 
             latest_entry = feed.entries[0]
@@ -166,7 +173,6 @@ class RSSFeed(commands.Cog):
         await ctx.send("Starting manual update check for all configured feeds...")
         try:
             # Immediately run the loop's core function
-            # FIX: Call the task object directly to properly pass 'self'
             await self.rss_checker()
             await ctx.send("Manual update check complete. Any new posts have been sent.")
         except Exception as e:
