@@ -9,7 +9,7 @@ from redbot.core.utils.menus import DEFAULT_CONTROROLS, menu
 import aiohttp
 
 # Set up logging for the cog
-log = logging.getLogger("red.mycogs.xupdates")
+log = logging.getLogger("red.mycogs.xfeed")
 
 # Base URL for the X API v2
 X_API_BASE = "https://api.twitter.com/2"

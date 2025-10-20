@@ -1,4 +1,4 @@
-from .x_updates import XFeed
+from .xfeed import XFeed
 
 async def setup(bot):
     """
