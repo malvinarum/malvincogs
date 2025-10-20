@@ -106,6 +106,8 @@ class RSSFeed(commands.Cog):
                 # Use feedparser to fetch and parse the feed
                 feed = feedparser.parse(feed_url, request_headers=request_headers)
 
+                # REMOVED: Strict HTTP status check, relying instead on successful entry retrieval
+
                 if feed.entries:
                     break  # Success: entries found, exit retry loop
 
@@ -113,23 +115,28 @@ class RSSFeed(commands.Cog):
                 if attempt < max_retries - 1:
                     print(
                         f"RSSFeed: Feed {feed_url} returned no entries on attempt {attempt + 1}. Retrying in {delay}s...")
-                    # FIX: Use asyncio.sleep to prevent blocking the entire bot event loop.
                     await asyncio.sleep(delay)
                     delay *= 2  # Exponential backoff
 
             except Exception as e:
-                # If fetching fails entirely (e.g., DNS error, connection issue), retry
+                # If fetching fails entirely (e.g., DNS error, connection issue, or raised ConnectionError)
                 if attempt < max_retries - 1:
                     print(
-                        f"RSSFeed: Error fetching feed {feed_url} on attempt {attempt + 1}: {e}. Retrying in {delay}s...")
-                    # FIX: Use asyncio.sleep to prevent blocking the entire bot event loop.
+                        f"RSSFeed: Error fetching feed {feed_url} on attempt {attempt + 1}: {type(e).__name__}: {e}. Retrying in {delay}s...")
                     await asyncio.sleep(delay)
                     delay *= 2
                 else:
-                    print(f"An error occurred during RSS feed check for {feed_url}: {e}")
+                    # Final failure: print detailed error type and message for debugging
+                    print(f"RSSFeed ERROR: Final failure for {feed_url}. Exception: {type(e).__name__}: {e}")
                     return "ERROR"  # Final failure
 
+        # If the loop completes and we still don't have entries
         if not feed or not feed.entries:
+            # Check if the overall feed object itself indicates an error, even if entries is empty
+            if feed and feed.get('bozo'):
+                # Check for specific parsing errors (bozo indicates parsing failed)
+                bozo_exception = getattr(feed, 'bozo_exception', 'Unknown Parsing Error')
+                print(f"RSSFeed ERROR: Parsing failure (bozo=1) for {feed_url}. Exception: {bozo_exception}")
             # If loop finished without finding entries after all retries
             return "NO_ENTRIES"
             # --- END: Add Retry Logic for unreliable feeds ---
