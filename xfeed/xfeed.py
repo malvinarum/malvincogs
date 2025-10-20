@@ -3,9 +3,10 @@ import logging
 from datetime import datetime, timezone
 
 import discord
-from redbot.core import Config, commands, app_commands, checks, tasks
+from redbot.core import Config, commands, app_commands, checks
 from redbot.core.bot import Red
 from redbot.core.utils.menus import DEFAULT_CONTROROLS, menu
+from discord.ext import tasks  # Corrected: tasks must be imported from discord.ext
 import aiohttp
 
 # Set up logging for the cog
