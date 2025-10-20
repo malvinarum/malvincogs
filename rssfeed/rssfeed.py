@@ -53,6 +53,7 @@ class RSSFeed(commands.Cog):
         link = entry.get("link", feed_url)
 
         # Get summary and strip HTML tags before using it in the embed description
+        # Using summary field for description
         raw_summary = entry.get("summary", "Click the link for details.")
         summary = self._strip_html(raw_summary)
 
@@ -106,10 +107,16 @@ class RSSFeed(commands.Cog):
                 # Use feedparser to fetch and parse the feed
                 feed = feedparser.parse(feed_url, request_headers=request_headers)
 
-                # REMOVED: Strict HTTP status check, relying instead on successful entry retrieval
-
+                # Success condition: we have entries
                 if feed.entries:
-                    break  # Success: entries found, exit retry loop
+                    break
+
+                    # Check for bozo (parsing failure) even if entries is empty
+                if feed.get('bozo'):
+                    bozo_exception = getattr(feed, 'bozo_exception', 'Unknown Parsing Error')
+                    # Log the specific parsing error but continue retrying if not final attempt
+                    print(
+                        f"RSSFeed: Parsing failure (bozo=1) for {feed_url} on attempt {attempt + 1}. Exception: {bozo_exception}")
 
                 # If no entries found, and it's not the last attempt, log and wait
                 if attempt < max_retries - 1:
@@ -119,7 +126,7 @@ class RSSFeed(commands.Cog):
                     delay *= 2  # Exponential backoff
 
             except Exception as e:
-                # If fetching fails entirely (e.g., DNS error, connection issue, or raised ConnectionError)
+                # If fetching fails entirely (e.g., DNS error, connection issue)
                 if attempt < max_retries - 1:
                     print(
                         f"RSSFeed: Error fetching feed {feed_url} on attempt {attempt + 1}: {type(e).__name__}: {e}. Retrying in {delay}s...")
@@ -127,16 +134,17 @@ class RSSFeed(commands.Cog):
                     delay *= 2
                 else:
                     # Final failure: print detailed error type and message for debugging
-                    print(f"RSSFeed ERROR: Final failure for {feed_url}. Exception: {type(e).__name__}: {e}")
-                    return "ERROR"  # Final failure
+                    print(
+                        f"RSSFeed ERROR: Final failure during fetch for {feed_url}. Exception: {type(e).__name__}: {e}")
+                    return "ERROR"  # Final fetch/connection failure
 
         # If the loop completes and we still don't have entries
         if not feed or not feed.entries:
-            # Check if the overall feed object itself indicates an error, even if entries is empty
+            # Final check for bozo/parsing issues after all retries
             if feed and feed.get('bozo'):
-                # Check for specific parsing errors (bozo indicates parsing failed)
                 bozo_exception = getattr(feed, 'bozo_exception', 'Unknown Parsing Error')
-                print(f"RSSFeed ERROR: Parsing failure (bozo=1) for {feed_url}. Exception: {bozo_exception}")
+                print(f"RSSFeed ERROR: Parsing failure (bozo=1) for {feed_url}. Final Exception: {bozo_exception}")
+
             # If loop finished without finding entries after all retries
             return "NO_ENTRIES"
             # --- END: Add Retry Logic for unreliable feeds ---
@@ -154,7 +162,7 @@ class RSSFeed(commands.Cog):
         # Ensure latest_link is a non-empty string and starts with a protocol
         if not latest_link or not isinstance(latest_link, str) or not latest_link.startswith(("http://", "https://")):
             print(
-                f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post.")
+                f"RSSFeed: Could not extract a valid link (link or guid) for the latest entry in feed {feed_url}. Skipping post. Extracted Link: {latest_link}")
             # Return specific status for no valid link
             return "NO_LINK"
 
