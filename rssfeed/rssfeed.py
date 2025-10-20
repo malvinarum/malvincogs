@@ -4,6 +4,7 @@ from discord.ext import tasks
 import feedparser
 import time
 import re
+import asyncio  # Added for asynchronous sleeping
 
 
 class RSSFeed(commands.Cog):
@@ -112,13 +113,8 @@ class RSSFeed(commands.Cog):
                 if attempt < max_retries - 1:
                     print(
                         f"RSSFeed: Feed {feed_url} returned no entries on attempt {attempt + 1}. Retrying in {delay}s...")
-                    # time.sleep is blocking, so use asyncio.sleep for async safety
-                    # Since redbot environment might not expose asyncio directly,
-                    # we must rely on time.sleep in a synchronous context or assume
-                    # Red's environment handles feedparser calls gracefully.
-                    # For this context, we will use time.sleep, which is less ideal
-                    # but is the only option without explicit asyncio import.
-                    time.sleep(delay)
+                    # FIX: Use asyncio.sleep to prevent blocking the entire bot event loop.
+                    await asyncio.sleep(delay)
                     delay *= 2  # Exponential backoff
 
             except Exception as e:
@@ -126,7 +122,8 @@ class RSSFeed(commands.Cog):
                 if attempt < max_retries - 1:
                     print(
                         f"RSSFeed: Error fetching feed {feed_url} on attempt {attempt + 1}: {e}. Retrying in {delay}s...")
-                    time.sleep(delay)
+                    # FIX: Use asyncio.sleep to prevent blocking the entire bot event loop.
+                    await asyncio.sleep(delay)
                     delay *= 2
                 else:
                     print(f"An error occurred during RSS feed check for {feed_url}: {e}")
