@@ -75,7 +75,9 @@ class XFeed(commands.Cog):
         params = {
             "tweet.fields": "created_at,author_id,attachments,public_metrics",
             "max_results": 5,
-            "expansions": "author_id",
+            # Added media expansion and media fields to get image/video URLs
+            "expansions": "author_id,attachments.media_keys",
+            "media.fields": "url,type,preview_image_url",
             # This 'exclude' parameter ensures we only get original posts and quoted posts.
             "exclude": "replies,retweets",
         }
@@ -118,6 +120,8 @@ class XFeed(commands.Cog):
             # Find author info from includes (simplification)
             author_name = username
             author_username = username
+            media_list = posts_response.get('includes', {}).get('media', [])  # Get media list
+
             if 'includes' in posts_response and 'users' in posts_response['includes']:
                 user_info = next((u for u in posts_response['includes']['users'] if str(u['id']) == str(user_id)), None)
                 if user_info:
@@ -128,7 +132,7 @@ class XFeed(commands.Cog):
             # to ensure the last_id update is correct and they post chronologically.
             for post in reversed(new_posts):
                 try:
-                    embed = self._create_embed(post, author_username, author_name)
+                    embed = self._create_embed(post, author_username, author_name, media_list)
                     await channel.send(embed=embed)
                     newest_id = post['id']
                 except discord.Forbidden:
@@ -149,8 +153,8 @@ class XFeed(commands.Cog):
             return False  # Indicate no new posts
         return False  # Indicate API error
 
-    def _create_embed(self, post_data: dict, author_username: str, author_name: str):
-        """Creates a rich Discord embed from the X post data."""
+    def _create_embed(self, post_data: dict, author_username: str, author_name: str, media_list: list = None):
+        """Creates a rich Discord embed from the X post data, now including media."""
         tweet_id = post_data['id']
         text = post_data['text']
         created_at_str = post_data['created_at']
@@ -170,18 +174,36 @@ class XFeed(commands.Cog):
                          url=f"https://x.com/{author_username}",
                          icon_url="https://i.imgur.com/k2H999N.png")  # Placeholder X logo/icon
 
-        # Attach image/media if available (simplified check)
-        if 'attachments' in post_data and 'media_keys' in post_data['attachments']:
-            # Due to the complexity of getting media URLs in V2 without 'expansions',
-            # we'll use a simplified image placeholder method for this example.
-            # A full implementation would require media expansion in the API call.
-            pass
+        # --- MEDIA HANDLING ---
+        if media_list and 'attachments' in post_data and 'media_keys' in post_data['attachments']:
+            media_keys = post_data['attachments']['media_keys']
 
-        # Add the requested footer (Note: Discord does not support hyperlinking footer text)
+            # Find the first image/video in the included media list
+            for key in media_keys:
+                media_item = next((m for m in media_list if m.get('media_key') == key), None)
+
+                if media_item:
+                    media_url = None
+                    media_type = media_item.get('type')
+
+                    # For photos, use 'url'. For videos/gifs, use 'preview_image_url'.
+                    if media_type == 'photo' and media_item.get('url'):
+                        media_url = media_item['url']
+                    elif media_type in ('video', 'animated_gif') and media_item.get('preview_image_url'):
+                        # Discord won't autoplay video in an embed image field, so use the preview.
+                        media_url = media_item['preview_image_url']
+
+                    if media_url:
+                        embed.set_image(url=media_url)
+                        # We only display the first media item in the embed image slot
+                        break
+
+        # Updated to only show the requested text in the footer.
+        # Links are not supported in Discord footer text.
         embed.set_footer(text="Xfeed by Malvinarum")
-        # Add a field for the link to satisfy the "linked to" request
-        embed.add_field(name="Source", value="[Malvinarum Cogs](https://github.com/malvinarum/malvincogs/)",
-                        inline=False)
+
+        # Removed the separate "Source" field.
+        # The link is still available via the main embed URL and the author URL.
 
         return embed
 
