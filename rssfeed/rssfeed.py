@@ -168,6 +168,9 @@ class RSSFeed(commands.Cog):
 
             # --- END: Robust link extraction and validation ---
 
+        # CRITICAL DEBUG: Log the links being compared before the is_new check
+        print(f"RSSFeed Debug: Comparing links for {feed_url}. Last Link: {last_link}. Latest Link: {latest_link}")
+
         is_new = latest_link != last_link
 
         # Post if it's new OR if we were explicitly told to force a post
