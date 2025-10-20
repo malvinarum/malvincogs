@@ -15,6 +15,10 @@ log = logging.getLogger("red.mycogs.xfeed")
 # Base URL for the X API v2
 X_API_BASE = "https://api.twitter.com/2"
 
+# Discord's embed description limit is 2048 characters. We use 2000 to safely
+# accommodate the "Read more" link and ellipsis if truncation occurs.
+MAX_EMBED_DESCRIPTION_LENGTH = 2000
+
 
 class XFeed(commands.Cog):
     """
@@ -155,21 +159,44 @@ class XFeed(commands.Cog):
         return False  # Indicate API error
 
     def _create_embed(self, post_data: dict, author_username: str, author_name: str, media_list: list = None):
-        """Creates a rich Discord embed from the X post data, now including media."""
+        """
+        Creates a rich Discord embed from the X post data, now including media,
+        and ensures the description does not exceed Discord's 2048 character limit,
+        adding a "Read more" link if truncation occurs.
+        """
         tweet_id = post_data['id']
         text = post_data['text']
         created_at_str = post_data['created_at']
+        post_url = f"https://x.com/{author_username}/status/{tweet_id}"
+
+        # Flag to track if we truncated the text
+        was_truncated = False
+
+        # --- TRUNCATION LOGIC ---
+        if len(text) > MAX_EMBED_DESCRIPTION_LENGTH:
+            # Truncate the text
+            text = text[:MAX_EMBED_DESCRIPTION_LENGTH]
+            # Add ellipsis and the "Read more" link in Discord markdown format
+            # Example: ... [Read more](https://x.com/user/status/123)
+            read_more_link = f" **...** [[Read more]]({post_url})"
+
+            # Re-check the length to make sure the combined string does not exceed 2048
+            # (MAX_EMBED_DESCRIPTION_LENGTH + len(read_more_link) will be < 2048)
+            text += read_more_link
+            was_truncated = True
+        # --- END TRUNCATION LOGIC ---
 
         # Format timestamp
         timestamp = datetime.strptime(created_at_str, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=timezone.utc)
 
         # Build the embed
         embed = discord.Embed(
+            # The main link is on the title of the embed
             title=f"New Post from @{author_username}",
             description=text,
-            url=f"https://x.com/{author_username}/status/{tweet_id}",
+            url=post_url,  # Sets the main clickable area for the embed
             timestamp=timestamp,
-            color=0x000000  # X's primary color is black (0x000000) or a deep blue
+            color=0x000000  # X's primary color
         )
         embed.set_author(name=f"{author_name} (@{author_username})",
                          url=f"https://x.com/{author_username}",
@@ -199,16 +226,12 @@ class XFeed(commands.Cog):
                         # We only display the first media item in the embed image slot
                         break
 
-        # Updated to only show the requested text in the footer.
-        # Links are not supported in Discord footer text.
-        embed.set_footer(text="Xfeed by Malvinarum")
-
-        # Removed the separate "Source" field.
-        # The link is still available via the main embed URL and the author URL.
+        # Footer: Only show the bot credit.
+        embed.set_footer(text="Posted by XFeed")
 
         return embed
 
-    @tasks.loop(minutes=30)  # CHANGED from hours=1 to minutes=30
+    @tasks.loop(minutes=30)  # Now running every 30 minutes
     async def update_check(self):
         """The main background loop to check for new X posts."""
         await self.bot.wait_until_ready()
