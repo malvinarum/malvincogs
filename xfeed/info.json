@@ -1,0 +1,19 @@
+{
+    "name": "XFeed",
+    "author": ["Malvinarum"],
+    "description": "A Redbot cog to periodically fetch and post new updates from specified X.com (Twitter) accounts to a Discord channel using the X API v2.",
+    "short": "XFeed - X.com Updates",
+    "install_msg": "Thank you for installing XFeed! Please read the setup instructions below to get started.",
+    "min_bot_version": "3.4.0",
+    "max_bot_version": "3.6.0",
+    "requirements": ["aiohttp"],
+    "tags": ["social media", "twitter", "x.com", "api", "utility"],
+    "hidden": false,
+    "permissions": {
+        "bot": [
+            "read_messages",
+            "send_messages",
+            "embed_links"
+        ]
+    }
+}
