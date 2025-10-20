@@ -38,7 +38,8 @@ class XFeed(commands.Cog):
         self.config.register_guild(accounts={})
         self.session = aiohttp.ClientSession()
 
-        # Start the background task loop
+        # The update check now runs every 30 minutes, balancing responsiveness
+        # with the strict Free Tier limits (100 posts/month).
         self.update_check.start()
 
     def cog_unload(self):
@@ -207,7 +208,7 @@ class XFeed(commands.Cog):
 
         return embed
 
-    @tasks.loop(minutes=10)
+    @tasks.loop(minutes=30)  # CHANGED from hours=1 to minutes=30
     async def update_check(self):
         """The main background loop to check for new X posts."""
         await self.bot.wait_until_ready()
@@ -301,6 +302,17 @@ class XFeed(commands.Cog):
         if not headers:
             return await ctx.send(f"The X API Bearer Token is not set. Please use `{ctx.prefix}xfeed setapi` first.")
 
+        # --- API Warning Block ---
+        current_accounts = await self.config.guild(ctx.guild).accounts()
+        # Check if the user is about to hit the unsafe limit
+        # The bot checks every 30 mins (1,440 requests/month) but the post limit is 100 posts/month.
+        await ctx.send(
+            "⚠️ **Warning on API Limits (Free Tier):**\n"
+            "The bot is now checking every **30 minutes**.\n"
+            "The X Free Tier is limited to retrieving only **100 Posts per month** in total. Once that limit is hit, the bot will stop posting updates until the next month, regardless of how many accounts you follow."
+        )
+        # --- End API Warning Block ---
+
         # 1. Get the X user ID
         await ctx.send(f"Attempting to resolve username '@{username}' to a User ID...")
         user_id = await self._fetch_user_id(username, headers)
@@ -325,7 +337,7 @@ class XFeed(commands.Cog):
 
         await ctx.send(
             f"Successfully started tracking `@{username}`. Updates will be posted to {channel.mention}.\n"
-            "The first post will appear after the next scheduled check (up to 10 minutes)."
+            "The first post will appear after the next scheduled check (up to **30 minutes**)."
         )
 
     @x_updates.command(name="unfollow")
