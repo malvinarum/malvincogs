@@ -5,8 +5,7 @@ from datetime import datetime, timezone
 import discord
 from redbot.core import Config, commands, app_commands, checks
 from redbot.core.bot import Red
-from redbot.core.utils.menus import DEFAULT_CONTROLS, \
-    menu  # FIX: Corrected typo from DEFAULT_CONTROROLS to DEFAULT_CONTROLS
+from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from discord.ext import tasks
 import aiohttp
 
@@ -77,7 +76,8 @@ class XFeed(commands.Cog):
             "tweet.fields": "created_at,author_id,attachments,public_metrics",
             "max_results": 5,
             "expansions": "author_id",
-            "exclude": "replies,retweets",  # Exclude replies and retweets to focus on original content
+            # This 'exclude' parameter ensures we only get original posts and quoted posts.
+            "exclude": "replies,retweets",
         }
         if last_id:
             params['since_id'] = last_id
@@ -96,6 +96,58 @@ class XFeed(commands.Cog):
         except Exception as e:
             log.error(f"Error fetching posts for user {user_id}: {e}", exc_info=True)
             return None
+
+    async def _post_updates(self, guild: discord.Guild, username: str, account_data: dict, headers: dict):
+        """Handles the fetching, posting, and config update for a single account."""
+        user_id = account_data.get("user_id")
+        channel_id = account_data.get("channel_id")
+        last_id = account_data.get("last_id")
+
+        channel = guild.get_channel(channel_id)
+        if not user_id or not channel:
+            log.warning(f"Skipping {username} in {guild.name}: Missing user ID or channel.")
+            return False  # Indicate failure
+
+        # Fetch new posts
+        posts_response = await self._fetch_latest_posts(user_id, last_id, headers)
+
+        if posts_response and 'data' in posts_response:
+            new_posts = posts_response['data']
+            newest_id = last_id
+
+            # Find author info from includes (simplification)
+            author_name = username
+            author_username = username
+            if 'includes' in posts_response and 'users' in posts_response['includes']:
+                user_info = next((u for u in posts_response['includes']['users'] if str(u['id']) == str(user_id)), None)
+                if user_info:
+                    author_name = user_info.get('name', username)
+                    author_username = user_info.get('username', username)
+
+            # Posts are returned newest first, so we process them in reverse order
+            # to ensure the last_id update is correct and they post chronologically.
+            for post in reversed(new_posts):
+                try:
+                    embed = self._create_embed(post, author_username, author_name)
+                    await channel.send(embed=embed)
+                    newest_id = post['id']
+                except discord.Forbidden:
+                    log.error(f"Missing permissions to post to channel {channel.name} in {guild.name}.")
+                    return False  # Stop processing if we can't send
+                except Exception as e:
+                    log.error(f"Error sending post for {username}: {e}", exc_info=True)
+
+            # Update the last_id only if new posts were successfully processed
+            if newest_id != last_id:
+                account_data['last_id'] = newest_id
+                await self.config.guild(guild).accounts.set_raw(username, value=account_data)
+                log.info(f"Updated last ID for @{username} to {newest_id}.")
+                return True  # Indicate success with new post
+            return False  # Indicate no new posts
+        elif posts_response and 'meta' in posts_response and posts_response['meta'].get('result_count', 0) == 0:
+            log.debug(f"No new posts found for @{username}.")
+            return False  # Indicate no new posts
+        return False  # Indicate API error
 
     def _create_embed(self, post_data: dict, author_username: str, author_name: str):
         """Creates a rich Discord embed from the X post data."""
@@ -152,54 +204,8 @@ class XFeed(commands.Cog):
             accounts = guild_data.get("accounts", {}).copy()
 
             for username, account_data in accounts.items():
-                user_id = account_data.get("user_id")
-                channel_id = account_data.get("channel_id")
-                last_id = account_data.get("last_id")
-
-                channel = guild.get_channel(channel_id)
-                if not user_id or not channel:
-                    log.warning(f"Skipping {username} in {guild.name}: Missing user ID or channel.")
-                    continue
-
-                log.debug(f"Checking updates for @{username} in {guild.name}...")
-
-                # Fetch new posts
-                posts_response = await self._fetch_latest_posts(user_id, last_id, headers)
-
-                if posts_response and 'data' in posts_response:
-                    new_posts = posts_response['data']
-                    newest_id = last_id
-
-                    # Find author info from includes (simplification)
-                    author_name = username
-                    author_username = username
-                    if 'includes' in posts_response and 'users' in posts_response['includes']:
-                        user_info = next(
-                            (u for u in posts_response['includes']['users'] if str(u['id']) == str(user_id)), None)
-                        if user_info:
-                            author_name = user_info.get('name', username)
-                            author_username = user_info.get('username', username)
-
-                    # Posts are returned newest first, so we process them in reverse order
-                    # to ensure the last_id update is correct and they post chronologically.
-                    for post in reversed(new_posts):
-                        try:
-                            embed = self._create_embed(post, author_username, author_name)
-                            await channel.send(embed=embed)
-                            newest_id = post['id']
-                        except discord.Forbidden:
-                            log.error(f"Missing permissions to post to channel {channel.name} in {guild.name}.")
-                            break  # Stop processing if we can't send
-                        except Exception as e:
-                            log.error(f"Error sending post for {username}: {e}", exc_info=True)
-
-                    # Update the last_id only if new posts were successfully processed
-                    if newest_id != last_id:
-                        account_data['last_id'] = newest_id
-                        await self.config.guild(guild).accounts.set_raw(username, value=account_data)
-                        log.info(f"Updated last ID for @{username} to {newest_id}.")
-                elif posts_response and 'meta' in posts_response and posts_response['meta'].get('result_count', 0) == 0:
-                    log.debug(f"No new posts found for @{username}.")
+                log.debug(f"Checking updates for @{username} in {guild.name} (Scheduled Run)...")
+                await self._post_updates(guild, username, account_data, headers)
 
     # --- Commands ---
 
@@ -210,6 +216,38 @@ class XFeed(commands.Cog):
         """Manage X.com account tracking and settings."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
+
+    @x_updates.command(name="check", aliases=["manual"])
+    async def manual_update_check(self, ctx: commands.Context, username: str):
+        """
+        Manually checks for and posts updates from a tracked X.com account.
+
+        Usage: [p]xfeed check <username>
+        Example: [p]xfeed check TheOfficialX
+        """
+        username = username.strip('@').lower()
+
+        headers = await self._get_auth_headers()
+        if not headers:
+            return await ctx.send("The X API Bearer Token is not set. Cannot perform manual check.")
+
+        account_data = await self.config.guild(ctx.guild).accounts.get_raw(username, default=None)
+
+        if not account_data:
+            return await ctx.send(
+                f"The account `@{username}` is not currently being tracked. Use `{ctx.prefix}xfeed follow` to add it.")
+
+        await ctx.defer()  # Acknowledge the command quickly
+
+        log.info(f"Checking updates for @{username} in {ctx.guild.name} (Manual Run)...")
+
+        # Use the new helper method to process updates
+        success = await self._post_updates(ctx.guild, username, account_data, headers)
+
+        if success:
+            await ctx.send(f"**Manual check complete:** New updates from `@{username}` were found and posted.")
+        else:
+            await ctx.send(f"**Manual check complete:** No new updates found for `@{username}`.")
 
     @x_updates.command(name="setapi")
     @checks.is_owner()
