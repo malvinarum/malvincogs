@@ -1,7 +1,6 @@
 from .xfeed import XFeed
 
 async def setup(bot):
-    """
-    Sets up the XFeed cog and adds it to the Redbot instance.
-    """
+    """Entry point for RedBot to load the XFeed cog."""
+    # This imports the XFeed class from the xfeed.py file
     await bot.add_cog(XFeed(bot))
