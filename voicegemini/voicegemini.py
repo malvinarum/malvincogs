@@ -6,7 +6,6 @@ import time
 import wave
 import aiohttp
 from redbot.core import commands, Config
-from redbot.core.utils.predicates import Message
 from typing import Optional
 
 # --- API Constants (For Structured Calls) ---
