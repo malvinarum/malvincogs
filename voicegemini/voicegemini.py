@@ -5,6 +5,7 @@ import json
 import time
 import wave
 import aiohttp
+import base64  # <-- ADDED: Standard library for base64 encoding/decoding
 from redbot.core import commands, Config
 from typing import Optional
 
@@ -78,7 +79,8 @@ class VoiceGemini(commands.Cog):
                                 audio_data = part.get("inlineData", {}).get("data")
 
                                 if audio_data:
-                                    return discord.utils.decode_base64_text(audio_data)
+                                    # FIX: Use standard base64 decoding
+                                    return base64.b64decode(audio_data)
                                 else:
                                     raise ValueError("Failed to extract audio data from API response.")
 
@@ -212,6 +214,15 @@ class VoiceGemini(commands.Cog):
                 return await ctx.send("Connection to voice channel timed out.")
             except discord.ClientException:
                 return await ctx.send("I am already in a voice channel.")
+            except RuntimeError as e:
+                if 'PyNaCl' in str(e):
+                    return await ctx.send(
+                        "**Voice Error:** The PyNaCl library is missing. "
+                        "Please install it in your Redbot environment using:\n"
+                        "```bash\npip install pynacl\n```"
+                    )
+                else:
+                    raise  # Re-raise any other unexpected RuntimeErrors
 
         await ctx.send(f"Connected to voice channel: **{channel.name}**")
 
