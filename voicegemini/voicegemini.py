@@ -192,6 +192,15 @@ class VoiceGemini(commands.Cog):
         if not vc:
             return await ctx.send(f"❌ I am not in a voice channel. Use `{ctx.prefix}vg join` first.")
 
+        # --- FIX: Check for voice recording support ---
+        if not hasattr(vc, 'start_recording'):
+            return await ctx.send(
+                "❌ **Voice Error:** This bot's Discord library version does not support `start_recording` for voice receiving. "
+                "Ensure your bot is using a compatible `discord.py` version (v2+) and that the "
+                "**voice** extension is correctly installed (e.g., you might need to run `pip install discord.py[voice]` or use a Pycord-based environment)."
+            )
+        # --------------------------------------------
+
         if ctx.guild.id in active_recordings:
             return await ctx.send("❌ Recording is already in progress.")
 
