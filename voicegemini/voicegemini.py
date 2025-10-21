@@ -1,447 +1,268 @@
-import asyncio
-import aiohttp
-import logging
-from datetime import datetime
-import xml.etree.ElementTree as ET  # Import for XML parsing
-
 import discord
-from redbot.core import commands, Config, app_commands, checks
-from redbot.core.utils.chat_formatting import humanize_list, box, pagify
-from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
-from redbot.core.utils.predicates import MessagePredicate
-from discord.ext import tasks
+import asyncio
+import io
+import json
+import time
+import wave
+import aiohttp
+from redbot.core import commands, Config
+from redbot.core.utils.predicates import Message
+from typing import Optional
 
-log = logging.getLogger("red.plex_activity")
-
-# Define default settings for the cog's configuration
-DEFAULT_GUILD_SETTINGS = {
-    "plex_url": None,
-    "plex_token": None,
-    "activity_channel": None,
-    "activity_message_id": None,  # To store the ID of the message to update
-    "update_interval": 60  # Default update interval in seconds
-}
+# --- API Constants (For Structured Calls) ---
+# NOTE: The API key should be securely stored in Redbot config, not hardcoded.
+API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
+TTS_MODEL = "gemini-2.5-flash-preview-tts"
+# Default sample rate returned by gemini-2.5-flash-preview-tts is 24000 Hz
+TTS_SAMPLE_RATE = 24000
+TTS_MIME_TYPE = f"audio/L16;rate={TTS_SAMPLE_RATE};channels=1"
 
 
-class PlexActivity(commands.Cog):
+# This utility function creates a simple in-memory WAV file header
+# from raw PCM data, which is necessary for Discord to play the audio correctly.
+def _pcm_to_wav(pcm_data: bytes, sample_rate: int) -> io.BytesIO:
+    """Wraps raw PCM audio data in a WAV container."""
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, 'wb') as wav_file:
+        wav_file.setnchannels(1)  # Mono
+        wav_file.setsampwidth(2)  # 16-bit (2 bytes)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    wav_io.seek(0)
+    return wav_io
+
+
+class VoiceGemini(commands.Cog):
     """
-    A Redbot cog to track and display Plex Media Server activity.
-
-    This cog polls the Plex API for active sessions and updates a Discord message
-    in a designated channel.
+    A Redbot cog that integrates the Gemini API with voice channels for conversational AI.
     """
 
     def __init__(self, bot):
         self.bot = bot
-        # Initialize Config for guild-specific settings
-        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
-        self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
-        self.session = aiohttp.ClientSession()  # HTTP session for API requests
-        self._plex_activity_loop_task = None  # To hold the background task
+        # Configuration setup for storing API keys
+        self.config = Config.get_conf(self, identifier=6084601438902573, force_registration=True)
+        default_global = {"api_key": ""}
+        self.config.register_global(**default_global)
 
-    async def cog_load(self):
+        # Dictionary to hold voice clients: guild_id -> discord.VoiceClient
+        self.voice_clients = {}
+
+    async def _get_api_key(self) -> Optional[str]:
+        """Retrieves the API key from the Redbot config."""
+        return await self.config.api_key()
+
+    async def _make_api_call(self, url: str, payload: dict, is_audio_request: bool = False) -> Optional[bytes]:
         """
-        Called when the cog is loaded.
-        Starts the background task to update Plex activity.
+        Handles API interaction with exponential backoff and error handling.
+        Returns bytes for audio calls, or JSON response for text calls.
         """
-        log.info("PlexActivity cog loaded. Starting activity loop.")
-        # Ensure the loop starts only once
-        if not self._plex_activity_loop_task or self._plex_activity_loop_task.done():
-            self._plex_activity_loop_task = self.plex_activity_loop.start()
+        api_key = await self._get_api_key()
+        if not api_key:
+            raise ValueError("Gemini API key not set. Use `[p]vset api_key`.")
 
-    async def cog_unload(self):
-        """
-        Called when the cog is unloaded.
-        Stops the background task and closes the aiohttp session.
-        """
-        log.info("PlexActivity cog unloaded. Stopping activity loop and closing session.")
-        if self._plex_activity_loop_task:
-            self.plex_activity_loop.cancel()
-        if self.session:
-            await self.session.close()
+        headers = {'Content-Type': 'application/json'}
+        max_retries = 5
 
-    def _format_milliseconds_to_time(self, milliseconds: int) -> str:
-        """
-        Converts milliseconds into HH:MM:SS or MM:SS format.
-        """
-        total_seconds = milliseconds // 1000
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
-
-        if hours > 0:
-            return f"{hours:02}:{minutes:02}:{seconds:02}"
-        else:
-            return f"{minutes:02}:{seconds:02}"
-
-    async def _get_plex_sessions(self, guild_id: int):
-        """
-        Fetches active sessions from the Plex Media Server API.
-
-        Args:
-            guild_id (int): The ID of the guild to fetch settings for.
-
-        Returns:
-            list: A list of active Plex sessions, or an empty list if an error occurs.
-        """
-        settings = await self.config.guild_from_id(guild_id).all()
-        plex_url = settings["plex_url"]
-        plex_token = settings["plex_token"]
-
-        if not plex_url or not plex_token:
-            log.warning(f"Plex URL or Token not configured for guild {guild_id}.")
-            return []
-
-        # Ensure the URL ends with a slash for proper path joining
-        if not plex_url.endswith("/"):
-            plex_url += "/"
-
-        api_url = f"{plex_url}status/sessions?X-Plex-Token={plex_token}"
-
-        try:
-            async with self.session.get(api_url, timeout=10) as response:
-                response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-                data = await response.text()  # Plex API returns XML
-                log.debug(f"Plex API raw response for guild {guild_id}:\n{data}")  # Log raw XML response
-
-                sessions = []
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(max_retries):
                 try:
-                    root = ET.fromstring(data)
-                    # Iterate through <Video>, <Photo>, <Track> elements directly
-                    # These tags contain the session information in the provided XML
-                    for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
-                        log.debug(
-                            f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
+                    full_url = f"{url}?key={api_key}"
+                    async with session.post(full_url, headers=headers, json=payload) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            candidate = data.get("candidates", [{}])[0]
 
-                        user_elem = session_elem.find("User")
-                        media_elem = session_elem.find("Media")
-                        player_elem = session_elem.find("Player")
+                            if is_audio_request:
+                                # Extract raw audio bytes from the response
+                                part = candidate.get("content", {}).get("parts", [{}])[0]
+                                audio_data = part.get("inlineData", {}).get("data")
 
-                        if user_elem is None or player_elem is None:
-                            log.warning(
-                                f"Skipping session due to missing User or Player element in guild {guild_id} for element:\n{ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
-                            continue
+                                if audio_data:
+                                    return discord.utils.decode_base64_text(audio_data)
+                                else:
+                                    raise ValueError("Failed to extract audio data from API response.")
 
-                        username = user_elem.get("title", "Unknown User")
+                            else:
+                                # Extract text response
+                                text = candidate.get("content", {}).get("parts", [{}])[0].get("text")
+                                return text
 
-                        # Get title, duration, and viewOffset directly from the session_elem (e.g., <Video> tag)
-                        media_title = session_elem.get("title", "Unknown Title")
-                        view_offset_ms = int(session_elem.get("viewOffset", "0"))
-                        duration_ms = int(session_elem.get("duration", "1"))  # Avoid division by zero
-
-                        # Format times
-                        current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
-                        total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
-
-                        # Get grandparentTitle (Series Name) for TV shows
-                        series_title = session_elem.get("grandparentTitle")
-
-                        media_type = session_elem.get("type", "media")
-
-                        device = player_elem.get("product", "Unknown Device")
-
-                        # Construct the full URL for the image, including the Plex token
-                        image_url = None
-                        thumb_path = session_elem.get("art") or session_elem.get("thumb")
-                        if thumb_path:
-                            base_plex_url = plex_url.rstrip('/')
-                            image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
-
-                        # Initialize session_data with common fields
-                        session_data = {
-                            "user": username,
-                            "type": media_type,
-                            "current_time": current_time_formatted,
-                            "total_duration": total_duration_formatted,
-                            "device": device,
-                            "image_url": image_url
-                        }
-
-                        # Add specific fields based on media type for detailed formatting
-                        if media_type == "episode":
-                            session_data["series_title"] = series_title
-                            session_data["episode_title"] = media_title # This is the specific episode's title
-                            session_data["season_num"] = int(session_elem.get("parentIndex", "0"))
-                            session_data["episode_num"] = int(session_elem.get("index", "0"))
-                            # The 'title' field will be constructed in _format_sessions_embed for episodes
-                            # For consistency, store a general title here too if needed elsewhere
-                            session_data["title"] = f"{series_title} - {media_title}"
+                        elif response.status == 429 or response.status >= 500:
+                            # Rate limit or server error: retry with backoff
+                            if attempt < max_retries - 1:
+                                wait_time = 2 ** attempt
+                                await asyncio.sleep(wait_time)
+                            else:
+                                response_text = await response.text()
+                                raise commands.UserFeedbackCheckFailure(
+                                    f"API failed after {max_retries} attempts (Status: {response.status}). Response: {response_text[:100]}"
+                                )
                         else:
-                            # For movies, photos, tracks, etc., media_title is the main title
-                            session_data["title"] = media_title
+                            # Other client/API errors
+                            response_text = await response.text()
+                            raise commands.UserFeedbackCheckFailure(
+                                f"Gemini API returned an error (Status: {response.status}): {response_text}"
+                            )
 
-                        sessions.append(session_data)
-                except ET.ParseError as e:
-                    log.error(
-                        f"Failed to parse Plex API XML response for guild {guild_id}: {e}\nResponse: {data[:500]}...")
-                    return []  # Return empty list on parse error
-
-                log.debug(f"Found {len(sessions)} active sessions for guild {guild_id}.")
-        except aiohttp.ClientError as e:
-            log.error(f"Failed to connect to Plex API for guild {guild_id}: {e}")
-        except asyncio.TimeoutError:
-            log.error(f"Plex API request timed out for guild {guild_id}.")
-        except Exception as e:
-            log.exception(f"An unexpected error occurred while fetching Plex sessions for guild {guild_id}.")
-        return sessions
-
-    async def _format_sessions_embed(self, sessions: list):
-        """
-        Formats a list of Plex sessions into a Discord embed.
-
-        Args:
-            sessions (list): A list of active Plex sessions.
-
-        Returns:
-            discord.Embed: An embed representing the current Plex activity.
-        """
-        embed = discord.Embed(
-            title="Plex Media Server Activity",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()  # Changed to local time
-        )
-        embed.set_footer(text="Last updated")
-
-        if not sessions:
-            embed.description = "No active sessions currently."
-        else:
-            # Set the main image of the embed using the image_url from the first session
-            # This is a larger image than a thumbnail and is displayed at the bottom
-            if sessions[0].get("image_url"):
-                embed.set_image(url=sessions[0]["image_url"])
-
-            # Clear description as we'll use fields
-            embed.description = None
-
-            for session in sessions:
-                user = session.get("user", "Unknown User")
-                media_type = session.get("type", "media")
-                current_time = session.get("current_time", "00:00")
-                total_duration = session.get("total_duration", "00:00")
-                device = session.get("device", "Unknown Device")
-
-                field_name = f"**{user}**"
-                field_value = ""
-
-                if media_type == "episode":
-                    series_title = session.get("series_title", "Unknown Series")
-                    episode_title = session.get("episode_title", "Unknown Episode")
-                    season_num = session.get("season_num")
-                    episode_num = session.get("episode_num")
-
-                    # Format season and episode numbers if available
-                    season_episode_format = ""
-                    if season_num is not None and episode_num is not None:
-                        season_episode_format = f"S{season_num:02}E{episode_num:02}"
-                        # Combine series title, SxxExx, and episode title
-                        content_title = f"{series_title} - {season_episode_format} {episode_title}"
+                except aiohttp.ClientError as e:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        await asyncio.sleep(wait_time)
                     else:
-                        # Fallback if season/episode numbers are missing
-                        content_title = f"{series_title} - {episode_title}"
+                        raise commands.UserFeedbackCheckFailure(f"Network error communicating with Gemini API: {e}")
 
-                    field_value = (
-                        f"Content: `{content_title} (Episode)`\n"
-                        f"Progress: `{current_time} / {total_duration}`\n"
-                        f"Device: `{device}`"
-                    )
-                else:
-                    # For movies, photos, tracks, etc.
-                    title = session.get("title", "Unknown Title")
-                    field_value = (
-                        f"Content: `{title} ({media_type.capitalize()})`\n"
-                        f"Progress: `{current_time} / {total_duration}`\n"
-                        f"Device: `{device}`"
-                    )
-                embed.add_field(name=field_name, value=field_value, inline=False)
+                except Exception as e:
+                    # Catch the custom ValueError/commands.UserFeedbackCheckFailure from inside the try block
+                    if isinstance(e, commands.UserFeedbackCheckFailure) or isinstance(e, ValueError):
+                        raise e
+                    # Otherwise, re-raise as a general failure
+                    raise commands.UserFeedbackCheckFailure(f"An unexpected error occurred during API call: {e}")
+        return None
 
-        return embed
-
-    @tasks.loop(seconds=60)  # Default to update every 60 seconds
-    async def plex_activity_loop(self):
+    async def _tts_audio_source(self, ctx: commands.Context, prompt: str) -> Optional[discord.FFmpegPCMAudio]:
         """
-        Background task to periodically fetch and update Plex activity.
+        Generates text via LLM, then synthesizes audio via TTS, and prepares an
+        FFmpegPCMAudio source for Discord.
         """
-        for guild_id in await self.config.all_guilds():
-            guild_settings = await self.config.guild_from_id(guild_id).all()
-            channel_id = guild_settings["activity_channel"]
-            message_id = guild_settings["activity_message_id"]
-            update_interval = guild_settings.get("update_interval", 60)
 
-            # Update loop interval if it has changed
-            if self.plex_activity_loop.seconds != update_interval:
-                self.plex_activity_loop.change_interval(seconds=update_interval)
+        # 1. LLM Call (Text Generation)
+        await ctx.send(f"🤖 Thinking about your request...")
+        llm_payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],  # Use grounding for better responses
+            "systemInstruction": {"parts": [{
+                                                "text": "You are a helpful, cheerful, and concise voice assistant for a Discord bot. Respond directly to the user's query."}]}
+        }
 
-            if not channel_id:
-                continue  # Skip if no channel is set for this guild
+        text_url = f"{API_BASE}/{TEXT_MODEL}:generateContent"
 
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                continue  # Skip if guild is not found (e.g., bot left the guild)
+        try:
+            llm_text = await self._make_api_call(text_url, llm_payload, is_audio_request=False)
+        except commands.UserFeedbackCheckFailure as e:
+            await ctx.send(f"LLM Error: {e}")
+            return None
 
-            channel = guild.get_channel(channel_id)
-            if not channel or not isinstance(channel, discord.TextChannel):
-                log.warning(
-                    f"Configured activity channel {channel_id} not found or not a text channel in guild {guild.name}.")
-                await self.config.guild(guild).activity_channel.set(None)  # Clear invalid channel
-                await self.config.guild(guild).activity_message_id.set(None)
-                continue
+        if not llm_text:
+            await ctx.send("The LLM did not generate a response.")
+            return None
 
-            sessions = await self._get_plex_sessions(guild_id)
-            embed = await self._format_sessions_embed(sessions)
+        # 2. TTS Call (Audio Generation)
+        await ctx.send(f"🗣️ Gemini says: *{llm_text}*")
 
-            try:
-                if message_id:
-                    # Try to edit the existing message
-                    try:
-                        message = await channel.fetch_message(message_id)
-                        await message.edit(embed=embed)
-                        log.debug(f"Updated Plex activity message in {channel.name} ({guild.name}).")
-                    except discord.NotFound:
-                        log.warning(f"Activity message {message_id} not found in {channel.name}. Sending a new one.")
-                        message = await channel.send(embed=embed)
-                        await self.config.guild(guild).activity_message_id.set(message.id)
-                    except discord.Forbidden:
-                        log.warning(f"Bot does not have permissions to edit message {message_id} in {channel.name}.")
-                        await self.config.guild(guild).activity_message_id.set(None)  # Clear message ID
-                        await channel.send(
-                            f"I don't have permissions to edit the activity message. Please check my permissions or use `{await self.bot.get_prefix(channel)}plex setchannel` again.")
-                else:
-                    # Send a new message if no message ID is stored
-                    message = await channel.send(embed=embed)
-                    await self.config.guild(ctx.guild).activity_message_id.set(message.id) # Corrected ctx to guild
-                    log.info(f"Sent new Plex activity message in {channel.name} ({guild.name}).")
-            except discord.Forbidden:
-                log.error(f"Bot does not have permissions to send messages in {channel.name} ({guild.name}).")
-                await self.config.guild(guild).activity_channel.set(None)  # Clear invalid channel
-                await self.config.guild(guild).activity_message_id.set(None)
-            except Exception as e:
-                log.exception(f"Error updating Plex activity message in {channel.name} ({guild.name}): {e}")
+        tts_payload = {
+            "contents": [{"parts": [{"text": llm_text}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}
+                }
+            }
+        }
+        tts_url = f"{API_BASE}/{TTS_MODEL}:generateContent"
 
-    @plex_activity_loop.before_loop
-    async def before_plex_activity_loop(self):
-        """Waits for the bot to be ready before starting the loop."""
-        await self.bot.wait_until_ready()
-        log.info("Plex activity loop is ready to start.")
+        try:
+            pcm_bytes = await self._make_api_call(tts_url, tts_payload, is_audio_request=True)
+        except commands.UserFeedbackCheckFailure as e:
+            await ctx.send(f"TTS Error: {e}")
+            return None
 
-    @commands.group(name="plex", invoke_without_command=True)
-    @commands.guild_only()
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex(self, ctx: commands.Context):
-        """
-        Manage Plex Media Server activity tracking.
-        """
-        await ctx.send_help(self.plex)
+        # 3. Prepare Audio Source
+        wav_io = _pcm_to_wav(pcm_bytes, TTS_SAMPLE_RATE)
 
-    @plex.command(name="setup")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_setup(self, ctx: commands.Context):
-        """
-        Set up your Plex Media Server URL and API token.
-
-        Your Plex URL should be the full address to your Plex server, e.g.,
-        `http://192.168.1.100:32400` or `https://app.plex.tv/desktop`.
-        Your Plex token can be found by inspecting network requests
-        when browsing your Plex server or through various online guides.
-        """
-        await ctx.send(
-            "Please enter your Plex Media Server URL (e.g., `http://192.168.1.100:32400`):"
+        # Discord requires an audio source. We use FFmpeg to read the in-memory WAV file.
+        # The '-f wav -i pipe:0' tells FFmpeg to read a WAV file from the standard input (pipe).
+        # The 'before_options' is often necessary for proper streaming from raw data.
+        audio_source = discord.FFmpegPCMAudio(
+            wav_io.read(),
+            pipe=True,
+            options=f'-f {TTS_MIME_TYPE.split(";")[0].split("/")[1]} -i pipe:0',
+            before_options="-nostdin -y"
         )
-        try:
-            plex_url_msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
-            plex_url = plex_url_msg.content.strip()
-            if not (plex_url.startswith("http://") or plex_url.startswith("https://")):
-                return await ctx.send("Invalid URL format. Please include `http://` or `https://`.")
-        except asyncio.TimeoutError:
-            return await ctx.send("Setup timed out. Please run the command again.")
+        return audio_source
 
-        await ctx.send("Please enter your Plex API Token:")
-        try:
-            plex_token_msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
-            plex_token = plex_token_msg.content.strip()
-        except asyncio.TimeoutError:
-            return await ctx.send("Setup timed out. Please run the command again.")
+    @commands.group(name="vset")
+    async def vset(self, ctx: commands.Context):
+        """Settings for the VoiceGemini cog."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
 
-        await self.config.guild(ctx.guild).plex_url.set(plex_url)
-        await self.config.guild(ctx.guild).plex_token.set(plex_token)
-        await ctx.send(f"Plex URL and Token have been set for this server.")
+    @vset.command(name="api_key")
+    @commands.is_owner()
+    async def vset_api_key(self, ctx: commands.Context, key: str):
+        """Sets the Gemini API key."""
+        await self.config.api_key.set(key)
+        await ctx.send("Gemini API key has been set successfully.")
 
-        # Test connection immediately
-        await ctx.send("Testing Plex connection...")
-        sessions = await self._get_plex_sessions(ctx.guild.id)
-        if sessions is not None and len(sessions) > 0:
-            await ctx.send(f"Plex connection successful! Found {len(sessions)} active sessions during test.")
-        elif sessions is not None and len(sessions) == 0:
-            await ctx.send("Plex connection successful! No active sessions found during test.")
+    @commands.command(name="vjoin")
+    async def vjoin(self, ctx: commands.Context):
+        """Connects the bot to your current voice channel."""
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            return await ctx.send("You must be in a voice channel to use this command.")
+
+        channel = ctx.author.voice.channel
+        guild_id = ctx.guild.id
+
+        if guild_id in self.voice_clients and self.voice_clients[guild_id].is_connected():
+            await self.voice_clients[guild_id].move_to(channel)
         else:
-            await ctx.send("Plex connection failed. Please double check your URL and token.")
+            try:
+                vc = await channel.connect()
+                self.voice_clients[guild_id] = vc
+            except asyncio.TimeoutError:
+                return await ctx.send("Connection to voice channel timed out.")
+            except discord.ClientException:
+                return await ctx.send("I am already in a voice channel.")
 
-    @plex.command(name="setchannel")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        await ctx.send(f"Connected to voice channel: **{channel.name}**")
+
+    @commands.command(name="vleave")
+    async def vleave(self, ctx: commands.Context):
+        """Disconnects the bot from the current voice channel."""
+        guild_id = ctx.guild.id
+        if guild_id in self.voice_clients and self.voice_clients[guild_id].is_connected():
+            await self.voice_clients[guild_id].disconnect()
+            del self.voice_clients[guild_id]
+            await ctx.send("Disconnected from voice channel.")
+        else:
+            await ctx.send("I am not currently in a voice channel.")
+
+    @commands.command(name="vtalk")
+    async def vtalk(self, ctx: commands.Context, *, prompt: str):
         """
-        Set the channel where Plex activity updates will be posted.
+        Asks Gemini a question and streams the audio response to the voice channel.
 
-        The bot will automatically update a single message in this channel
-        with the current Plex activity.
+        Usage: [p]vtalk What is the capital of France?
         """
-        await self.config.guild(ctx.guild).activity_channel.set(channel.id)
-        # Clear existing message ID so a new one is sent
-        await self.config.guild(ctx.guild).activity_message_id.set(None)
-        await ctx.send(f"Plex activity updates will now be posted in {channel.mention}.")
-        # Immediately trigger an update to create the initial message
-        await self.plex_activity_loop()  # Call the loop once to create the initial message
+        guild_id = ctx.guild.id
 
-    @plex.command(name="interval")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_interval(self, ctx: commands.Context, seconds: int):
-        """
-        Set the update interval for Plex activity in seconds.
+        # 1. Check Voice Status
+        if guild_id not in self.voice_clients or not self.voice_clients[guild_id].is_connected():
+            return await ctx.send(f"I am not in a voice channel. Use `[p]vjoin` first.")
 
-        Minimum interval is 10 seconds.
-        """
-        if seconds < 10:
-            return await ctx.send("The minimum update interval is 10 seconds.")
-        await self.config.guild(ctx.guild).update_interval.set(seconds)
-        self.plex_activity_loop.change_interval(seconds=seconds)
-        await ctx.send(f"Plex activity update interval set to {seconds} seconds.")
+        vc = self.voice_clients[guild_id]
 
-    @plex.command(name="status")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_status(self, ctx: commands.Context):
-        """
-        Show current Plex activity settings for this server.
-        """
-        settings = await self.config.guild(ctx.guild).all()
-        plex_url = settings["plex_url"] or "Not set"
-        activity_channel_id = settings["activity_channel"]
-        activity_message_id = settings["activity_message_id"]
-        update_interval = settings["update_interval"]
+        if vc.is_playing():
+            return await ctx.send("I'm currently speaking! Please wait your turn.")
 
-        channel_mention = self.bot.get_channel(activity_channel_id).mention if activity_channel_id else "Not set"
+        # 2. Get Audio Source (LLM -> TTS)
+        audio_source = await self._tts_audio_source(ctx, prompt)
 
-        status_msg = (
-            f"**Plex URL:** `{plex_url}`\n"
-            f"**Plex Token:** `{'Set' if settings['plex_token'] else 'Not set'}`\n"
-            f"**Activity Channel:** {channel_mention}\n"
-            f"**Activity Message ID:** `{activity_message_id or 'None'}`\n"
-            f"**Update Interval:** `{update_interval} seconds`"
-        )
-        await ctx.send(box(status_msg))
+        if not audio_source:
+            # Error message already sent by _tts_audio_source
+            return
 
-    @plex.command(name="clear")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_clear(self, ctx: commands.Context):
-        """
-        Clear all Plex activity settings for this server.
-        """
-        await self.config.guild(ctx.guild).clear()
-        await ctx.send("All Plex activity settings for this server have been cleared.")
-        # Stop the loop if no more guilds are configured
-        if not await self.config.all_guilds():
-            self.plex_activity_loop.cancel()
+        # 3. Play Audio
+        vc.play(audio_source, after=lambda e: print(f'Player error: {e}') if e else None)
 
+        # Wait for playback to finish
+        while vc.is_playing():
+            await asyncio.sleep(1)
 
-# Setup function for Redbot
-async def setup(bot):
-    """Adds the cog to the bot."""
-    await bot.add_cog(PlexActivity(bot))
+        await ctx.send("Finished speaking.")
+
+    def cog_unload(self):
+        """Ensures all voice clients are disconnected when the cog is unloaded."""
+        for vc in self.voice_clients.values():
+            if vc.is_connected():
+                self.bot.loop.create_task(vc.disconnect())
