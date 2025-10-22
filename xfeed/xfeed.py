@@ -220,7 +220,7 @@ class XFeed(commands.Cog):
                         break
 
         # Footer: Only show the bot credit.
-        embed.set_footer(text="Posted by XFeed")
+        embed.set_footer(text="XFeed by Malvinarum")
 
         return embed
 
