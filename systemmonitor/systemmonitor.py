@@ -83,6 +83,13 @@ class SystemMonitor(commands.Cog):
             for part in psutil.disk_partitions(all=True):
                 if 'cdrom' in part.opts or part.fstype == '':
                     continue  # Skip optical drives and empty fstypes
+                    # --- ADD THIS CHECK ---
+                    # Exclude Network File Systems (NFS) to prevent double counting
+                    # if the mounted device is already part of another server's count.
+                    if part.fstype in ('nfs', 'nfs4', 'cifs', 'fuse.sshfs'):
+                        log.debug(f"Skipping network filesystem {part.mountpoint} ({part.fstype}).")
+                        continue
+                    # --- END ADDED CHECK ---
                 try:
                     usage = psutil.disk_usage(part.mountpoint)
                     total_total_disk += usage.total
