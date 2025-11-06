@@ -80,7 +80,7 @@ class SystemMonitor(commands.Cog):
         total_disk_gb = 0
 
         if show_full_disk:
-            for part in psutil.disk_partitions(all=False):
+            for part in psutil.disk_partitions(all=True):
                 if 'cdrom' in part.opts or part.fstype == '':
                     continue  # Skip optical drives and empty fstypes
                 try:
