@@ -80,16 +80,24 @@ class SystemMonitor(commands.Cog):
         total_disk_gb = 0
 
         if show_full_disk:
+            # Setting all=True is necessary to include the NFS share, but requires filtering
             for part in psutil.disk_partitions(all=True):
-                if 'cdrom' in part.opts or part.fstype == '':
-                    continue  # Skip optical drives and empty fstypes
-                    # --- ADD THIS CHECK ---
-                    # Exclude Network File Systems (NFS) to prevent double counting
-                    # if the mounted device is already part of another server's count.
-                    if part.fstype in ('nfs', 'nfs4', 'cifs', 'fuse.sshfs'):
-                        log.debug(f"Skipping network filesystem {part.mountpoint} ({part.fstype}).")
-                        continue
-                    # --- END ADDED CHECK ---
+                # 1. Skip obvious non-storage/virtual/redundant partitions
+                if part.fstype in ('', 'cdrom', 'tmpfs', 'devtmpfs', 'overlay', 'aufs', 'squashfs'):
+                    continue
+
+                    # Define our two target mount points: the local root and the NFS remote share
+                is_root = part.mountpoint == '/'
+                # Check for /mnt/storage and confirm its a network mount type (nfs/nfs4)
+                is_nfs_share = part.mountpoint == '/mnt/storage' and part.fstype in ('nfs', 'nfs4')
+
+                # 2. FIX: Only aggregate usage for the root partition and the specific NFS mount
+                # This prevents double counting of sub-partitions on the local 2TB NVMe
+                if not is_root and not is_nfs_share:
+                    log.debug(f"Skipping non-root/non-NFS mountpoint: {part.mountpoint}")
+                    continue
+
+                # 3. Aggregate the usage for the valid partitions
                 try:
                     usage = psutil.disk_usage(part.mountpoint)
                     total_total_disk += usage.total
@@ -99,6 +107,7 @@ class SystemMonitor(commands.Cog):
                     log.debug(f"Could not read disk usage for {part.mountpoint}: {e}")
         else:
             try:
+                # Original logic: just read the root partition ('/')
                 disk = psutil.disk_usage('/')
                 total_total_disk = disk.total
                 used_disk_gb = disk.used / (1024 ** 3)
@@ -220,7 +229,8 @@ class SystemMonitor(commands.Cog):
         # Bandwidth (Upload)
         upload_percentage = (upload_speed_mbps / total_bandwidth_mbps) * 100 if total_bandwidth_mbps > 0 else 0
         upload_bar = self._get_bar_chart(upload_percentage)
-        embed.add_field(name=":arrow_double_up: Bandwidth (UL)", value=f"{upload_speed_mbps:.2f} of 1024 Mbps\n`{upload_bar}`",
+        embed.add_field(name=":arrow_double_up: Bandwidth (UL)",
+                        value=f"{upload_speed_mbps:.2f} of 1024 Mbps\n`{upload_bar}`",
                         inline=False)
 
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
@@ -509,7 +519,7 @@ class SystemMonitor(commands.Cog):
                 if message:
                     await message.edit(embed=embed)
                     await ctx.send("System usage message updated manually.")
-                    log.debug(f"Manually updated message {message_id} in {channel.name} for guild {guild.name}.")
+                    log.debug(f"Manually updated message {message_id} in {channel.name} for guild {ctx.guild.name}.")
                 else:
                     new_message = await channel.send(embed=embed)
                     try:
@@ -527,4 +537,3 @@ class SystemMonitor(commands.Cog):
             except Exception as e:
                 log.error(f"Error during manual SystemMonitor update for guild {ctx.guild.name}: {e}", exc_info=True)
                 await ctx.send(f"An unexpected error occurred during manual update: {e}")
-
