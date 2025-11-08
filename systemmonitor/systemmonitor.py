@@ -6,6 +6,7 @@ from redbot.core import commands, app_commands, Config
 import humanize  # Import the humanize library
 from redbot.core.bot import Red  # Ensure this import is present and correct
 import logging
+from typing import Dict, Any, Tuple
 
 log = logging.getLogger("red.systemmonitor")
 
@@ -16,13 +17,12 @@ class SystemMonitor(commands.Cog):
     """
 
     # Default configuration for each guild
-    # This will store channel_id, message_id, enabled status, and disk display preference
-    # It also stores the last network I/O counters for bandwidth calculation over time.
     DEFAULT_GUILD_SETTINGS = {
         "channel_id": None,
         "message_id": None,
         "enabled": False,
-        "show_full_disk": True,  # Changed default to True to show total storage
+        "show_full_disk": True,  # Aggregate disk usage (legacy)
+        "split_disk_stats": False,  # NEW: Show separate fields for root and nfs mount
         "last_net_io_sent": 0,
         "last_net_io_recv": 0,
         "last_net_time": 0.0  # Unix timestamp
@@ -30,93 +30,100 @@ class SystemMonitor(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # Initialize the Config object for guild-specific settings
-        # Changed identifier to a string for better uniqueness and readability
         self.config = Config.get_conf(self, identifier="SystemMonitorCog", force_registration=True)
         self.config.register_guild(**self.DEFAULT_GUILD_SETTINGS)
 
-        # Initialize the background task to None
         self._update_task = None
-        # Store a lock to prevent multiple simultaneous updates for the same guild
         self._update_locks = {}
 
     async def cog_load(self):
-        """
-        Starts the background task when the cog is loaded.
-        """
         log.info("SystemMonitor cog loaded. Starting update loop.")
         self._update_task = self.bot.loop.create_task(self._update_loop())
 
     async def cog_unload(self):
-        """
-        Cancels the background task when the cog is unloaded.
-        """
         log.info("SystemMonitor cog unloaded. Cancelling update loop.")
         if self._update_task:
             self._update_task.cancel()
             try:
                 await self._update_task
             except asyncio.CancelledError:
-                pass  # Task was cancelled as expected
+                pass
 
-    async def _get_system_stats(self, show_full_disk: bool = False, guild_id: int = None):
+    async def _get_system_stats(self, settings: Dict[str, Any], guild_id: int = None) -> Tuple:
         """
         Gathers system usage statistics.
-        Returns a tuple: (cpu_usage, used_memory_gb, total_memory_gb,
-                          used_disk_gb, total_disk_gb, download_speed_mbps,
-                          upload_speed_mbps, uptime_string, last_updated_human_format)
+        Returns: (cpu_usage, used_memory_gb, total_memory_gb,
+                  total_disk_stats,  # Dictionary containing aggregated and split disk usage
+                  download_speed_mbps, upload_speed_mbps,
+                  uptime_string, last_updated_human_format)
         """
-        # CPU Usage
-        cpu_usage = psutil.cpu_percent(interval=0.5)  # Measure over 0.5 seconds
+        cpu_usage = psutil.cpu_percent(interval=0.5)
 
-        # Memory Usage
         memory = psutil.virtual_memory()
         total_memory_gb = memory.total / (1024 ** 3)
         used_memory_gb = memory.used / (1024 ** 3)
 
-        # Disk Usage
-        total_total_disk = 0  # Used to check if any disk could be read
-        used_disk_gb = 0
-        total_disk_gb = 0
+        # --- DISK USAGE AGGREGATION ---
 
-        if show_full_disk:
-            # Setting all=True is necessary to include the NFS share, but requires filtering
+        # Initialize storage variables
+        total_disk_stats = {
+            'used_disk_gb': 0.0,
+            'total_disk_gb': 0.0,
+            'root_used_gb': 0.0,
+            'root_total_gb': 0.0,
+            'nfs_used_gb': 0.0,
+            'nfs_total_gb': 0.0,
+            'total_total_disk_bytes': 0  # Used for sanity check
+        }
+
+        show_full_disk = settings.get("show_full_disk", True)
+
+        # Define partitions we want to track separately for the split view
+        TARGET_MOUNTS = {
+            '/': 'root',
+            '/mnt/storage': 'nfs'
+        }
+
+        if show_full_disk or settings.get("split_disk_stats", False):
+            # Use all=True to ensure network mounts (like NFS) are included
             for part in psutil.disk_partitions(all=True):
-                # 1. Skip obvious non-storage/virtual/redundant partitions
-                if part.fstype in ('', 'cdrom', 'tmpfs', 'devtmpfs', 'overlay', 'aufs', 'squashfs'):
+
+                # Filter 1: Exclude common virtual/non-storage mounts
+                if part.fstype in ('', 'cdrom', 'tmpfs', 'devtmpfs', 'overlay', 'aufs',
+                                   'squashfs') or part.mountpoint.startswith('/snap'):
                     continue
 
-                    # Define our two target mount points: the local root and the NFS remote share
-                is_root = part.mountpoint == '/'
-                # Check for /mnt/storage and confirm its a network mount type (nfs/nfs4)
-                is_nfs_share = part.mountpoint == '/mnt/storage' and part.fstype in ('nfs', 'nfs4')
-
-                # 2. FIX: Only aggregate usage for the root partition and the specific NFS mount
-                # This prevents double counting of sub-partitions on the local 2TB NVMe
-                if not is_root and not is_nfs_share:
-                    log.debug(f"Skipping non-root/non-NFS mountpoint: {part.mountpoint}")
-                    continue
-
-                # 3. Aggregate the usage for the valid partitions
                 try:
                     usage = psutil.disk_usage(part.mountpoint)
-                    total_total_disk += usage.total
-                    used_disk_gb += usage.used / (1024 ** 3)
-                    total_disk_gb += usage.total / (1024 ** 3)
+
+                    # 2. Check if this partition is one of our two targets (Root or NFS)
+                    is_target = part.mountpoint in TARGET_MOUNTS
+
+                    # 3. Apply the filtering logic only if we are aggregating the sum (show_full_disk)
+                    # When aggregating, we only want the Root and the NFS mount, avoiding everything else.
+                    if show_full_disk and not is_target:
+                        continue
+
+                        # 4. If it passes filters, aggregate to the TOTAL SUM
+                    total_disk_stats['total_total_disk_bytes'] += usage.total
+                    total_disk_stats['used_disk_gb'] += usage.used / (1024 ** 3)
+                    total_disk_stats['total_disk_gb'] += usage.total / (1024 ** 3)
+
+                    # 5. Track split stats if it's a target partition
+                    if is_target:
+                        mount_type = TARGET_MOUNTS[part.mountpoint]
+                        if mount_type == 'root':
+                            total_disk_stats['root_used_gb'] = usage.used / (1024 ** 3)
+                            total_disk_stats['root_total_gb'] = usage.total / (1024 ** 3)
+                        elif mount_type == 'nfs':
+                            total_disk_stats['nfs_used_gb'] = usage.used / (1024 ** 3)
+                            total_disk_stats['nfs_total_gb'] = usage.total / (1024 ** 3)
+
                 except Exception as e:
                     log.debug(f"Could not read disk usage for {part.mountpoint}: {e}")
-        else:
-            try:
-                # Original logic: just read the root partition ('/')
-                disk = psutil.disk_usage('/')
-                total_total_disk = disk.total
-                used_disk_gb = disk.used / (1024 ** 3)
-                total_disk_gb = disk.total / (1024 ** 3)
-            except Exception as e:
-                log.debug(f"Could not read disk usage for root partition: {e}")
-                total_total_disk = 0  # Indicate no disk info if root fails
+        # --- END DISK USAGE AGGREGATION ---
 
-        # Bandwidth Usage - calculated over the interval between updates
+        # Bandwidth Usage - calculated over the interval between updates (no changes here)
         download_speed_mbps = 0.0
         upload_speed_mbps = 0.0
 
@@ -141,7 +148,6 @@ class SystemMonitor(commands.Cog):
                     upload_speed_mbps = (bytes_sent_diff * 8) / (1024 ** 2 * time_diff_seconds)
 
             # Update config with current network stats for the next iteration
-            # Changed to individual set() calls to prevent potential overwrites
             try:
                 await self.config.guild(discord.Object(id=guild_id)).last_net_io_sent.set(current_net_io.bytes_sent)
                 await self.config.guild(discord.Object(id=guild_id)).last_net_io_recv.set(current_net_io.bytes_recv)
@@ -150,9 +156,7 @@ class SystemMonitor(commands.Cog):
             except Exception as e:
                 log.error(f"Failed to save network stats to config for guild {guild_id}: {e}", exc_info=True)
         else:
-            # If no guild_id (e.g., manual command), calculate over a short snapshot
-            # This is less accurate for "speed" but provides a value.
-            # For a manual command, we don't store global state for bandwidth.
+            # Manual command bandwidth snapshot
             initial_net_io = psutil.net_io_counters()
             await asyncio.sleep(0.5)
             final_net_io = psutil.net_io_counters()
@@ -170,11 +174,10 @@ class SystemMonitor(commands.Cog):
 
         # Last Updated Time
         last_updated = datetime.now()
-        # Format the datetime object directly into a human-readable string
-        last_updated_human_format = last_updated.strftime("%Y-%m-%d %H:%M:%S %Z")  # Example: 2023-10-27 15:30:00 UTC
+        last_updated_human_format = last_updated.strftime("%Y-%m-%d %H:%M:%S %Z")
 
         return (cpu_usage, used_memory_gb, total_memory_gb,
-                used_disk_gb, total_disk_gb, total_total_disk,  # Pass total_total_disk for the check
+                total_disk_stats,
                 download_speed_mbps, upload_speed_mbps,
                 uptime_string, last_updated_human_format)
 
@@ -182,18 +185,17 @@ class SystemMonitor(commands.Cog):
         """
         Generates a text-based bar chart using Unicode block characters.
         """
-        # Ensure percentage is clamped between 0 and 100
         percentage = max(0, min(100, percentage))
         filled_blocks = int(length * (percentage / 100))
         empty_blocks = length - filled_blocks
         return "█" * filled_blocks + "░" * empty_blocks
 
-    async def _build_embed(self, stats: tuple, show_full_disk: bool):
+    async def _build_embed(self, stats: Tuple, settings: Dict[str, Any]):
         """
         Builds the Discord embed from system statistics.
         """
         (cpu_usage, used_memory_gb, total_memory_gb,
-         used_disk_gb, total_disk_gb, total_total_disk,
+         total_disk_stats,
          download_speed_mbps, upload_speed_mbps,
          uptime_string, last_updated_human_format) = stats
 
@@ -209,15 +211,41 @@ class SystemMonitor(commands.Cog):
         embed.add_field(name=":bar_chart: Memory",
                         value=f"{used_memory_gb:.2f} of {total_memory_gb:.2f} GB\n`{memory_bar}`", inline=False)
 
-        # Storage
-        if total_total_disk > 0:
-            # The label will now always be "Storage (Total)" regardless of show_full_disk setting
-            # The actual data (root vs. aggregated) is still controlled by show_full_disk in _get_system_stats
-            disk_name = "Storage (Total)"
-            disk_percentage = (used_disk_gb / total_disk_gb) * 100 if total_disk_gb > 0 else 0
-            disk_bar = self._get_bar_chart(disk_percentage)
-            embed.add_field(name=f":file_folder: {disk_name}",
-                            value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB\n`{disk_bar}`", inline=False)
+        # --- Storage Display Logic ---
+        used_disk_gb = total_disk_stats['used_disk_gb']
+        total_disk_gb = total_disk_stats['total_disk_gb']
+
+        if total_disk_gb > 0:
+            if settings.get("split_disk_stats", False):
+                # 1. Show Local NVMe (Root)
+                root_used = total_disk_stats['root_used_gb']
+                root_total = total_disk_stats['root_total_gb']
+                root_percent = (root_used / root_total) * 100 if root_total > 0 else 0
+                root_bar = self._get_bar_chart(root_percent)
+
+                embed.add_field(name=":zap: Local NVMe (Root)",
+                                value=f"{root_used:.2f} of {root_total:.2f} GB\n`{root_bar}`", inline=False)
+
+                # 2. Show Remote HDD (NFS)
+                nfs_used = total_disk_stats['nfs_used_gb']
+                nfs_total = total_disk_stats['nfs_total_gb']
+                nfs_percent = (nfs_used / nfs_total) * 100 if nfs_total > 0 else 0
+                nfs_bar = self._get_bar_chart(nfs_percent)
+
+                embed.add_field(name=":floppy_disk: Remote HDD (NFS)",
+                                value=f"{nfs_used:.2f} of {nfs_total:.2f} GB\n`{nfs_bar}`", inline=False)
+
+                # 3. Show Combined Total (as a simple field, no bar needed)
+                embed.add_field(name=":file_folder: Combined Total",
+                                value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB", inline=False)
+
+            else:
+                # Legacy / Default: Show Combined Total only
+                disk_percentage = (used_disk_gb / total_disk_gb) * 100 if total_disk_gb > 0 else 0
+                disk_bar = self._get_bar_chart(disk_percentage)
+                embed.add_field(name=":file_folder: Storage (Total)",
+                                value=f"{used_disk_gb:.2f} of {total_disk_gb:.2f} GB\n`{disk_bar}`", inline=False)
+        # --- End Storage Display Logic ---
 
         # Bandwidth (Download)
         total_bandwidth_mbps = 1024  # Assuming 1024 Mbps as total for display
@@ -234,29 +262,24 @@ class SystemMonitor(commands.Cog):
                         inline=False)
 
         embed.add_field(name=":stopwatch: Uptime", value=uptime_string, inline=False)
-        embed.set_footer(text=f"Last Updated: {last_updated_human_format}")  # Use the human-formatted string
+        embed.set_footer(text=f"Last Updated: {last_updated_human_format}")
         return embed
 
     async def _update_loop(self):
-        """
-        The main background task that periodically updates system usage messages.
-        """
         await self.bot.wait_until_ready()
         while True:
             try:
-                # Get all guild settings
                 all_guild_settings = await self.config.all_guilds()
 
                 for guild_id, settings in all_guild_settings.items():
                     if not settings["enabled"]:
-                        continue  # Skip if auto-update is not enabled for this guild
+                        continue
 
                     guild = self.bot.get_guild(guild_id)
                     if not guild:
                         log.warning(f"Guild {guild_id} not found. Disabling SystemMonitor for it.")
                         try:
                             await self.config.guild(discord.Object(id=guild_id)).enabled.set(False)
-                            log.debug(f"Disabled SystemMonitor for guild {guild_id} due to guild not found.")
                         except Exception as e:
                             log.error(f"Failed to save config for guild {guild_id} after guild not found: {e}",
                                       exc_info=True)
@@ -264,7 +287,6 @@ class SystemMonitor(commands.Cog):
 
                     channel_id = settings["channel_id"]
                     message_id = settings["message_id"]
-                    show_full_disk = settings["show_full_disk"]
 
                     if not channel_id:
                         log.warning(f"No channel set for guild {guild.name} ({guild_id}). Skipping update.")
@@ -276,20 +298,18 @@ class SystemMonitor(commands.Cog):
                             f"Channel {channel_id} not found for guild {guild.name} ({guild_id}). Disabling SystemMonitor for it.")
                         try:
                             await self.config.guild(guild).enabled.set(False)
-                            log.debug(f"Disabled SystemMonitor for guild {guild_id} due to channel not found.")
                         except Exception as e:
                             log.error(f"Failed to save config for guild {guild_id} after channel not found: {e}",
                                       exc_info=True)
                         continue
 
-                    # Acquire a lock for this guild to prevent race conditions if manual update runs
                     if guild_id not in self._update_locks:
                         self._update_locks[guild_id] = asyncio.Lock()
 
                     async with self._update_locks[guild_id]:
                         try:
-                            stats = await self._get_system_stats(show_full_disk, guild_id)
-                            embed = await self._build_embed(stats, show_full_disk)
+                            stats = await self._get_system_stats(settings, guild_id)
+                            embed = await self._build_embed(stats, settings)
 
                             message = None
                             if message_id:
@@ -298,11 +318,9 @@ class SystemMonitor(commands.Cog):
                                 except discord.NotFound:
                                     log.warning(
                                         f"Message {message_id} not found in channel {channel.name} ({channel_id}) for guild {guild.name}. Sending new message.")
-                                    message = None  # Message was deleted, need to send a new one
+                                    message = None
                                     try:
-                                        # Clear message_id in config so a new one is sent next time
                                         await self.config.guild(guild).message_id.set(None)
-                                        log.debug(f"Cleared message_id in config for guild {guild_id}.")
                                     except Exception as e:
                                         log.error(f"Failed to clear message_id in config for guild {guild_id}: {e}",
                                                   exc_info=True)
@@ -311,8 +329,6 @@ class SystemMonitor(commands.Cog):
                                         f"Bot lacks permissions to fetch message in {channel.name} ({channel_id}) for guild {guild.name}. Disabling.")
                                     try:
                                         await self.config.guild(guild).enabled.set(False)
-                                        log.debug(
-                                            f"Disabled SystemMonitor for guild {guild_id} due to fetch permissions.")
                                     except Exception as e:
                                         log.error(
                                             f"Failed to save config for guild {guild_id} after fetch permissions error: {e}",
@@ -323,8 +339,6 @@ class SystemMonitor(commands.Cog):
                                         f"Error fetching message in {channel.name} ({channel_id}) for guild {guild.name}: {e}. Disabling.")
                                     try:
                                         await self.config.guild(guild).enabled.set(False)
-                                        log.debug(
-                                            f"Disabled SystemMonitor for guild {guild_id} due to general fetch error.")
                                     except Exception as e:
                                         log.error(
                                             f"Failed to save config for guild {guild_id} after general fetch error: {e}",
@@ -335,7 +349,6 @@ class SystemMonitor(commands.Cog):
                                 await message.edit(embed=embed)
                                 log.debug(f"Updated message {message_id} in {channel.name} for guild {guild.name}.")
                             else:
-                                # Send a new message and store its ID
                                 new_message = await channel.send(embed=embed)
                                 try:
                                     await self.config.guild(guild).message_id.set(new_message.id)
@@ -350,7 +363,6 @@ class SystemMonitor(commands.Cog):
                                 f"Bot lacks permissions to send/edit messages in {channel.name} ({channel_id}) for guild {guild.name}. Disabling SystemMonitor for it.")
                             try:
                                 await self.config.guild(guild).enabled.set(False)
-                                log.debug(f"Disabled SystemMonitor for guild {guild_id} due to send/edit permissions.")
                             except Exception as e:
                                 log.error(
                                     f"Failed to save config for guild {guild_id} after send/edit permissions error: {e}",
@@ -358,15 +370,14 @@ class SystemMonitor(commands.Cog):
                         except Exception as e:
                             log.error(f"Error during SystemMonitor update for guild {guild.name} ({guild_id}): {e}",
                                       exc_info=True)
-                            # Do not disable on general errors, just log and continue
 
             except asyncio.CancelledError:
                 log.info("SystemMonitor update loop cancelled.")
-                break  # Exit the loop if cancelled
+                break
             except Exception as e:
                 log.critical(f"Unhandled error in SystemMonitor update loop: {e}", exc_info=True)
 
-            await asyncio.sleep(60)  # Wait for 60 seconds before the next update
+            await asyncio.sleep(60)
 
     @commands.group(name="systemmonitor", aliases=["sysmon"])
     @commands.guild_only()
@@ -389,7 +400,6 @@ class SystemMonitor(commands.Cog):
         """
         try:
             await self.config.guild(ctx.guild).channel_id.set(channel.id)
-            # Reset message_id when channel changes to ensure a new message is sent
             await self.config.guild(ctx.guild).message_id.set(None)
             await ctx.send(f"System usage message will now be posted and updated in {channel.mention}.")
             log.info(f"SystemMonitor channel set to {channel.id} for guild {ctx.guild.name}.")
@@ -410,9 +420,7 @@ class SystemMonitor(commands.Cog):
             await self.config.guild(ctx.guild).enabled.set(new_status)
 
             if new_status:
-                # When enabling, reset network stats to get accurate bandwidth from now on
                 current_net_io = psutil.net_io_counters()
-                # Changed to individual set() calls to prevent potential overwrites
                 await self.config.guild(ctx.guild).last_net_io_sent.set(current_net_io.bytes_sent)
                 await self.config.guild(ctx.guild).last_net_io_recv.set(current_net_io.bytes_recv)
                 await self.config.guild(ctx.guild).last_net_time.set(datetime.now().timestamp())
@@ -426,10 +434,27 @@ class SystemMonitor(commands.Cog):
             log.error(f"Failed to toggle enabled status in config for guild {ctx.guild.id}: {e}", exc_info=True)
             await ctx.send(f"An error occurred while toggling auto-updates: {e}")
 
-    @systemmonitor.command(name="togglefulldisk")
+    @systemmonitor.command(name="togglesplitdisk")
+    async def sysmon_toggle_split_disk(self, ctx: commands.Context):
+        """
+        Toggles whether to display disk usage as a single aggregated total,
+        or split into Local NVMe (Root) and Remote HDD (NFS) fields.
+        """
+        current_setting = await self.config.guild(ctx.guild).split_disk_stats()
+        new_setting = not current_setting
+        try:
+            await self.config.guild(ctx.guild).split_disk_stats.set(new_setting)
+            status_text = "split view (NVMe, NFS, Total)" if new_setting else "single aggregated total"
+            await ctx.send(f"System Monitor storage display set to **{status_text}**.")
+            log.info(f"SystemMonitor split disk display toggled to {new_setting} for guild {ctx.guild.name}.")
+        except Exception as e:
+            log.error(f"Failed to toggle split disk setting in config for guild {ctx.guild.id}: {e}", exc_info=True)
+            await ctx.send(f"An error occurred while toggling split disk display: {e}")
+
+    @systemmonitor.command(name="togglefulldisk", hidden=True)
     async def sysmon_toggle_full_disk(self, ctx: commands.Context):
         """
-        Toggles whether to show full disk stats or just the root partition.
+        Toggles whether to show full disk stats or just the root partition. (Deprecated, use togglesplitdisk)
         """
         current_setting = await self.config.guild(ctx.guild).show_full_disk()
         new_setting = not current_setting
@@ -452,6 +477,7 @@ class SystemMonitor(commands.Cog):
         message_id = settings["message_id"]
         enabled = settings["enabled"]
         show_full_disk = settings["show_full_disk"]
+        split_disk_stats = settings["split_disk_stats"]
 
         channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
         message_link = f"https://discord.com/channels/{ctx.guild.id}/{channel_id}/{message_id}" if channel_id and message_id else "Not set"
@@ -461,7 +487,8 @@ class SystemMonitor(commands.Cog):
         embed.add_field(name="Update Channel", value=channel_mention, inline=False)
         embed.add_field(name="Message ID", value=str(message_id) if message_id else "Not set", inline=False)
         embed.add_field(name="Message Link", value=message_link, inline=False)
-        embed.add_field(name="Show Full Disk", value=str(show_full_disk), inline=False)
+        embed.add_field(name="Show Full Disk (Legacy)", value=str(show_full_disk), inline=False)
+        embed.add_field(name="Split Disk Stats", value=str(split_disk_stats), inline=False)
 
         await ctx.send(embed=embed)
 
@@ -474,8 +501,6 @@ class SystemMonitor(commands.Cog):
         settings = await self.config.guild(ctx.guild).all()
         channel_id = settings["channel_id"]
         message_id = settings["message_id"]
-        show_full_disk = settings["show_full_disk"]
-        # enabled = settings["enabled"] # Not directly used for manual update logic
 
         if not channel_id:
             return await ctx.send("Please set a channel first using `[p]systemmonitor setchannel <channel>`.")
@@ -485,16 +510,13 @@ class SystemMonitor(commands.Cog):
             return await ctx.send(
                 f"The configured channel (<#{channel_id}>) was not found. Please set a valid channel.")
 
-        # Acquire a lock for this guild to prevent race conditions with the background task
         if guild_id not in self._update_locks:
             self._update_locks[guild_id] = asyncio.Lock()
 
         async with self._update_locks[guild_id]:
             try:
-                # For manual update, we use a snapshot for bandwidth as it's not part of the continuous loop
-                stats = await self._get_system_stats(show_full_disk,
-                                                     None)  # Pass None for guild_id to use snapshot bandwidth
-                embed = await self._build_embed(stats, show_full_disk)
+                stats = await self._get_system_stats(settings, None)
+                embed = await self._build_embed(stats, settings)
 
                 message = None
                 if message_id:
@@ -505,7 +527,6 @@ class SystemMonitor(commands.Cog):
                         message = None
                         try:
                             await self.config.guild(ctx.guild).message_id.set(None)
-                            log.debug(f"Cleared message_id in config for guild {guild_id} during manual update.")
                         except Exception as e:
                             log.error(
                                 f"Failed to clear message_id in config for guild {guild_id} during manual update: {e}",
