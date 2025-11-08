@@ -76,7 +76,8 @@ class SystemMonitor(commands.Cog):
             'total_total_disk_bytes': 0  # Used for sanity check
         }
 
-        show_full_disk = settings.get("show_full_disk", True)
+        # Define filesystems that represent actual storage
+        VALID_FSTYPES = ('ext4', 'ext3', 'xfs', 'nfs', 'nfs4')
 
         # Define partitions we want to track separately for the split view
         TARGET_MOUNTS = {
@@ -84,43 +85,43 @@ class SystemMonitor(commands.Cog):
             '/mnt/storage': 'nfs'
         }
 
-        if show_full_disk or settings.get("split_disk_stats", False):
-            # Use all=True to ensure network mounts (like NFS) are included
+        # Set a flag to force the split logic to run if the setting is true
+        force_split = settings.get("split_disk_stats", False)
+
+        # The aggregation logic is now purely based on the TARGET_MOUNTS
+        if settings.get("show_full_disk", True) or force_split:
             for part in psutil.disk_partitions(all=True):
 
-                # Filter 1: Exclude common virtual/non-storage mounts
-                if part.fstype in ('', 'cdrom', 'tmpfs', 'devtmpfs', 'overlay', 'aufs',
-                                   'squashfs') or part.mountpoint.startswith('/snap'):
+                # 1. Skip non-storage filesystems
+                if part.fstype not in VALID_FSTYPES:
+                    continue
+
+                # 2. Skip any mount points that are NOT a target
+                if part.mountpoint not in TARGET_MOUNTS:
                     continue
 
                 try:
                     usage = psutil.disk_usage(part.mountpoint)
 
-                    # 2. Check if this partition is one of our two targets (Root or NFS)
-                    is_target = part.mountpoint in TARGET_MOUNTS
+                    # 3. Track split stats (if mountpoint matches a target)
+                    mount_type = TARGET_MOUNTS[part.mountpoint]
 
-                    # 3. Apply the filtering logic only if we are aggregating the sum (show_full_disk)
-                    # When aggregating, we only want the Root and the NFS mount, avoiding everything else.
-                    if show_full_disk and not is_target:
-                        continue
-
-                        # 4. If it passes filters, aggregate to the TOTAL SUM
-                    total_disk_stats['total_total_disk_bytes'] += usage.total
-                    total_disk_stats['used_disk_gb'] += usage.used / (1024 ** 3)
-                    total_disk_stats['total_disk_gb'] += usage.total / (1024 ** 3)
-
-                    # 5. Track split stats if it's a target partition
-                    if is_target:
-                        mount_type = TARGET_MOUNTS[part.mountpoint]
-                        if mount_type == 'root':
-                            total_disk_stats['root_used_gb'] = usage.used / (1024 ** 3)
-                            total_disk_stats['root_total_gb'] = usage.total / (1024 ** 3)
-                        elif mount_type == 'nfs':
-                            total_disk_stats['nfs_used_gb'] = usage.used / (1024 ** 3)
-                            total_disk_stats['nfs_total_gb'] = usage.total / (1024 ** 3)
+                    # Store the individual drive stats
+                    if mount_type == 'root':
+                        total_disk_stats['root_used_gb'] = usage.used / (1024 ** 3)
+                        total_disk_stats['root_total_gb'] = usage.total / (1024 ** 3)
+                    elif mount_type == 'nfs':
+                        total_disk_stats['nfs_used_gb'] = usage.used / (1024 ** 3)
+                        total_disk_stats['nfs_total_gb'] = usage.total / (1024 ** 3)
 
                 except Exception as e:
                     log.debug(f"Could not read disk usage for {part.mountpoint}: {e}")
+
+        # 4. Calculate Final Aggregated Total from the successfully read components
+        # This solves the double-counting issue by ONLY summing the root and nfs components.
+        total_disk_stats['used_disk_gb'] = total_disk_stats['root_used_gb'] + total_disk_stats['nfs_used_gb']
+        total_disk_stats['total_disk_gb'] = total_disk_stats['root_total_gb'] + total_disk_stats['nfs_total_gb']
+
         # --- END DISK USAGE AGGREGATION ---
 
         # Bandwidth Usage - calculated over the interval between updates (no changes here)
