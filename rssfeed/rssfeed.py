@@ -1,6 +1,6 @@
 import discord
 from redbot.core import Config, commands, app_commands
-from redbot.core.utils.chat_formatting import pagify, box
+from redbot.core.utils.chat_formatting import pagify, box, humanize_list
 from discord.ext import tasks
 import feedparser
 import time
@@ -97,8 +97,8 @@ class RSSFeed(commands.Cog):
         summary = self._strip_html(raw_summary)
 
         # Fix "Read more" text not being a link (Artifact of stripping <a> tags)
-        # Matches "Read more" at the end of string, optionally with punctuation
-        summary = re.sub(r"(?i)Read\s+more\W*$", f"[Read more]({link})", summary)
+        # Matches "Read more" at the end of string, matching dots, arrows, or whitespace
+        summary = re.sub(r"(?i)Read\s+more.*$", f"[Read more]({link})", summary)
 
         # Truncate summary to avoid 4096 limit, leave room for "..."
         # We use 2000 to be safe and consistent
@@ -157,47 +157,50 @@ class RSSFeed(commands.Cog):
         if not feed or not feed.entries:
             return "NO_ENTRIES"
 
-        latest_entry = feed.entries[0]
-        latest_link = latest_entry.get("link") or latest_entry.get("guid")
+        # SCAN LOGIC: Look through top 15 entries for a match
+        target_entry = None
+        skip_reason = "NO_NEW_POST"
 
-        if not latest_link:
-            return "NO_LINK"
+        for entry in feed.entries[:15]:
+            link = entry.get("link") or entry.get("guid")
 
-        # --- CHECK FOR NEW ---
-        is_new = latest_link != last_link
-        if not is_new and not force_post:
-            return "NO_NEW_POST"
+            # 1. Filter Check
+            content_to_check = (entry.get("title", "") + " " + entry.get("summary", "")).lower()
 
-        # --- CHECK FILTERS ---
-        # We verify against Title + Summary combined (case insensitive)
-        content_to_check = (latest_entry.get("title", "") + " " + latest_entry.get("summary", "")).lower()
+            # Excludes
+            if exclude_keywords:
+                if any(kw.lower() in content_to_check for kw in exclude_keywords):
+                    skip_reason = "SKIPPED_FILTER_EXCLUDE"
+                    continue
 
-        # 1. Excludes (If ANY match, we skip)
-        if exclude_keywords:
-            for kw in exclude_keywords:
-                if kw.lower() in content_to_check:
-                    # If force_post is on, we ignore filters to allow testing,
-                    # OR we can return a distinct status. Let's skip.
-                    if not force_post:
-                        return "SKIPPED_FILTER_EXCLUDE"
+                    # Includes
+            if include_keywords:
+                if not any(kw.lower() in content_to_check for kw in include_keywords):
+                    skip_reason = "SKIPPED_FILTER_INCLUDE"
+                    continue
 
-        # 2. Includes (If defined, MUST match at least one)
-        if include_keywords:
-            found = False
-            for kw in include_keywords:
-                if kw.lower() in content_to_check:
-                    found = True
-                    break
-            if not found and not force_post:
-                return "SKIPPED_FILTER_INCLUDE"
+                    # 2. Duplicate Check
+            # If we hit the last posted link, we stop searching (unless forcing)
+            if link == last_link and not force_post:
+                skip_reason = "NO_NEW_POST"
+                break  # Stop loop, we reached old content
+
+            # If we are here, we found a valid candidate!
+            target_entry = entry
+            # If we are not forcing, we just want the NEWEST valid one.
+            # Since we iterate 0->15, the first one we find IS the newest.
+            break
+
+        if not target_entry:
+            return skip_reason
 
         # --- POSTING ---
-        embed = self._create_rss_embed(latest_entry, feed_url, data)
+        embed = self._create_rss_embed(target_entry, feed_url, data)
+        latest_link = target_entry.get("link") or target_entry.get("guid")
 
         content = None
         role_id = data.get("role_id")
         if role_id:
-            # Check if role still exists
             role = channel.guild.get_role(role_id)
             if role:
                 content = f"{role.mention} New update available!"
