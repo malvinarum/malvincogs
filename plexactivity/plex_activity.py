@@ -1,8 +1,8 @@
 import asyncio
 import aiohttp
 import logging
-import io  # Added for image processing
-from datetime import datetime
+import io
+from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
 import discord
@@ -12,7 +12,6 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
 from discord.ext import tasks
 
-# Try importing Pillow for the color magic
 try:
     from PIL import Image
 
@@ -22,7 +21,6 @@ except ImportError:
 
 log = logging.getLogger("red.plex_activity")
 
-# Define default settings for the cog's configuration
 DEFAULT_GUILD_SETTINGS = {
     "plex_url": None,
     "plex_token": None,
@@ -36,7 +34,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Now with Chameleon Mode (Dynamic Colors)!
+    Features: TMDB Posters, Dynamic Colors, Transcode Detection, and ETAs.
     """
 
     def __init__(self, bot):
@@ -45,7 +43,6 @@ class PlexActivity(commands.Cog):
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
         self.session = aiohttp.ClientSession()
         self._plex_activity_loop_task = None
-        # Cache to store colors so we don't re-process the same poster 1000 times
         self.color_cache = {}
 
     async def cog_load(self):
@@ -70,15 +67,16 @@ class PlexActivity(commands.Cog):
         else:
             return f"{minutes:02}:{seconds:02}"
 
-    # --- COLOR MAGIC ---
+    def _generate_progress_bar(self, current_ms: int, total_ms: int, length: int = 10) -> str:
+        if total_ms == 0:
+            return "░" * length
+        percent = min(1.0, max(0.0, current_ms / total_ms))
+        filled = int(length * percent)
+        return "▓" * filled + "░" * (length - filled)
+
     async def _get_dominant_color(self, image_url: str):
-        """
-        Downloads the image, squishes it to 1x1 pixel to find the average color.
-        """
         if not HAS_PIL or not image_url:
             return None
-
-        # Check cache first
         if image_url in self.color_cache:
             return self.color_cache[image_url]
 
@@ -87,37 +85,26 @@ class PlexActivity(commands.Cog):
                 if resp.status == 200:
                     data = await resp.read()
 
-                    # Run CPU-bound image processing in a separate thread
                     def get_color(img_data):
                         img = Image.open(io.BytesIO(img_data))
                         img = img.convert("RGB")
-                        img = img.resize((1, 1))  # The lazy man's average
+                        img = img.resize((1, 1))
                         return img.getpixel((0, 0))
 
                     rgb = await self.bot.loop.run_in_executor(None, get_color, data)
                     color = discord.Color.from_rgb(*rgb)
-
-                    # Cache it (naive cache management)
                     if len(self.color_cache) > 100:
-                        self.color_cache.clear()  # Flush if too big
+                        self.color_cache.clear()
                     self.color_cache[image_url] = color
-
                     return color
-        except Exception as e:
-            log.debug(f"Failed to extract color from {image_url}: {e}")
+        except Exception:
             return None
 
-    # --- TMDB HELPER ---
     async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
         if not api_key:
             return None
-
         search_url = f"https://api.themoviedb.org/3/search/{media_type}"
-        params = {
-            'api_key': api_key,
-            'query': query,
-            'page': 1
-        }
+        params = {'api_key': api_key, 'query': query, 'page': 1}
         if year and media_type == 'movie':
             params['year'] = year
 
@@ -129,9 +116,8 @@ class PlexActivity(commands.Cog):
                         poster_path = data['results'][0].get('poster_path')
                         if poster_path:
                             return f"https://image.tmdb.org/t/p/w500{poster_path}"
-        except Exception as e:
-            log.error(f"TMDB Lookup failed for {query}: {e}")
-
+        except Exception:
+            pass
         return None
 
     async def _get_plex_sessions(self, guild_id: int):
@@ -160,12 +146,18 @@ class PlexActivity(commands.Cog):
 
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
+                        transcode_elem = session_elem.find("TranscodeSession")
 
                         if user_elem is None or player_elem is None:
                             continue
 
                         username = user_elem.get("title", "Unknown User")
+
+                        # --- USER AVATAR LOGIC ---
+                        # Plex usually sends a thumb path, but needs the token appended if it's not a public URL
                         user_thumb = user_elem.get("thumb")
+                        if user_thumb and not user_thumb.startswith("http"):
+                            user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
 
                         media_title = session_elem.get("title", "Unknown Title")
                         view_offset_ms = int(session_elem.get("viewOffset", "0"))
@@ -175,9 +167,24 @@ class PlexActivity(commands.Cog):
                         current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
                         total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
 
+                        # --- ETA CALCULATION ---
+                        remaining_ms = max(0, duration_ms - view_offset_ms)
+                        finish_time = datetime.now() + timedelta(milliseconds=remaining_ms)
+                        finish_ts = int(finish_time.timestamp())
+
                         series_title = session_elem.get("grandparentTitle")
                         media_type = session_elem.get("type", "media")
                         device = player_elem.get("product", "Unknown Device")
+                        state = player_elem.get("state", "playing")  # playing, paused, buffering
+
+                        # --- TRANSCODE DETECTION ---
+                        stream_info = "Direct Play"
+                        if transcode_elem is not None:
+                            video_decision = transcode_elem.get("videoDecision", "unknown")
+                            if video_decision == "transcode":
+                                stream_info = "Transcoding ⚠️"
+                            else:
+                                stream_info = "Direct Stream"
 
                         # --- IMAGE LOGIC ---
                         image_url = None
@@ -198,7 +205,12 @@ class PlexActivity(commands.Cog):
                             "type": media_type,
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
+                            "current_ms": view_offset_ms,
+                            "total_ms": duration_ms,
+                            "finish_ts": finish_ts,
                             "device": device,
+                            "state": state,
+                            "stream_info": stream_info,
                             "image_url": image_url
                         }
 
@@ -207,19 +219,15 @@ class PlexActivity(commands.Cog):
                             session_data["episode_title"] = media_title
                             session_data["season_num"] = int(session_elem.get("parentIndex", "0"))
                             session_data["episode_num"] = int(session_elem.get("index", "0"))
-                            session_data[
-                                "title"] = f"{series_title} - S{session_data['season_num']:02}E{session_data['episode_num']:02}"
                         else:
                             session_data["title"] = media_title
 
                         sessions.append(session_data)
-                except ET.ParseError as e:
-                    log.error(f"Failed to parse Plex API XML response: {e}")
+                except ET.ParseError:
                     return []
 
                 return sessions
-        except Exception as e:
-            log.error(f"Error fetching Plex sessions: {e}")
+        except Exception:
             return []
 
     async def _generate_session_embeds(self, sessions: list):
@@ -235,34 +243,58 @@ class PlexActivity(commands.Cog):
         embeds = []
         for session in sessions[:10]:
             user = session.get("user", "Unknown")
-            title = session.get("title")
             media_type = session.get("type")
             current = session.get("current_time")
             total = session.get("total_duration")
             device = session.get("device")
             image_url = session.get("image_url")
+            state = session.get("state")
+            stream_info = session.get("stream_info")
+            finish_ts = session.get("finish_ts")
 
-            # Default fallback colors
+            # State Icons
+            state_icon = "▶️"
+            if state == "paused":
+                state_icon = "⏸️"
+            elif state == "buffering":
+                state_icon = "⏳"
+
+            # Colors
             color = discord.Color.orange() if media_type == 'movie' else discord.Color.blue()
-
-            # --- APPLY FLAIR (Dynamic Color) ---
             if image_url and HAS_PIL:
                 dynamic_color = await self._get_dominant_color(image_url)
                 if dynamic_color:
                     color = dynamic_color
 
             embed = discord.Embed(color=color)
-            embed.set_author(name=f"{user} is watching...", icon_url="https://i.imgur.com/1F0B7gP.png")
 
+            # Use Real User Avatar if available, else Plex Logo
+            user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
+            embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
+
+            # Title Formatting
             if media_type == "episode":
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
             else:
-                embed.title = title
+                embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
 
-            embed.add_field(name="Progress", value=f"⏳ `{current} / {total}`", inline=True)
-            embed.add_field(name="Device", value=f"📱 `{device}`", inline=True)
+            # Visual Progress Bar
+            bar = self._generate_progress_bar(session.get("current_ms"), session.get("total_ms"))
+
+            # Combine Stats into fewer fields for cleaner look
+            embed.add_field(
+                name=f"{state_icon} Progress",
+                value=f"`{bar}`\n`{current} / {total}`\nEnds: <t:{finish_ts}:R>",
+                inline=False
+            )
+
+            embed.add_field(
+                name="Tech Specs",
+                value=f"📱 **Device:** `{device}`\n⚙️ **Stream:** `{stream_info}`",
+                inline=False
+            )
 
             if image_url:
                 embed.set_thumbnail(url=image_url)
