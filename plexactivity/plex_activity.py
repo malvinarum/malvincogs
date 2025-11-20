@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import logging
+import io  # Added for image processing
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
@@ -10,6 +11,14 @@ from redbot.core.utils.chat_formatting import humanize_list, box, pagify
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
 from discord.ext import tasks
+
+# Try importing Pillow for the color magic
+try:
+    from PIL import Image
+
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 log = logging.getLogger("red.plex_activity")
 
@@ -27,7 +36,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Supports TMDB images and multi-user concurrent streams!
+    Now with Chameleon Mode (Dynamic Colors)!
     """
 
     def __init__(self, bot):
@@ -36,6 +45,8 @@ class PlexActivity(commands.Cog):
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
         self.session = aiohttp.ClientSession()
         self._plex_activity_loop_task = None
+        # Cache to store colors so we don't re-process the same poster 1000 times
+        self.color_cache = {}
 
     async def cog_load(self):
         log.info("PlexActivity cog loaded. Starting activity loop.")
@@ -58,6 +69,43 @@ class PlexActivity(commands.Cog):
             return f"{hours:02}:{minutes:02}:{seconds:02}"
         else:
             return f"{minutes:02}:{seconds:02}"
+
+    # --- COLOR MAGIC ---
+    async def _get_dominant_color(self, image_url: str):
+        """
+        Downloads the image, squishes it to 1x1 pixel to find the average color.
+        """
+        if not HAS_PIL or not image_url:
+            return None
+
+        # Check cache first
+        if image_url in self.color_cache:
+            return self.color_cache[image_url]
+
+        try:
+            async with self.session.get(image_url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+
+                    # Run CPU-bound image processing in a separate thread
+                    def get_color(img_data):
+                        img = Image.open(io.BytesIO(img_data))
+                        img = img.convert("RGB")
+                        img = img.resize((1, 1))  # The lazy man's average
+                        return img.getpixel((0, 0))
+
+                    rgb = await self.bot.loop.run_in_executor(None, get_color, data)
+                    color = discord.Color.from_rgb(*rgb)
+
+                    # Cache it (naive cache management)
+                    if len(self.color_cache) > 100:
+                        self.color_cache.clear()  # Flush if too big
+                    self.color_cache[image_url] = color
+
+                    return color
+        except Exception as e:
+            log.debug(f"Failed to extract color from {image_url}: {e}")
+            return None
 
     # --- TMDB HELPER ---
     async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
@@ -117,8 +165,6 @@ class PlexActivity(commands.Cog):
                             continue
 
                         username = user_elem.get("title", "Unknown User")
-
-                        # Get user thumbnail if available (optional polish)
                         user_thumb = user_elem.get("thumb")
 
                         media_title = session_elem.get("title", "Unknown Title")
@@ -177,10 +223,6 @@ class PlexActivity(commands.Cog):
             return []
 
     async def _generate_session_embeds(self, sessions: list):
-        """
-        Generates a list of embeds, one for each active session.
-        If no sessions, returns a list containing a single 'idle' embed.
-        """
         if not sessions:
             embed = discord.Embed(
                 title="Plex Media Server",
@@ -191,8 +233,6 @@ class PlexActivity(commands.Cog):
             return [embed]
 
         embeds = []
-        # Discord allows max 10 embeds per message.
-        # Slice to first 10 to prevent errors if you have a massive party.
         for session in sessions[:10]:
             user = session.get("user", "Unknown")
             title = session.get("title")
@@ -202,46 +242,33 @@ class PlexActivity(commands.Cog):
             device = session.get("device")
             image_url = session.get("image_url")
 
-            # Distinct color for Movies vs TV
+            # Default fallback colors
             color = discord.Color.orange() if media_type == 'movie' else discord.Color.blue()
 
-            embed = discord.Embed(color=color)
+            # --- APPLY FLAIR (Dynamic Color) ---
+            if image_url and HAS_PIL:
+                dynamic_color = await self._get_dominant_color(image_url)
+                if dynamic_color:
+                    color = dynamic_color
 
-            # Author field used for the User
-            embed.set_author(name=f"{user} is watching...",
-                             icon_url="https://i.imgur.com/1F0B7gP.png")  # Plex Logo icon
+            embed = discord.Embed(color=color)
+            embed.set_author(name=f"{user} is watching...", icon_url="https://i.imgur.com/1F0B7gP.png")
 
             if media_type == "episode":
-                # Title: Show Name
-                # Desc: S01E01 - Episode Name
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
             else:
                 embed.title = title
                 embed.description = f"*{media_type.capitalize()}*"
 
-            # Progress Bar (Visual Flair)
-            # Just a simple text representation
-            embed.add_field(
-                name="Progress",
-                value=f"⏳ `{current} / {total}`",
-                inline=True
-            )
-
-            embed.add_field(
-                name="Device",
-                value=f"📱 `{device}`",
-                inline=True
-            )
+            embed.add_field(name="Progress", value=f"⏳ `{current} / {total}`", inline=True)
+            embed.add_field(name="Device", value=f"📱 `{device}`", inline=True)
 
             if image_url:
                 embed.set_thumbnail(url=image_url)
 
             embeds.append(embed)
 
-        # Add a footer to the last embed only to keep it clean,
-        # or a separate small embed at the bottom.
-        # Let's put timestamp on the last card.
         embeds[-1].timestamp = datetime.now()
         embeds[-1].set_footer(text="Plex Activity • Live Update")
 
@@ -270,15 +297,12 @@ class PlexActivity(commands.Cog):
                 continue
 
             sessions = await self._get_plex_sessions(guild_id)
-
-            # Generate the list of embeds (1 per user)
             embeds = await self._generate_session_embeds(sessions)
 
             try:
                 if message_id:
                     try:
                         message = await channel.fetch_message(message_id)
-                        # Important: Use 'embeds=' plural
                         await message.edit(embeds=embeds)
                     except discord.NotFound:
                         message = await channel.send(embeds=embeds)
@@ -332,7 +356,6 @@ class PlexActivity(commands.Cog):
         await self.config.guild(ctx.guild).activity_message_id.set(None)
         await ctx.send(f"Updates will post to {channel.mention}.")
 
-        # Trigger update immediately
         sessions = await self._get_plex_sessions(ctx.guild.id)
         embeds = await self._generate_session_embeds(sessions)
         msg = await channel.send(embeds=embeds)
