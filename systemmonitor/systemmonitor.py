@@ -271,7 +271,8 @@ class SystemMonitor(commands.Cog):
         uptime_str = humanize.naturaldelta(timedelta(seconds=int(uptime_sec)))
         embed.add_field(name=":stopwatch: Uptime", value=uptime_str, inline=True)
 
-        embed.set_footer(text=f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+        embed.timestamp = datetime.now()  # Let Discord handle the timezone
+        embed.set_footer(text="System Monitor • Live Update")
         return embed
 
     async def _update_loop(self):
