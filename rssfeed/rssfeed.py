@@ -17,7 +17,7 @@ class RSSFeed(commands.Cog):
     """
 
     IDENTIFIER = 1234567890
-    FOOTER_TEXT_AUTHOR = " | RSS Feed"
+    FOOTER_TEXT_AUTHOR = " | RSS Feed by Malvinarum"
 
     def __init__(self, bot):
         self.bot = bot
@@ -96,9 +96,14 @@ class RSSFeed(commands.Cog):
         raw_summary = entry.get("summary", "Click the link for details.")
         summary = self._strip_html(raw_summary)
 
+        # Fix "Read more" text not being a link (Artifact of stripping <a> tags)
+        # Matches "Read more" at the end of string, optionally with punctuation
+        summary = re.sub(r"(?i)Read\s+more\W*$", f"[Read more]({link})", summary)
+
         # Truncate summary to avoid 4096 limit, leave room for "..."
+        # We use 2000 to be safe and consistent
         if len(summary) > 2000:
-            summary = summary[:2000] + "..."
+            summary = summary[:1950] + f"... [Read more]({link})"
 
         # Custom Color or Default Blue
         color_val = feed_data.get("embed_color", 0x3498db)
