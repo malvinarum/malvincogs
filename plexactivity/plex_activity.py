@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import logging
 from datetime import datetime
-import xml.etree.ElementTree as ET  # Import for XML parsing
+import xml.etree.ElementTree as ET
 
 import discord
 from redbot.core import commands, Config, app_commands, checks
@@ -18,42 +18,31 @@ DEFAULT_GUILD_SETTINGS = {
     "plex_url": None,
     "plex_token": None,
     "activity_channel": None,
-    "activity_message_id": None,  # To store the ID of the message to update
-    "update_interval": 60  # Default update interval in seconds
+    "activity_message_id": None,
+    "update_interval": 60,
+    "tmdb_api_key": None  # NEW: Store TMDB API Key
 }
 
 
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-
-    This cog polls the Plex API for active sessions and updates a Discord message
-    in a designated channel.
+    Now with TMDB image support!
     """
 
     def __init__(self, bot):
         self.bot = bot
-        # Initialize Config for guild-specific settings
         self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
-        self.session = aiohttp.ClientSession()  # HTTP session for API requests
-        self._plex_activity_loop_task = None  # To hold the background task
+        self.session = aiohttp.ClientSession()
+        self._plex_activity_loop_task = None
 
     async def cog_load(self):
-        """
-        Called when the cog is loaded.
-        Starts the background task to update Plex activity.
-        """
         log.info("PlexActivity cog loaded. Starting activity loop.")
-        # Ensure the loop starts only once
         if not self._plex_activity_loop_task or self._plex_activity_loop_task.done():
             self._plex_activity_loop_task = self.plex_activity_loop.start()
 
     async def cog_unload(self):
-        """
-        Called when the cog is unloaded.
-        Stops the background task and closes the aiohttp session.
-        """
         log.info("PlexActivity cog unloaded. Stopping activity loop and closing session.")
         if self._plex_activity_loop_task:
             self.plex_activity_loop.cancel()
@@ -61,38 +50,56 @@ class PlexActivity(commands.Cog):
             await self.session.close()
 
     def _format_milliseconds_to_time(self, milliseconds: int) -> str:
-        """
-        Converts milliseconds into HH:MM:SS or MM:SS format.
-        """
         total_seconds = milliseconds // 1000
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         seconds = total_seconds % 60
-
         if hours > 0:
             return f"{hours:02}:{minutes:02}:{seconds:02}"
         else:
             return f"{minutes:02}:{seconds:02}"
 
+    # --- TMDB HELPER ---
+    async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
+        """
+        Searches TMDB for a poster image URL.
+        """
+        if not api_key:
+            return None
+
+        search_url = f"https://api.themoviedb.org/3/search/{media_type}"
+        params = {
+            'api_key': api_key,
+            'query': query,
+            'page': 1
+        }
+        if year and media_type == 'movie':
+            params['year'] = year
+
+        try:
+            async with self.session.get(search_url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data['results']:
+                        # Get the first result
+                        poster_path = data['results'][0].get('poster_path')
+                        if poster_path:
+                            return f"https://image.tmdb.org/t/p/w500{poster_path}"
+        except Exception as e:
+            log.error(f"TMDB Lookup failed for {query}: {e}")
+
+        return None
+
     async def _get_plex_sessions(self, guild_id: int):
-        """
-        Fetches active sessions from the Plex Media Server API.
-
-        Args:
-            guild_id (int): The ID of the guild to fetch settings for.
-
-        Returns:
-            list: A list of active Plex sessions, or an empty list if an error occurs.
-        """
         settings = await self.config.guild_from_id(guild_id).all()
         plex_url = settings["plex_url"]
         plex_token = settings["plex_token"]
+        tmdb_key = settings.get("tmdb_api_key")  # Get key
 
         if not plex_url or not plex_token:
             log.warning(f"Plex URL or Token not configured for guild {guild_id}.")
             return []
 
-        # Ensure the URL ends with a slash for proper path joining
         if not plex_url.endswith("/"):
             plex_url += "/"
 
@@ -100,54 +107,50 @@ class PlexActivity(commands.Cog):
 
         try:
             async with self.session.get(api_url, timeout=10) as response:
-                response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-                data = await response.text()  # Plex API returns XML
-                log.debug(f"Plex API raw response for guild {guild_id}:\n{data}")  # Log raw XML response
+                response.raise_for_status()
+                data = await response.text()
 
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # Iterate through <Video>, <Photo>, <Track> elements directly
-                    # These tags contain the session information in the provided XML
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
-                        log.debug(
-                            f"Processing session element: {ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
 
                         user_elem = session_elem.find("User")
-                        media_elem = session_elem.find("Media")
                         player_elem = session_elem.find("Player")
 
                         if user_elem is None or player_elem is None:
-                            log.warning(
-                                f"Skipping session due to missing User or Player element in guild {guild_id} for element:\n{ET.tostring(session_elem, encoding='unicode', short_empty_elements=False)}")
                             continue
 
                         username = user_elem.get("title", "Unknown User")
-
-                        # Get title, duration, and viewOffset directly from the session_elem (e.g., <Video> tag)
                         media_title = session_elem.get("title", "Unknown Title")
                         view_offset_ms = int(session_elem.get("viewOffset", "0"))
-                        duration_ms = int(session_elem.get("duration", "1"))  # Avoid division by zero
+                        duration_ms = int(session_elem.get("duration", "1"))
+                        year = session_elem.get("year")  # Get year for better TMDB matching
 
-                        # Format times
                         current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
                         total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
 
-                        # Get grandparentTitle (Series Name) for TV shows
                         series_title = session_elem.get("grandparentTitle")
-
                         media_type = session_elem.get("type", "media")
-
                         device = player_elem.get("product", "Unknown Device")
 
-                        # Construct the full URL for the image, including the Plex token
+                        # --- IMAGE LOGIC ---
                         image_url = None
-                        thumb_path = session_elem.get("art") or session_elem.get("thumb")
-                        if thumb_path:
-                            base_plex_url = plex_url.rstrip('/')
-                            image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
-                        # Initialize session_data with common fields
+                        # 1. Try TMDB first if configured (Public URL = Discord Friendly)
+                        if tmdb_key:
+                            search_query = series_title if media_type == 'episode' else media_title
+                            search_type = 'tv' if media_type == 'episode' else 'movie'
+
+                            image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
+
+                        # 2. Fallback to Plex Local URL if TMDB failed or not configured
+                        if not image_url:
+                            thumb_path = session_elem.get("art") or session_elem.get("thumb")
+                            if thumb_path:
+                                base_plex_url = plex_url.rstrip('/')
+                                image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
+
                         session_data = {
                             "user": username,
                             "type": media_type,
@@ -157,133 +160,96 @@ class PlexActivity(commands.Cog):
                             "image_url": image_url
                         }
 
-                        # Add specific fields based on media type for detailed formatting
                         if media_type == "episode":
                             session_data["series_title"] = series_title
-                            session_data["episode_title"] = media_title # This is the specific episode's title
+                            session_data["episode_title"] = media_title
                             session_data["season_num"] = int(session_elem.get("parentIndex", "0"))
                             session_data["episode_num"] = int(session_elem.get("index", "0"))
-                            # The 'title' field will be constructed in _format_sessions_embed for episodes
-                            # For consistency, store a general title here too if needed elsewhere
                             session_data["title"] = f"{series_title} - {media_title}"
                         else:
-                            # For movies, photos, tracks, etc., media_title is the main title
                             session_data["title"] = media_title
 
                         sessions.append(session_data)
                 except ET.ParseError as e:
-                    log.error(
-                        f"Failed to parse Plex API XML response for guild {guild_id}: {e}\nResponse: {data[:500]}...")
-                    return []  # Return empty list on parse error
+                    log.error(f"Failed to parse Plex API XML response: {e}")
+                    return []
 
-                log.debug(f"Found {len(sessions)} active sessions for guild {guild_id}.")
-        except aiohttp.ClientError as e:
-            log.error(f"Failed to connect to Plex API for guild {guild_id}: {e}")
-        except asyncio.TimeoutError:
-            log.error(f"Plex API request timed out for guild {guild_id}.")
+                return sessions
         except Exception as e:
-            log.exception(f"An unexpected error occurred while fetching Plex sessions for guild {guild_id}.")
-        return sessions
+            log.error(f"Error fetching Plex sessions: {e}")
+            return []
 
     async def _format_sessions_embed(self, sessions: list):
-        """
-        Formats a list of Plex sessions into a Discord embed.
-
-        Args:
-            sessions (list): A list of active Plex sessions.
-
-        Returns:
-            discord.Embed: An embed representing the current Plex activity.
-        """
         embed = discord.Embed(
             title="Plex Media Server Activity",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()  # Changed to local time
+            color=discord.Color.orange(),  # Plex Orange!
+            timestamp=datetime.now()
         )
         embed.set_footer(text="Last updated")
 
         if not sessions:
             embed.description = "No active sessions currently."
+            embed.color = discord.Color.dark_grey()
         else:
-            # Set the main image of the embed using the image_url from the first session
-            # This is a larger image than a thumbnail and is displayed at the bottom
+            # Use the first session's image as the main thumbnail/image
             if sessions[0].get("image_url"):
-                embed.set_image(url=sessions[0]["image_url"])
-
-            # Clear description as we'll use fields
-            embed.description = None
+                # Discord is picky. If it's a local IP, it won't render.
+                # If it's TMDB, it renders beautifully.
+                embed.set_thumbnail(url=sessions[0]["image_url"])
 
             for session in sessions:
                 user = session.get("user", "Unknown User")
                 media_type = session.get("type", "media")
-                current_time = session.get("current_time", "00:00")
-                total_duration = session.get("total_duration", "00:00")
-                device = session.get("device", "Unknown Device")
+                current_time = session.get("current_time")
+                total_duration = session.get("total_duration")
+                device = session.get("device")
 
-                field_name = f"**{user}**"
-                field_value = ""
+                field_name = f"👤 {user}"
 
                 if media_type == "episode":
-                    series_title = session.get("series_title", "Unknown Series")
-                    episode_title = session.get("episode_title", "Unknown Episode")
-                    season_num = session.get("season_num")
-                    episode_num = session.get("episode_num")
-
-                    # Format season and episode numbers if available
-                    season_episode_format = ""
-                    if season_num is not None and episode_num is not None:
-                        season_episode_format = f"S{season_num:02}E{episode_num:02}"
-                        # Combine series title, SxxExx, and episode title
-                        content_title = f"{series_title} - {season_episode_format} {episode_title}"
-                    else:
-                        # Fallback if season/episode numbers are missing
-                        content_title = f"{series_title} - {episode_title}"
+                    series = session.get("series_title")
+                    ep_title = session.get("episode_title")
+                    s_num = session.get("season_num")
+                    e_num = session.get("episode_num")
 
                     field_value = (
-                        f"Content: `{content_title} (Episode)`\n"
-                        f"Progress: `{current_time} / {total_duration}`\n"
-                        f"Device: `{device}`"
+                        f"📺 **{series}**\n"
+                        f"└ `S{s_num:02}E{e_num:02}` {ep_title}\n"
+                        f"⏳ `{current_time} / {total_duration}`\n"
+                        f"📱 `{device}`"
                     )
                 else:
-                    # For movies, photos, tracks, etc.
-                    title = session.get("title", "Unknown Title")
+                    title = session.get("title")
                     field_value = (
-                        f"Content: `{title} ({media_type.capitalize()})`\n"
-                        f"Progress: `{current_time} / {total_duration}`\n"
-                        f"Device: `{device}`"
+                        f"🎬 **{title}**\n"
+                        f"⏳ `{current_time} / {total_duration}`\n"
+                        f"📱 `{device}`"
                     )
+
                 embed.add_field(name=field_name, value=field_value, inline=False)
 
         return embed
 
-    @tasks.loop(seconds=60)  # Default to update every 60 seconds
+    @tasks.loop(seconds=60)
     async def plex_activity_loop(self):
-        """
-        Background task to periodically fetch and update Plex activity.
-        """
         for guild_id in await self.config.all_guilds():
             guild_settings = await self.config.guild_from_id(guild_id).all()
             channel_id = guild_settings["activity_channel"]
             message_id = guild_settings["activity_message_id"]
             update_interval = guild_settings.get("update_interval", 60)
 
-            # Update loop interval if it has changed
             if self.plex_activity_loop.seconds != update_interval:
                 self.plex_activity_loop.change_interval(seconds=update_interval)
 
             if not channel_id:
-                continue  # Skip if no channel is set for this guild
+                continue
 
             guild = self.bot.get_guild(guild_id)
             if not guild:
-                continue  # Skip if guild is not found (e.g., bot left the guild)
+                continue
 
             channel = guild.get_channel(channel_id)
-            if not channel or not isinstance(channel, discord.TextChannel):
-                log.warning(
-                    f"Configured activity channel {channel_id} not found or not a text channel in guild {guild.name}.")
-                await self.config.guild(guild).activity_channel.set(None)  # Clear invalid channel
-                await self.config.guild(guild).activity_message_id.set(None)
+            if not channel:
                 continue
 
             sessions = await self._get_plex_sessions(guild_id)
@@ -291,157 +257,81 @@ class PlexActivity(commands.Cog):
 
             try:
                 if message_id:
-                    # Try to edit the existing message
                     try:
                         message = await channel.fetch_message(message_id)
                         await message.edit(embed=embed)
-                        log.debug(f"Updated Plex activity message in {channel.name} ({guild.name}).")
                     except discord.NotFound:
-                        log.warning(f"Activity message {message_id} not found in {channel.name}. Sending a new one.")
                         message = await channel.send(embed=embed)
                         await self.config.guild(guild).activity_message_id.set(message.id)
                     except discord.Forbidden:
-                        log.warning(f"Bot does not have permissions to edit message {message_id} in {channel.name}.")
-                        await self.config.guild(guild).activity_message_id.set(None)  # Clear message ID
-                        await channel.send(
-                            f"I don't have permissions to edit the activity message. Please check my permissions or use `{await self.bot.get_prefix(channel)}plex setchannel` again.")
+                        log.warning(f"Forbidden edit in {channel.name}")
                 else:
-                    # Send a new message if no message ID is stored
                     message = await channel.send(embed=embed)
-                    await self.config.guild(ctx.guild).activity_message_id.set(message.id) # Corrected ctx to guild
-                    log.info(f"Sent new Plex activity message in {channel.name} ({guild.name}).")
-            except discord.Forbidden:
-                log.error(f"Bot does not have permissions to send messages in {channel.name} ({guild.name}).")
-                await self.config.guild(guild).activity_channel.set(None)  # Clear invalid channel
-                await self.config.guild(guild).activity_message_id.set(None)
+                    await self.config.guild(guild).activity_message_id.set(message.id)
             except Exception as e:
-                log.exception(f"Error updating Plex activity message in {channel.name} ({guild.name}): {e}")
+                log.error(f"Error updating message: {e}")
 
     @plex_activity_loop.before_loop
     async def before_plex_activity_loop(self):
-        """Waits for the bot to be ready before starting the loop."""
         await self.bot.wait_until_ready()
-        log.info("Plex activity loop is ready to start.")
 
     @commands.group(name="plex", invoke_without_command=True)
     @commands.guild_only()
     @checks.mod_or_permissions(manage_guild=True)
     async def plex(self, ctx: commands.Context):
-        """
-        Manage Plex Media Server activity tracking.
-        """
+        """Manage Plex Media Server activity tracking."""
         await ctx.send_help(self.plex)
 
     @plex.command(name="setup")
-    @checks.mod_or_permissions(manage_guild=True)
     async def plex_setup(self, ctx: commands.Context):
-        """
-        Set up your Plex Media Server URL and API token.
-
-        Your Plex URL should be the full address to your Plex server, e.g.,
-        `http://192.168.1.100:32400` or `https://app.plex.tv/desktop`.
-        Your Plex token can be found by inspecting network requests
-        when browsing your Plex server or through various online guides.
-        """
-        await ctx.send(
-            "Please enter your Plex Media Server URL (e.g., `http://192.168.1.100:32400`):"
-        )
+        """Interactive setup for Plex URL and Token."""
+        await ctx.send("Enter Plex URL (e.g. http://192.168.1.100:32400):")
         try:
-            plex_url_msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
-            plex_url = plex_url_msg.content.strip()
-            if not (plex_url.startswith("http://") or plex_url.startswith("https://")):
-                return await ctx.send("Invalid URL format. Please include `http://` or `https://`.")
+            msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
+            url = msg.content.strip()
+            await ctx.send("Enter Plex Token:")
+            msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
+            token = msg.content.strip()
+
+            await self.config.guild(ctx.guild).plex_url.set(url)
+            await self.config.guild(ctx.guild).plex_token.set(token)
+            await ctx.send("Configured!")
         except asyncio.TimeoutError:
-            return await ctx.send("Setup timed out. Please run the command again.")
+            await ctx.send("Timed out.")
 
-        await ctx.send("Please enter your Plex API Token:")
-        try:
-            plex_token_msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
-            plex_token = plex_token_msg.content.strip()
-        except asyncio.TimeoutError:
-            return await ctx.send("Setup timed out. Please run the command again.")
-
-        await self.config.guild(ctx.guild).plex_url.set(plex_url)
-        await self.config.guild(ctx.guild).plex_token.set(plex_token)
-        await ctx.send(f"Plex URL and Token have been set for this server.")
-
-        # Test connection immediately
-        await ctx.send("Testing Plex connection...")
-        sessions = await self._get_plex_sessions(ctx.guild.id)
-        if sessions is not None and len(sessions) > 0:
-            await ctx.send(f"Plex connection successful! Found {len(sessions)} active sessions during test.")
-        elif sessions is not None and len(sessions) == 0:
-            await ctx.send("Plex connection successful! No active sessions found during test.")
-        else:
-            await ctx.send("Plex connection failed. Please double check your URL and token.")
+    @plex.command(name="tmdb")
+    async def plex_tmdb(self, ctx: commands.Context, api_key: str):
+        """
+        Set the TMDB API Key for fetching posters.
+        Get one here: https://www.themoviedb.org/settings/api
+        """
+        await self.config.guild(ctx.guild).tmdb_api_key.set(api_key)
+        await ctx.send("✅ TMDB API Key set! Posters should now appear in the activity embed.")
 
     @plex.command(name="setchannel")
-    @checks.mod_or_permissions(manage_guild=True)
     async def plex_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """
-        Set the channel where Plex activity updates will be posted.
-
-        The bot will automatically update a single message in this channel
-        with the current Plex activity.
-        """
+        """Set the channel for Plex updates."""
         await self.config.guild(ctx.guild).activity_channel.set(channel.id)
-        # Clear existing message ID so a new one is sent
         await self.config.guild(ctx.guild).activity_message_id.set(None)
-        await ctx.send(f"Plex activity updates will now be posted in {channel.mention}.")
-        # Immediately trigger an update to create the initial message
-        await self.plex_activity_loop()  # Call the loop once to create the initial message
-
-    @plex.command(name="interval")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_interval(self, ctx: commands.Context, seconds: int):
-        """
-        Set the update interval for Plex activity in seconds.
-
-        Minimum interval is 10 seconds.
-        """
-        if seconds < 10:
-            return await ctx.send("The minimum update interval is 10 seconds.")
-        await self.config.guild(ctx.guild).update_interval.set(seconds)
-        self.plex_activity_loop.change_interval(seconds=seconds)
-        await ctx.send(f"Plex activity update interval set to {seconds} seconds.")
+        await ctx.send(f"Updates will post to {channel.mention}.")
+        # Trigger update immediately
+        sessions = await self._get_plex_sessions(ctx.guild.id)
+        embed = await self._format_sessions_embed(sessions)
+        msg = await channel.send(embed=embed)
+        await self.config.guild(ctx.guild).activity_message_id.set(msg.id)
 
     @plex.command(name="status")
-    @checks.mod_or_permissions(manage_guild=True)
     async def plex_status(self, ctx: commands.Context):
-        """
-        Show current Plex activity settings for this server.
-        """
-        settings = await self.config.guild(ctx.guild).all()
-        plex_url = settings["plex_url"] or "Not set"
-        activity_channel_id = settings["activity_channel"]
-        activity_message_id = settings["activity_message_id"]
-        update_interval = settings["update_interval"]
-
-        channel_mention = self.bot.get_channel(activity_channel_id).mention if activity_channel_id else "Not set"
-
-        status_msg = (
-            f"**Plex URL:** `{plex_url}`\n"
-            f"**Plex Token:** `{'Set' if settings['plex_token'] else 'Not set'}`\n"
-            f"**Activity Channel:** {channel_mention}\n"
-            f"**Activity Message ID:** `{activity_message_id or 'None'}`\n"
-            f"**Update Interval:** `{update_interval} seconds`"
-        )
-        await ctx.send(box(status_msg))
-
-    @plex.command(name="clear")
-    @checks.mod_or_permissions(manage_guild=True)
-    async def plex_clear(self, ctx: commands.Context):
-        """
-        Clear all Plex activity settings for this server.
-        """
-        await self.config.guild(ctx.guild).clear()
-        await ctx.send("All Plex activity settings for this server have been cleared.")
-        # Stop the loop if no more guilds are configured
-        if not await self.config.all_guilds():
-            self.plex_activity_loop.cancel()
+        """Check settings."""
+        data = await self.config.guild(ctx.guild).all()
+        await ctx.send(box(
+            f"URL: {data['plex_url']}\n"
+            f"Token: {'Set' if data['plex_token'] else 'Missing'}\n"
+            f"TMDB Key: {'Set' if data['tmdb_api_key'] else 'Missing'}\n"
+            f"Channel: {data['activity_channel']}"
+        ))
 
 
-# Setup function for Redbot
+# Setup function
 async def setup(bot):
-    """Adds the cog to the bot."""
     await bot.add_cog(PlexActivity(bot))
