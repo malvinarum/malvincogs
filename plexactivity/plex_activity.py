@@ -334,4 +334,22 @@ class PlexActivity(commands.Cog):
 
         # Trigger update immediately
         sessions = await self._get_plex_sessions(ctx.guild.id)
-        embeds = await
+        embeds = await self._generate_session_embeds(sessions)
+        msg = await channel.send(embeds=embeds)
+        await self.config.guild(ctx.guild).activity_message_id.set(msg.id)
+
+    @plex.command(name="status")
+    async def plex_status(self, ctx: commands.Context):
+        """Check settings."""
+        data = await self.config.guild(ctx.guild).all()
+        await ctx.send(box(
+            f"URL: {data['plex_url']}\n"
+            f"Token: {'Set' if data['plex_token'] else 'Missing'}\n"
+            f"TMDB Key: {'Set' if data['tmdb_api_key'] else 'Missing'}\n"
+            f"Channel: {data['activity_channel']}"
+        ))
+
+
+# Setup function
+async def setup(bot):
+    await bot.add_cog(PlexActivity(bot))
