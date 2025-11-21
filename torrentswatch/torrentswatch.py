@@ -24,7 +24,7 @@ DEFAULT_GUILD_SETTINGS = {
 class TorrentsWatch(commands.Cog):
     """
     A cog to monitor Sonarr/Radarr download queues in a static embed.
-    Now with ETAs, Global Speed, and Status Icons!
+    Features: Deduplication, Metadata handling, and Smart Progress.
     """
 
     def __init__(self, bot):
@@ -102,71 +102,68 @@ class TorrentsWatch(commands.Cog):
         if not queue_items and not history_items:
             return discord.Embed(
                 title="📥 Torrents Watch",
-                description="😴 System idle. No active downloads.",
+                description="😴 System idle.",
                 color=discord.Color.dark_grey(),
                 timestamp=datetime.now()
             )
 
         embed = discord.Embed(title="📥 Download Queue", color=discord.Color.blue())
 
-        # --- AGGREGATE STATS ---
-        # Calculate total speed if available in the records?
-        # Sonarr Queue records have 'timeleft' but rarely explicit 'speed'.
-        # However, sometimes 'timeleft' format is "00:05:00".
-
         if queue_items:
+            # Sort by progress (sizeleft)
             queue_items.sort(key=lambda x: x.get("sizeleft", x.get("sizeLeft", 0)))
 
             field_val = ""
             for item in queue_items[:8]:
                 title = item.get("title", "Unknown")
-                size = item.get("size", item.get("Size", 1))
+                size = item.get("size", item.get("Size", 0))
                 size_left = item.get("sizeleft", item.get("sizeLeft", 0))
                 status = item.get("status", "Unknown")
-                tracked_status = item.get("trackedDownloadStatus", "")
-                source = item.get("source", "?")
                 time_left = item.get("timeleft", "00:00:00")
+                source = item.get("source", "?")
 
-                # Status Logic & Emojis
-                state_emoji = "⏬"
-                status_text = status
+                # --- LOGIC FIX: Handle Metadata/0-byte files ---
+                if size == 0:
+                    status_text = "Fetching Metadata..."
+                    bar = "📡📡📡📡📡📡📡📡📡📡"
+                    stats_line = "Waiting for peers..."
+                    state_emoji = "🔍"
+                else:
+                    # Normal calculation
+                    percent = 1.0 - (size_left / size)
+                    bar = self._generate_progress_bar(percent, length=10)
+                    stats_line = f"{int(percent * 100)}% • {self._format_size(size_left)} left"
 
-                if status.lower() == "warning" or tracked_status.lower() == "warning":
-                    state_emoji = "⚠️"
-                    msgs = item.get("statusMessages", []) or item.get("messages", [])
-                    if msgs and len(msgs) > 0:
-                        status_text = msgs[0].get("title", "Warning")
-                    else:
-                        status_text = "Warning (Check Client)"
-                elif status.lower() == "paused":
-                    state_emoji = "⏸️"
-                elif status.lower() == "queued":
-                    state_emoji = "⏳"
+                    # Status Text & Emojis
+                    state_emoji = "⏬"
+                    status_text = status
+                    if status.lower() == "warning":
+                        state_emoji = "⚠️"
+                        msgs = item.get("statusMessages", [])
+                        if msgs: status_text = msgs[0].get("title", "Warning")
+                    elif status.lower() == "paused":
+                        state_emoji = "⏸️"
+                    elif status.lower() == "queued":
+                        state_emoji = "⏳"
+
+                    # Add ETA if available
+                    if time_left and time_left != "00:00:00":
+                        status_text += f" (ETA: {time_left})"
 
                 # Clean Title
                 if len(title) > 35: title = title[:33] + "..."
 
-                # Progress Math
-                percent = 1.0 - (size_left / size) if size > 0 else 0.0
-                bar = self._generate_progress_bar(percent, length=10)
-
                 # Source Icon
                 src_emoji = "📺" if source == "Sonarr" else "🎬"
 
-                # Format ETA string
-                eta_str = ""
-                if time_left and time_left != "00:00:00":
-                    # If it looks like a time duration
-                    eta_str = f" • ETA: {time_left}"
-
                 field_val += (
                     f"{src_emoji} **{title}**\n"
-                    f"`{bar}` {int(percent * 100)}% • {self._format_size(size_left)} left\n"
-                    f"{state_emoji} **{status_text}**{eta_str}\n"
+                    f"`{bar}` {stats_line}\n"
+                    f"{state_emoji} **{status_text}**\n"
                 )
 
             if len(queue_items) > 8:
-                field_val += f"\n*...and {len(queue_items) - 8} more items.*"
+                field_val += f"\n*...and {len(queue_items) - 8} more.*"
 
             embed.add_field(name="Active Downloads", value=field_val, inline=False)
         else:
@@ -177,7 +174,6 @@ class TorrentsWatch(commands.Cog):
             hist_val = ""
             for item in history_items[:5]:
                 event = item.get("eventType", "Unknown")
-
                 title = "Unknown"
                 if "movie" in item:
                     title = item["movie"]["title"]
@@ -196,15 +192,7 @@ class TorrentsWatch(commands.Cog):
                 except:
                     time_str = ""
 
-                # Event Emojis
-                ev_emoji = "ℹ️"
-                if event == "grabbed":
-                    ev_emoji = "🛒"  # Shopping cart for grabbed
-                elif event == "downloadFolderImported":
-                    ev_emoji = "✅"
-                elif event == "downloadFailed":
-                    ev_emoji = "❌"
-
+                ev_emoji = "🛒" if event == "grabbed" else "✅" if event == "downloadFolderImported" else "ℹ️"
                 hist_val += f"{ev_emoji} **{title}** ({event})\n{time_str}\n"
 
             embed.add_field(name="Recent History", value=hist_val, inline=False)
@@ -229,8 +217,36 @@ class TorrentsWatch(commands.Cog):
             sonarr_h = await self._fetch_history(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
             radarr_h = await self._fetch_history(settings["radarr_url"], settings["radarr_key"], "Radarr")
 
-            combined_q = sonarr_q + radarr_q
-            combined_h = sonarr_h + radarr_h
+            # --- DEDUPLICATION LOGIC ---
+            # Combine and dedupe by ID to prevent "Double Vision"
+            raw_queue = sonarr_q + radarr_q
+            combined_q = []
+            seen_ids = set()
+
+            for item in raw_queue:
+                # Use 'id' if available, otherwise fallback to title (risky but okay for dedupe)
+                # Sonarr/Radarr queue items usually have a unique 'id'
+                q_id = item.get("id")
+                if q_id:
+                    if q_id not in seen_ids:
+                        seen_ids.add(q_id)
+                        combined_q.append(item)
+                else:
+                    # Fallback: If no ID (unlikely), just add it
+                    combined_q.append(item)
+
+            # Dedupe history too just in case
+            raw_history = sonarr_h + radarr_h
+            combined_h = []
+            seen_h_ids = set()
+            for item in raw_history:
+                h_id = item.get("id")
+                if h_id:
+                    if h_id not in seen_h_ids:
+                        seen_h_ids.add(h_id)
+                        combined_h.append(item)
+                else:
+                    combined_h.append(item)
 
             embed = await self._build_embed(combined_q, combined_h)
 
