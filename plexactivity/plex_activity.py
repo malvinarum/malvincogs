@@ -8,8 +8,6 @@ import xml.etree.ElementTree as ET
 import discord
 from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import humanize_list, box, pagify
-from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
-from redbot.core.utils.predicates import MessagePredicate
 from discord.ext import tasks
 
 try:
@@ -34,7 +32,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Features: TMDB Posters, Dynamic Colors, Transcode Detection, and ETAs.
+    Now with Device-Specific Emojis and Bandwidth/Bitrate info! 📺 🎮 💻
     """
 
     def __init__(self, bot):
@@ -73,6 +71,34 @@ class PlexActivity(commands.Cog):
         percent = min(1.0, max(0.0, current_ms / total_ms))
         filled = int(length * percent)
         return "▓" * filled + "░" * (length - filled)
+
+    # --- DEVICE EMOJI LOGIC ---
+    def _get_device_emoji(self, device_name: str) -> str:
+        d = device_name.lower()
+
+        if any(x in d for x in ["tv", "roku", "chromecast", "fire", "shield", "bravia", "lg", "samsung"]):
+            return "📺"
+
+        if any(x in d for x in ["playstation", "xbox", "ps4", "ps5", "switch"]):
+            return "🎮"
+
+        if "mac" in d or "osx" in d or "apple" in d:
+            return "🍎"
+        if "windows" in d or "pc" in d:
+            return "🪟"
+        if "linux" in d:
+            return "🐧"
+
+        if any(x in d for x in ["desktop", "laptop"]):
+            return "💻"
+
+        if any(x in d for x in ["web", "chrome", "firefox", "edge", "safari", "opera"]):
+            return "🌐"
+
+        if any(x in d for x in ["phone", "ipad", "iphone", "android", "mobile", "tablet"]):
+            return "📱"
+
+        return "📱"
 
     async def _get_dominant_color(self, image_url: str):
         if not HAS_PIL or not image_url:
@@ -146,15 +172,13 @@ class PlexActivity(commands.Cog):
 
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
+                        media_elem = session_elem.find("Media")  # Important for Bitrate
                         transcode_elem = session_elem.find("TranscodeSession")
 
                         if user_elem is None or player_elem is None:
                             continue
 
                         username = user_elem.get("title", "Unknown User")
-
-                        # --- USER AVATAR LOGIC ---
-                        # Plex usually sends a thumb path, but needs the token appended if it's not a public URL
                         user_thumb = user_elem.get("thumb")
                         if user_thumb and not user_thumb.startswith("http"):
                             user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
@@ -167,7 +191,6 @@ class PlexActivity(commands.Cog):
                         current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
                         total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
 
-                        # --- ETA CALCULATION ---
                         remaining_ms = max(0, duration_ms - view_offset_ms)
                         finish_time = datetime.now() + timedelta(milliseconds=remaining_ms)
                         finish_ts = int(finish_time.timestamp())
@@ -175,9 +198,19 @@ class PlexActivity(commands.Cog):
                         series_title = session_elem.get("grandparentTitle")
                         media_type = session_elem.get("type", "media")
                         device = player_elem.get("product", "Unknown Device")
-                        state = player_elem.get("state", "playing")  # playing, paused, buffering
+                        state = player_elem.get("state", "playing")
 
-                        # --- TRANSCODE DETECTION ---
+                        # --- BANDWIDTH / BITRATE ---
+                        bitrate_kbps = 0
+                        if media_elem is not None:
+                            # Plex reports bitrate in kbps
+                            bitrate_kbps = int(media_elem.get("bitrate", 0))
+
+                        bandwidth_str = "Unknown"
+                        if bitrate_kbps > 0:
+                            bandwidth_mbps = bitrate_kbps / 1000
+                            bandwidth_str = f"{bandwidth_mbps:.1f} Mbps"
+
                         stream_info = "Direct Play"
                         if transcode_elem is not None:
                             video_decision = transcode_elem.get("videoDecision", "unknown")
@@ -186,7 +219,6 @@ class PlexActivity(commands.Cog):
                             else:
                                 stream_info = "Direct Stream"
 
-                        # --- IMAGE LOGIC ---
                         image_url = None
                         if tmdb_key:
                             search_query = series_title if media_type == 'episode' else media_title
@@ -211,6 +243,7 @@ class PlexActivity(commands.Cog):
                             "device": device,
                             "state": state,
                             "stream_info": stream_info,
+                            "bandwidth": bandwidth_str,
                             "image_url": image_url
                         }
 
@@ -250,16 +283,17 @@ class PlexActivity(commands.Cog):
             image_url = session.get("image_url")
             state = session.get("state")
             stream_info = session.get("stream_info")
+            bandwidth = session.get("bandwidth")
             finish_ts = session.get("finish_ts")
 
-            # State Icons
             state_icon = "▶️"
             if state == "paused":
                 state_icon = "⏸️"
             elif state == "buffering":
                 state_icon = "⏳"
 
-            # Colors
+            device_emoji = self._get_device_emoji(device)
+
             color = discord.Color.orange() if media_type == 'movie' else discord.Color.blue()
             if image_url and HAS_PIL:
                 dynamic_color = await self._get_dominant_color(image_url)
@@ -267,12 +301,9 @@ class PlexActivity(commands.Cog):
                     color = dynamic_color
 
             embed = discord.Embed(color=color)
-
-            # Use Real User Avatar if available, else Plex Logo
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
             embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
 
-            # Title Formatting
             if media_type == "episode":
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
@@ -280,19 +311,18 @@ class PlexActivity(commands.Cog):
                 embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
 
-            # Visual Progress Bar
             bar = self._generate_progress_bar(session.get("current_ms"), session.get("total_ms"))
 
-            # Combine Stats into fewer fields for cleaner look
             embed.add_field(
                 name=f"{state_icon} Progress",
                 value=f"`{bar}`\n`{current} / {total}`\nEnds: <t:{finish_ts}:R>",
                 inline=False
             )
 
+            # Added Bandwidth to Tech Specs
             embed.add_field(
                 name="Tech Specs",
-                value=f"📱 **Device:** `{device}`\n⚙️ **Stream:** `{stream_info}`",
+                value=f"{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{stream_info}`\n📶 **Bitrate:** `{bandwidth}`",
                 inline=False
             )
 
