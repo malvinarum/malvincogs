@@ -101,14 +101,27 @@ class TorrentsWatch(commands.Cog):
         embed = discord.Embed(title="📥 Download Queue", color=discord.Color.blue())
 
         if queue_items:
-            queue_items.sort(key=lambda x: x.get("sizeleft", 0))
+            # Robust sorting with fallback keys
+            queue_items.sort(key=lambda x: x.get("sizeleft", x.get("sizeLeft", 0)))
+
             field_val = ""
             for item in queue_items[:8]:
                 title = item.get("title", "Unknown")
-                size = item.get("size", 1)
-                size_left = item.get("sizeleft", 0)
+                # Handle CamelCase keys from Sonarr/Radarr v3
+                size = item.get("size", item.get("Size", 1))
+                size_left = item.get("sizeleft", item.get("sizeLeft", 0))
                 status = item.get("status", "Unknown")
                 source = item.get("source", "?")
+
+                # Detailed warning check
+                if status.lower() == "warning":
+                    # Try to find the error message
+                    msgs = item.get("statusMessages", []) or item.get("messages", [])
+                    if msgs and isinstance(msgs, list) and len(msgs) > 0:
+                        # Usually a list of dicts
+                        err_msg = msgs[0].get("title", "") or msgs[0].get("message", "")
+                        if err_msg:
+                            status = f"⚠️ {err_msg}"
 
                 if len(title) > 40: title = title[:38] + "..."
 
