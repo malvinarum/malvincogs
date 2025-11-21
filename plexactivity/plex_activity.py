@@ -25,14 +25,15 @@ DEFAULT_GUILD_SETTINGS = {
     "activity_channel": None,
     "activity_message_id": None,
     "update_interval": 60,
-    "tmdb_api_key": None
+    "tmdb_api_key": None,
+    "user_map": {}  # NEW: Maps Plex Username -> Discord User ID
 }
 
 
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Now with Device-Specific Emojis and Bandwidth/Bitrate info! 📺 🎮 💻
+    Features: TMDB, Dynamic Colors, Tech Specs, and User Mapping!
     """
 
     def __init__(self, bot):
@@ -72,76 +73,50 @@ class PlexActivity(commands.Cog):
         filled = int(length * percent)
         return "▓" * filled + "░" * (length - filled)
 
-    # --- DEVICE EMOJI LOGIC ---
     def _get_device_emoji(self, device_name: str) -> str:
         d = device_name.lower()
-
-        if any(x in d for x in ["tv", "roku", "chromecast", "fire", "shield", "bravia", "lg", "samsung"]):
-            return "📺"
-
-        if any(x in d for x in ["playstation", "xbox", "ps4", "ps5", "switch"]):
-            return "🎮"
-
-        if "mac" in d or "osx" in d or "apple" in d:
-            return "🍎"
-        if "windows" in d or "pc" in d:
-            return "🪟"
-        if "linux" in d:
-            return "🐧"
-
-        if any(x in d for x in ["desktop", "laptop"]):
-            return "💻"
-
-        if any(x in d for x in ["web", "chrome", "firefox", "edge", "safari", "opera"]):
-            return "🌐"
-
-        if any(x in d for x in ["phone", "ipad", "iphone", "android", "mobile", "tablet"]):
-            return "📱"
-
+        if any(x in d for x in ["tv", "roku", "chromecast", "fire", "shield", "bravia", "lg", "samsung"]): return "📺"
+        if any(x in d for x in ["playstation", "xbox", "ps4", "ps5", "switch"]): return "🎮"
+        if "mac" in d or "osx" in d or "apple" in d: return "🍎"
+        if "windows" in d or "pc" in d: return "🪟"
+        if "linux" in d: return "🐧"
+        if any(x in d for x in ["desktop", "laptop"]): return "💻"
+        if any(x in d for x in ["web", "chrome", "firefox", "edge", "safari", "opera"]): return "🌐"
+        if any(x in d for x in ["phone", "ipad", "iphone", "android", "mobile", "tablet"]): return "📱"
         return "📱"
 
     async def _get_dominant_color(self, image_url: str):
-        if not HAS_PIL or not image_url:
-            return None
-        if image_url in self.color_cache:
-            return self.color_cache[image_url]
-
+        if not HAS_PIL or not image_url: return None
+        if image_url in self.color_cache: return self.color_cache[image_url]
         try:
             async with self.session.get(image_url) as resp:
                 if resp.status == 200:
                     data = await resp.read()
 
                     def get_color(img_data):
-                        img = Image.open(io.BytesIO(img_data))
-                        img = img.convert("RGB")
-                        img = img.resize((1, 1))
+                        img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((1, 1))
                         return img.getpixel((0, 0))
 
                     rgb = await self.bot.loop.run_in_executor(None, get_color, data)
                     color = discord.Color.from_rgb(*rgb)
-                    if len(self.color_cache) > 100:
-                        self.color_cache.clear()
+                    if len(self.color_cache) > 100: self.color_cache.clear()
                     self.color_cache[image_url] = color
                     return color
         except Exception:
             return None
 
     async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
-        if not api_key:
-            return None
+        if not api_key: return None
         search_url = f"https://api.themoviedb.org/3/search/{media_type}"
         params = {'api_key': api_key, 'query': query, 'page': 1}
-        if year and media_type == 'movie':
-            params['year'] = year
-
+        if year and media_type == 'movie': params['year'] = year
         try:
             async with self.session.get(search_url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     if data['results']:
-                        poster_path = data['results'][0].get('poster_path')
-                        if poster_path:
-                            return f"https://image.tmdb.org/t/p/w500{poster_path}"
+                        path = data['results'][0].get('poster_path')
+                        if path: return f"https://image.tmdb.org/t/p/w500{path}"
         except Exception:
             pass
         return None
@@ -151,35 +126,45 @@ class PlexActivity(commands.Cog):
         plex_url = settings["plex_url"]
         plex_token = settings["plex_token"]
         tmdb_key = settings.get("tmdb_api_key")
+        user_map = settings.get("user_map", {})  # Load the map
 
-        if not plex_url or not plex_token:
-            return []
-
-        if not plex_url.endswith("/"):
-            plex_url += "/"
-
+        if not plex_url or not plex_token: return []
+        if not plex_url.endswith("/"): plex_url += "/"
         api_url = f"{plex_url}status/sessions?X-Plex-Token={plex_token}"
 
         try:
             async with self.session.get(api_url, timeout=10) as response:
                 response.raise_for_status()
                 data = await response.text()
-
                 sessions = []
                 try:
                     root = ET.fromstring(data)
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
-
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
-                        media_elem = session_elem.find("Media")  # Important for Bitrate
+                        media_elem = session_elem.find("Media")
                         transcode_elem = session_elem.find("TranscodeSession")
 
-                        if user_elem is None or player_elem is None:
-                            continue
+                        if user_elem is None or player_elem is None: continue
 
-                        username = user_elem.get("title", "Unknown User")
+                        # --- USER RESOLUTION ---
+                        plex_username = user_elem.get("title", "Unknown User")
+                        display_name = plex_username
                         user_thumb = user_elem.get("thumb")
+
+                        # Check for Discord Mapping
+                        discord_id = user_map.get(plex_username)
+                        if discord_id:
+                            # Fetch the member from the guild to get current name/avatar
+                            guild = self.bot.get_guild(guild_id)
+                            if guild:
+                                member = guild.get_member(discord_id)
+                                if member:
+                                    display_name = member.display_name  # Or member.mention if you want clickable
+                                    # We use member.display_avatar.url for the icon
+                                    user_thumb = member.display_avatar.url
+
+                        # Fallback for Plex Thumb if no Discord match
                         if user_thumb and not user_thumb.startswith("http"):
                             user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
 
@@ -190,34 +175,21 @@ class PlexActivity(commands.Cog):
 
                         current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
                         total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
-
                         remaining_ms = max(0, duration_ms - view_offset_ms)
-                        finish_time = datetime.now() + timedelta(milliseconds=remaining_ms)
-                        finish_ts = int(finish_time.timestamp())
+                        finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
 
                         series_title = session_elem.get("grandparentTitle")
                         media_type = session_elem.get("type", "media")
                         device = player_elem.get("product", "Unknown Device")
                         state = player_elem.get("state", "playing")
 
-                        # --- BANDWIDTH / BITRATE ---
-                        bitrate_kbps = 0
-                        if media_elem is not None:
-                            # Plex reports bitrate in kbps
-                            bitrate_kbps = int(media_elem.get("bitrate", 0))
-
-                        bandwidth_str = "Unknown"
-                        if bitrate_kbps > 0:
-                            bandwidth_mbps = bitrate_kbps / 1000
-                            bandwidth_str = f"{bandwidth_mbps:.1f} Mbps"
+                        bitrate_kbps = int(media_elem.get("bitrate", 0)) if media_elem is not None else 0
+                        bandwidth_str = f"{bitrate_kbps / 1000:.1f} Mbps" if bitrate_kbps > 0 else "Unknown"
 
                         stream_info = "Direct Play"
                         if transcode_elem is not None:
                             video_decision = transcode_elem.get("videoDecision", "unknown")
-                            if video_decision == "transcode":
-                                stream_info = "Transcoding ⚠️"
-                            else:
-                                stream_info = "Direct Stream"
+                            stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
 
                         image_url = None
                         if tmdb_key:
@@ -232,8 +204,8 @@ class PlexActivity(commands.Cog):
                                 image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
                         session_data = {
-                            "user": username,
-                            "user_thumb": user_thumb,
+                            "user": display_name,  # Use the resolved Discord name
+                            "user_thumb": user_thumb,  # Use the resolved Discord avatar
                             "type": media_type,
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
@@ -258,33 +230,22 @@ class PlexActivity(commands.Cog):
                         sessions.append(session_data)
                 except ET.ParseError:
                     return []
-
                 return sessions
         except Exception:
             return []
 
     async def _generate_session_embeds(self, sessions: list):
         if not sessions:
-            embed = discord.Embed(
-                title="Plex Media Server",
-                description="😴 No active streams. Server is idle.",
-                color=discord.Color.dark_grey(),
-                timestamp=datetime.now()
-            )
-            return [embed]
+            return [discord.Embed(title="Plex Media Server", description="😴 No active streams.",
+                                  color=discord.Color.dark_grey(), timestamp=datetime.now())]
 
         embeds = []
         for session in sessions[:10]:
             user = session.get("user", "Unknown")
             media_type = session.get("type")
-            current = session.get("current_time")
-            total = session.get("total_duration")
             device = session.get("device")
             image_url = session.get("image_url")
             state = session.get("state")
-            stream_info = session.get("stream_info")
-            bandwidth = session.get("bandwidth")
-            finish_ts = session.get("finish_ts")
 
             state_icon = "▶️"
             if state == "paused":
@@ -293,14 +254,13 @@ class PlexActivity(commands.Cog):
                 state_icon = "⏳"
 
             device_emoji = self._get_device_emoji(device)
-
             color = discord.Color.orange() if media_type == 'movie' else discord.Color.blue()
             if image_url and HAS_PIL:
                 dynamic_color = await self._get_dominant_color(image_url)
-                if dynamic_color:
-                    color = dynamic_color
+                if dynamic_color: color = dynamic_color
 
             embed = discord.Embed(color=color)
+            # Use the resolved user thumb (Discord Avatar)
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
             embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
 
@@ -312,28 +272,17 @@ class PlexActivity(commands.Cog):
                 embed.description = f"*{media_type.capitalize()}*"
 
             bar = self._generate_progress_bar(session.get("current_ms"), session.get("total_ms"))
-
-            embed.add_field(
-                name=f"{state_icon} Progress",
-                value=f"`{bar}`\n`{current} / {total}`\nEnds: <t:{finish_ts}:R>",
-                inline=False
-            )
-
-            # Added Bandwidth to Tech Specs
-            embed.add_field(
-                name="Tech Specs",
-                value=f"{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{stream_info}`\n📶 **Bitrate:** `{bandwidth}`",
-                inline=False
-            )
-
-            if image_url:
-                embed.set_thumbnail(url=image_url)
-
+            embed.add_field(name=f"{state_icon} Progress",
+                            value=f"`{bar}`\n`{session.get('current_time')} / {session.get('total_duration')}`\nEnds: <t:{session.get('finish_ts')}:R>",
+                            inline=False)
+            embed.add_field(name="Tech Specs",
+                            value=f"{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{session.get('stream_info')}`\n📶 **Bitrate:** `{session.get('bandwidth')}`",
+                            inline=False)
+            if image_url: embed.set_thumbnail(url=image_url)
             embeds.append(embed)
 
         embeds[-1].timestamp = datetime.now()
         embeds[-1].set_footer(text="Plex Activity • Live Update")
-
         return embeds
 
     @tasks.loop(seconds=60)
@@ -347,16 +296,11 @@ class PlexActivity(commands.Cog):
             if self.plex_activity_loop.seconds != update_interval:
                 self.plex_activity_loop.change_interval(seconds=update_interval)
 
-            if not channel_id:
-                continue
-
+            if not channel_id: continue
             guild = self.bot.get_guild(guild_id)
-            if not guild:
-                continue
-
+            if not guild: continue
             channel = guild.get_channel(channel_id)
-            if not channel:
-                continue
+            if not channel: continue
 
             sessions = await self._get_plex_sessions(guild_id)
             embeds = await self._generate_session_embeds(sessions)
@@ -391,14 +335,13 @@ class PlexActivity(commands.Cog):
     @plex.command(name="setup")
     async def plex_setup(self, ctx: commands.Context):
         """Interactive setup for Plex URL and Token."""
-        await ctx.send("Enter Plex URL (e.g. http://192.168.1.100:32400):")
+        await ctx.send("Enter Plex URL:")
         try:
             msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
             url = msg.content.strip()
             await ctx.send("Enter Plex Token:")
             msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
             token = msg.content.strip()
-
             await self.config.guild(ctx.guild).plex_url.set(url)
             await self.config.guild(ctx.guild).plex_token.set(token)
             await ctx.send("Configured!")
@@ -407,7 +350,7 @@ class PlexActivity(commands.Cog):
 
     @plex.command(name="tmdb")
     async def plex_tmdb(self, ctx: commands.Context, api_key: str):
-        """Set the TMDB API Key for fetching posters."""
+        """Set the TMDB API Key."""
         await self.config.guild(ctx.guild).tmdb_api_key.set(api_key)
         await ctx.send("✅ TMDB API Key set!")
 
@@ -417,11 +360,45 @@ class PlexActivity(commands.Cog):
         await self.config.guild(ctx.guild).activity_channel.set(channel.id)
         await self.config.guild(ctx.guild).activity_message_id.set(None)
         await ctx.send(f"Updates will post to {channel.mention}.")
-
         sessions = await self._get_plex_sessions(ctx.guild.id)
         embeds = await self._generate_session_embeds(sessions)
         msg = await channel.send(embeds=embeds)
         await self.config.guild(ctx.guild).activity_message_id.set(msg.id)
+
+    @plex.command(name="map")
+    async def plex_map(self, ctx: commands.Context, plex_user: str, discord_user: discord.Member):
+        """
+        Map a Plex username to a Discord user.
+        Example: [p]plex map malvinarum @Malvin
+        """
+        async with self.config.guild(ctx.guild).user_map() as user_map:
+            user_map[plex_user] = discord_user.id
+
+        await ctx.send(f"✅ Mapped Plex user `{plex_user}` to {discord_user.mention}.")
+
+    @plex.command(name="unmap")
+    async def plex_unmap(self, ctx: commands.Context, plex_user: str):
+        """Remove a mapping."""
+        async with self.config.guild(ctx.guild).user_map() as user_map:
+            if plex_user in user_map:
+                del user_map[plex_user]
+                await ctx.send(f"🗑️ Unmapped `{plex_user}`.")
+            else:
+                await ctx.send("User not found in map.")
+
+    @plex.command(name="listmaps")
+    async def plex_listmaps(self, ctx: commands.Context):
+        """List all user mappings."""
+        user_map = await self.config.guild(ctx.guild).user_map()
+        if not user_map: return await ctx.send("No mappings.")
+
+        msg = "**Plex User ➡️ Discord User**\n"
+        for p_user, d_id in user_map.items():
+            d_user = ctx.guild.get_member(d_id)
+            name = d_user.mention if d_user else f"Unknown ID: {d_id}"
+            msg += f"`{p_user}` ➡️ {name}\n"
+
+        await ctx.send(msg)
 
     @plex.command(name="status")
     async def plex_status(self, ctx: commands.Context):
@@ -431,7 +408,8 @@ class PlexActivity(commands.Cog):
             f"URL: {data['plex_url']}\n"
             f"Token: {'Set' if data['plex_token'] else 'Missing'}\n"
             f"TMDB Key: {'Set' if data['tmdb_api_key'] else 'Missing'}\n"
-            f"Channel: {data['activity_channel']}"
+            f"Channel: {data['activity_channel']}\n"
+            f"Mapped Users: {len(data.get('user_map', {}))}"
         ))
 
 
