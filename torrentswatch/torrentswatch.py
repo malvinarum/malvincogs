@@ -73,13 +73,8 @@ class TorrentsWatch(commands.Cog):
             data = {'username': user, 'password': password}
             async with self.session.post(login_url, data=data, timeout=5) as resp:
                 if resp.status == 200:
-                    # qBit sets a cookie named 'SID'
-                    # aiohttp client session stores cookies automatically if we use the same session
-                    # but sometimes we need to be explicit if it fails.
-                    # For now, trusting the session cookie jar.
                     if 'SID' in resp.cookies:
                         return True
-                    # Sometimes it just returns "Ok." as text
                     text = await resp.text()
                     return "Ok." in text
         except Exception as e:
@@ -122,60 +117,55 @@ class TorrentsWatch(commands.Cog):
 
         embed = discord.Embed(title=title_str, color=discord.Color.green())
 
+        # Set the timestamp on the embed object itself.
+        # Discord uses this to show "Today at X:XX PM" at the bottom automatically.
+        embed.timestamp = datetime.now()
+
         if not torrents:
             embed.description = "😴 No torrents in client."
-            embed.timestamp = datetime.now()
+            embed.set_footer(text="qBittorrent Direct")
             return embed
 
         # Logic: Show Downloading/Active first, then Error, then Queued, then Completed
-        # qBit states: downloading, stalledDL, metaDL, queuedDL, uploading, stalledUP, completed, pausedDL
 
-        # Priority Sort
         def get_priority(t):
             state = t.get('state', '')
-            if 'meta' in state: return 0  # Metadata is interesting
+            if 'meta' in state: return 0
             if 'downloading' in state: return 1
             if 'stalledDL' in state: return 2
             if 'queuedDL' in state: return 3
             if 'error' in state: return 4
-            if 'uploading' in state or 'stalledUP' in state: return 5  # Seeding
-            return 9  # Completed/Paused/etc
+            if 'uploading' in state or 'stalledUP' in state: return 5
+            return 9
 
         torrents.sort(key=get_priority)
 
-        # Separate lists for visual clarity
         active_lines = []
         seeding_lines = []
-
         count_downloading = 0
 
         for t in torrents:
             state = t.get('state', 'unknown')
-            # Filter: Don't show completed/paused unless you want to
-            # Let's show active DL, Metadata, and maybe top seeds
-
             is_downloading = state in ['downloading', 'metaDL', 'stalledDL', 'queuedDL', 'forcedDL']
             is_seeding = state in ['uploading', 'stalledUP', 'queuedUP', 'forcedUP']
 
             if not is_downloading and not is_seeding and state != 'error':
-                continue  # Skip completed/paused to keep list clean
+                continue
 
             name = t.get('name', 'Unknown')
             if len(name) > 40: name = name[:38] + "..."
 
-            progress = t.get('progress', 0)  # 0.0 to 1.0
-            size = t.get('size', 0)
+            progress = t.get('progress', 0)
             dlspeed = t.get('dlspeed', 0)
-            eta = t.get('eta', 8640000)  # Seconds
+            eta = t.get('eta', 8640000)
 
-            # Emojis
             status_icon = "⏸️"
             if 'downloading' in state:
                 status_icon = "⏬"
             elif 'stalledDL' in state:
-                status_icon = "🐢"  # Stalled
+                status_icon = "🐢"
             elif 'metaDL' in state:
-                status_icon = "📡"  # Metadata
+                status_icon = "📡"
             elif 'uploading' in state:
                 status_icon = "⏫"
             elif 'queued' in state:
@@ -183,10 +173,8 @@ class TorrentsWatch(commands.Cog):
             elif 'error' in state:
                 status_icon = "❌"
 
-            # ETA String
             eta_str = ""
             if is_downloading and dlspeed > 0 and eta < 8640000:
-                # Simple formatting
                 if eta < 60:
                     eta_str = f"{eta}s"
                 elif eta < 3600:
@@ -197,7 +185,6 @@ class TorrentsWatch(commands.Cog):
                     eta_str = ">1d"
                 eta_str = f" • ⏱️ {eta_str}"
 
-            # Build Line
             bar = self._generate_progress_bar(progress, 10)
             pct = int(progress * 100)
 
@@ -209,12 +196,12 @@ class TorrentsWatch(commands.Cog):
                 else:
                     line += f" • {self._format_speed(dlspeed)}{eta_str}"
 
-                if len(active_lines) < 8:  # Limit Active
+                if len(active_lines) < 8:
                     active_lines.append(line)
                 count_downloading += 1
 
             elif is_seeding:
-                if len(seeding_lines) < 3:  # Limit Seeding display
+                if len(seeding_lines) < 3:
                     seeding_lines.append(f"{status_icon} **{name}** ({pct}%)")
 
         if active_lines:
@@ -225,7 +212,9 @@ class TorrentsWatch(commands.Cog):
         if seeding_lines:
             embed.add_field(name="Seeding (Top 3)", value="\n".join(seeding_lines), inline=False)
 
-        embed.set_footer(text=f"qBittorrent Direct • Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+        # Removed manual time string, just static text now.
+        # Discord handles the time display via embed.timestamp
+        embed.set_footer(text="qBittorrent Direct")
         return embed
 
     @tasks.loop(seconds=60)
@@ -244,25 +233,21 @@ class TorrentsWatch(commands.Cog):
 
             if not channel_id or not url: continue
 
-            # Ensure Protocol
             if not url.startswith("http"): url = f"http://{url}"
             if not url.endswith("/"): url += "/"
 
-            # 1. Fetch Data
             data, global_info = await self._fetch_qbit_data(url)
 
-            # 2. Re-Auth if needed
             if data == "AUTH_REQUIRED":
                 success = await self._qbit_login(url, user, pwd)
                 if success:
                     data, global_info = await self._fetch_qbit_data(url)
                 else:
                     log.warning("qBit Auto-Login failed.")
-                    continue  # Skip this cycle
+                    continue
 
-            if data is None: continue  # Fetch failed
+            if data is None: continue
 
-            # 3. Build & Post
             embed = await self._build_embed(data, global_info)
             channel = self.bot.get_channel(channel_id)
             if not channel: continue
@@ -308,7 +293,6 @@ class TorrentsWatch(commands.Cog):
             await self.config.guild(ctx.guild).qbit_pass.set(pwd)
 
             await ctx.send("Testing connection...")
-            # Ensure Protocol for test
             if not url.startswith("http"): url = f"http://{url}"
             if not url.endswith("/"): url += "/"
 
