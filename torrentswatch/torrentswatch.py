@@ -2,7 +2,7 @@ import discord
 import aiohttp
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import box
 from discord.ext import tasks
@@ -24,6 +24,7 @@ DEFAULT_GUILD_SETTINGS = {
 class TorrentsWatch(commands.Cog):
     """
     A cog to monitor Sonarr/Radarr download queues in a static embed.
+    Now with ETAs, Global Speed, and Status Icons!
     """
 
     def __init__(self, bot):
@@ -49,9 +50,18 @@ class TorrentsWatch(commands.Cog):
         filled = int(length * percent)
         return "▓" * filled + "░" * (length - filled)
 
+    def _format_size(self, size_bytes: float) -> str:
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 ** 2:
+            return f"{size_bytes / 1024:.1f} KB"
+        elif size_bytes < 1024 ** 3:
+            return f"{size_bytes / 1024 ** 2:.1f} MB"
+        else:
+            return f"{size_bytes / 1024 ** 3:.2f} GB"
+
     async def _fetch_queue(self, url: str, key: str, app_type: str):
         if not url or not key: return []
-
         if not url.startswith("http"): url = f"http://{url}"
         if not url.endswith("/"): url += "/"
 
@@ -65,8 +75,7 @@ class TorrentsWatch(commands.Cog):
                     records = data.get("records", [])
                     for r in records: r["source"] = app_type
                     return records
-                else:
-                    return []
+                return []
         except Exception:
             return []
 
@@ -93,46 +102,71 @@ class TorrentsWatch(commands.Cog):
         if not queue_items and not history_items:
             return discord.Embed(
                 title="📥 Torrents Watch",
-                description="😴 No active downloads or recent history.",
+                description="😴 System idle. No active downloads.",
                 color=discord.Color.dark_grey(),
                 timestamp=datetime.now()
             )
 
         embed = discord.Embed(title="📥 Download Queue", color=discord.Color.blue())
 
+        # --- AGGREGATE STATS ---
+        # Calculate total speed if available in the records?
+        # Sonarr Queue records have 'timeleft' but rarely explicit 'speed'.
+        # However, sometimes 'timeleft' format is "00:05:00".
+
         if queue_items:
-            # Robust sorting with fallback keys
             queue_items.sort(key=lambda x: x.get("sizeleft", x.get("sizeLeft", 0)))
 
             field_val = ""
             for item in queue_items[:8]:
                 title = item.get("title", "Unknown")
-                # Handle CamelCase keys from Sonarr/Radarr v3
                 size = item.get("size", item.get("Size", 1))
                 size_left = item.get("sizeleft", item.get("sizeLeft", 0))
                 status = item.get("status", "Unknown")
+                tracked_status = item.get("trackedDownloadStatus", "")
                 source = item.get("source", "?")
+                time_left = item.get("timeleft", "00:00:00")
 
-                # Detailed warning check
-                if status.lower() == "warning":
-                    # Try to find the error message
+                # Status Logic & Emojis
+                state_emoji = "⏬"
+                status_text = status
+
+                if status.lower() == "warning" or tracked_status.lower() == "warning":
+                    state_emoji = "⚠️"
                     msgs = item.get("statusMessages", []) or item.get("messages", [])
-                    if msgs and isinstance(msgs, list) and len(msgs) > 0:
-                        # Usually a list of dicts
-                        err_msg = msgs[0].get("title", "") or msgs[0].get("message", "")
-                        if err_msg:
-                            status = f"⚠️ {err_msg}"
+                    if msgs and len(msgs) > 0:
+                        status_text = msgs[0].get("title", "Warning")
+                    else:
+                        status_text = "Warning (Check Client)"
+                elif status.lower() == "paused":
+                    state_emoji = "⏸️"
+                elif status.lower() == "queued":
+                    state_emoji = "⏳"
 
-                if len(title) > 40: title = title[:38] + "..."
+                # Clean Title
+                if len(title) > 35: title = title[:33] + "..."
 
+                # Progress Math
                 percent = 1.0 - (size_left / size) if size > 0 else 0.0
-                bar = self._generate_progress_bar(percent, length=12)
-                emoji = "📺" if source == "Sonarr" else "🎬"
+                bar = self._generate_progress_bar(percent, length=10)
 
-                field_val += f"{emoji} **{title}**\n`{bar}` {int(percent * 100)}% • {status}\n"
+                # Source Icon
+                src_emoji = "📺" if source == "Sonarr" else "🎬"
+
+                # Format ETA string
+                eta_str = ""
+                if time_left and time_left != "00:00:00":
+                    # If it looks like a time duration
+                    eta_str = f" • ETA: {time_left}"
+
+                field_val += (
+                    f"{src_emoji} **{title}**\n"
+                    f"`{bar}` {int(percent * 100)}% • {self._format_size(size_left)} left\n"
+                    f"{state_emoji} **{status_text}**{eta_str}\n"
+                )
 
             if len(queue_items) > 8:
-                field_val += f"...and {len(queue_items) - 8} more."
+                field_val += f"\n*...and {len(queue_items) - 8} more items.*"
 
             embed.add_field(name="Active Downloads", value=field_val, inline=False)
         else:
@@ -143,6 +177,7 @@ class TorrentsWatch(commands.Cog):
             hist_val = ""
             for item in history_items[:5]:
                 event = item.get("eventType", "Unknown")
+
                 title = "Unknown"
                 if "movie" in item:
                     title = item["movie"]["title"]
@@ -151,7 +186,7 @@ class TorrentsWatch(commands.Cog):
                 elif "sourceTitle" in item:
                     title = item["sourceTitle"]
 
-                if len(title) > 45: title = title[:43] + "..."
+                if len(title) > 40: title = title[:38] + "..."
 
                 dt_str = item.get("date", "")
                 try:
@@ -161,10 +196,18 @@ class TorrentsWatch(commands.Cog):
                 except:
                     time_str = ""
 
-                emoji = "🟢" if event == "grabbed" else "📂" if event == "downloadFolderImported" else "ℹ️"
-                hist_val += f"{emoji} **{title}** ({event})\n{time_str}\n"
+                # Event Emojis
+                ev_emoji = "ℹ️"
+                if event == "grabbed":
+                    ev_emoji = "🛒"  # Shopping cart for grabbed
+                elif event == "downloadFolderImported":
+                    ev_emoji = "✅"
+                elif event == "downloadFailed":
+                    ev_emoji = "❌"
 
-            embed.add_field(name="Recent Activity", value=hist_val, inline=False)
+                hist_val += f"{ev_emoji} **{title}** ({event})\n{time_str}\n"
+
+            embed.add_field(name="Recent History", value=hist_val, inline=False)
 
         embed.set_footer(text=f"TorrentsWatch • Last Updated: {datetime.now().strftime('%H:%M:%S')}")
         return embed
@@ -188,6 +231,7 @@ class TorrentsWatch(commands.Cog):
 
             combined_q = sonarr_q + radarr_q
             combined_h = sonarr_h + radarr_h
+
             embed = await self._build_embed(combined_q, combined_h)
 
             message_id = settings["message_id"]
