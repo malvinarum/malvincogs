@@ -2,7 +2,7 @@ import discord
 import aiohttp
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import box
 from discord.ext import tasks
@@ -24,7 +24,7 @@ DEFAULT_GUILD_SETTINGS = {
 class TorrentsWatch(commands.Cog):
     """
     A cog to monitor Sonarr/Radarr download queues in a static embed.
-    Features: Deduplication, Metadata handling, and Smart Progress.
+    Features: Aggressive Deduplication & Smart Status.
     """
 
     def __init__(self, bot):
@@ -62,6 +62,7 @@ class TorrentsWatch(commands.Cog):
 
     async def _fetch_queue(self, url: str, key: str, app_type: str):
         if not url or not key: return []
+
         if not url.startswith("http"): url = f"http://{url}"
         if not url.endswith("/"): url += "/"
 
@@ -122,19 +123,17 @@ class TorrentsWatch(commands.Cog):
                 time_left = item.get("timeleft", "00:00:00")
                 source = item.get("source", "?")
 
-                # --- LOGIC FIX: Handle Metadata/0-byte files ---
+                # --- STATUS & EMOJI LOGIC ---
                 if size == 0:
                     status_text = "Fetching Metadata..."
                     bar = "📡📡📡📡📡📡📡📡📡📡"
                     stats_line = "Waiting for peers..."
                     state_emoji = "🔍"
                 else:
-                    # Normal calculation
                     percent = 1.0 - (size_left / size)
                     bar = self._generate_progress_bar(percent, length=10)
                     stats_line = f"{int(percent * 100)}% • {self._format_size(size_left)} left"
 
-                    # Status Text & Emojis
                     state_emoji = "⏬"
                     status_text = status
                     if status.lower() == "warning":
@@ -146,14 +145,11 @@ class TorrentsWatch(commands.Cog):
                     elif status.lower() == "queued":
                         state_emoji = "⏳"
 
-                    # Add ETA if available
                     if time_left and time_left != "00:00:00":
                         status_text += f" (ETA: {time_left})"
 
-                # Clean Title
                 if len(title) > 35: title = title[:33] + "..."
 
-                # Source Icon
                 src_emoji = "📺" if source == "Sonarr" else "🎬"
 
                 field_val += (
@@ -214,41 +210,47 @@ class TorrentsWatch(commands.Cog):
 
             sonarr_q = await self._fetch_queue(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
             radarr_q = await self._fetch_queue(settings["radarr_url"], settings["radarr_key"], "Radarr")
+
+            # --- AGGRESSIVE DEDUPLICATION ---
+            # Combine raw queues
+            raw_queue = sonarr_q + radarr_q
+            combined_q = []
+            seen_identifiers = set()  # Can be ID or Hash or Title
+
+            for item in raw_queue:
+                # Try to find a unique identifier for the download
+                # 1. downloadId (Hash from client)
+                # 2. id (Sonarr internal ID)
+                # 3. title (Last resort)
+
+                unique_key = item.get("downloadId") or item.get("id") or item.get("title")
+
+                if unique_key:
+                    # Lowercase if it's a string (hash/title) to be safe
+                    if isinstance(unique_key, str):
+                        unique_key = unique_key.lower()
+
+                    if unique_key not in seen_identifiers:
+                        seen_identifiers.add(unique_key)
+                        combined_q.append(item)
+                else:
+                    combined_q.append(item)
+
+            # History fetching (kept separate for simplicity, duplicates less annoying there)
             sonarr_h = await self._fetch_history(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
             radarr_h = await self._fetch_history(settings["radarr_url"], settings["radarr_key"], "Radarr")
 
-            # --- DEDUPLICATION LOGIC ---
-            # Combine and dedupe by ID to prevent "Double Vision"
-            raw_queue = sonarr_q + radarr_q
-            combined_q = []
-            seen_ids = set()
+            combined_h = sonarr_h + radarr_h
+            # Simple history dedupe by 'id'
+            deduped_h = []
+            seen_h = set()
+            for h in combined_h:
+                hid = h.get("id")
+                if hid and hid not in seen_h:
+                    seen_h.add(hid)
+                    deduped_h.append(h)
 
-            for item in raw_queue:
-                # Use 'id' if available, otherwise fallback to title (risky but okay for dedupe)
-                # Sonarr/Radarr queue items usually have a unique 'id'
-                q_id = item.get("id")
-                if q_id:
-                    if q_id not in seen_ids:
-                        seen_ids.add(q_id)
-                        combined_q.append(item)
-                else:
-                    # Fallback: If no ID (unlikely), just add it
-                    combined_q.append(item)
-
-            # Dedupe history too just in case
-            raw_history = sonarr_h + radarr_h
-            combined_h = []
-            seen_h_ids = set()
-            for item in raw_history:
-                h_id = item.get("id")
-                if h_id:
-                    if h_id not in seen_h_ids:
-                        seen_h_ids.add(h_id)
-                        combined_h.append(item)
-                else:
-                    combined_h.append(item)
-
-            embed = await self._build_embed(combined_q, combined_h)
+            embed = await self._build_embed(combined_q, deduped_h)
 
             message_id = settings["message_id"]
             if message_id:
