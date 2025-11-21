@@ -26,7 +26,7 @@ DEFAULT_GUILD_SETTINGS = {
     "activity_message_id": None,
     "update_interval": 60,
     "tmdb_api_key": None,
-    "user_map": {}  # NEW: Maps Plex Username -> Discord User ID
+    "user_map": {}
 }
 
 
@@ -126,7 +126,7 @@ class PlexActivity(commands.Cog):
         plex_url = settings["plex_url"]
         plex_token = settings["plex_token"]
         tmdb_key = settings.get("tmdb_api_key")
-        user_map = settings.get("user_map", {})  # Load the map
+        user_map = settings.get("user_map", {})
 
         if not plex_url or not plex_token: return []
         if not plex_url.endswith("/"): plex_url += "/"
@@ -147,24 +147,22 @@ class PlexActivity(commands.Cog):
 
                         if user_elem is None or player_elem is None: continue
 
-                        # --- USER RESOLUTION ---
                         plex_username = user_elem.get("title", "Unknown User")
                         display_name = plex_username
                         user_thumb = user_elem.get("thumb")
+                        discord_id = None  # Store ID for tagging
 
-                        # Check for Discord Mapping
-                        discord_id = user_map.get(plex_username)
-                        if discord_id:
-                            # Fetch the member from the guild to get current name/avatar
+                        # Check Map
+                        d_id = user_map.get(plex_username)
+                        if d_id:
                             guild = self.bot.get_guild(guild_id)
                             if guild:
-                                member = guild.get_member(discord_id)
+                                member = guild.get_member(d_id)
                                 if member:
-                                    display_name = member.display_name  # Or member.mention if you want clickable
-                                    # We use member.display_avatar.url for the icon
+                                    display_name = member.display_name
                                     user_thumb = member.display_avatar.url
+                                    discord_id = member.id  # Capture the ID
 
-                        # Fallback for Plex Thumb if no Discord match
                         if user_thumb and not user_thumb.startswith("http"):
                             user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
 
@@ -204,8 +202,9 @@ class PlexActivity(commands.Cog):
                                 image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
                         session_data = {
-                            "user": display_name,  # Use the resolved Discord name
-                            "user_thumb": user_thumb,  # Use the resolved Discord avatar
+                            "user": display_name,
+                            "user_thumb": user_thumb,
+                            "discord_id": discord_id,  # Pass the ID for the tag
                             "type": media_type,
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
@@ -242,6 +241,7 @@ class PlexActivity(commands.Cog):
         embeds = []
         for session in sessions[:10]:
             user = session.get("user", "Unknown")
+            discord_id = session.get("discord_id")  # Retrieve ID
             media_type = session.get("type")
             device = session.get("device")
             image_url = session.get("image_url")
@@ -260,16 +260,19 @@ class PlexActivity(commands.Cog):
                 if dynamic_color: color = dynamic_color
 
             embed = discord.Embed(color=color)
-            # Use the resolved user thumb (Discord Avatar)
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
             embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
 
+            # --- TAGGING LOGIC ---
+            # We prepend the tag to the description so it's prominent and clickable
+            tag_str = f"<@{discord_id}>\n" if discord_id else ""
+
             if media_type == "episode":
                 embed.title = session.get("series_title")
-                embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
+                embed.description = f"{tag_str}**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
             else:
                 embed.title = session.get("title")
-                embed.description = f"*{media_type.capitalize()}*"
+                embed.description = f"{tag_str}*{media_type.capitalize()}*"
 
             bar = self._generate_progress_bar(session.get("current_ms"), session.get("total_ms"))
             embed.add_field(name=f"{state_icon} Progress",
