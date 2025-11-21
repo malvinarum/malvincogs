@@ -24,7 +24,7 @@ DEFAULT_GUILD_SETTINGS = {
 class TorrentsWatch(commands.Cog):
     """
     A cog to monitor Sonarr/Radarr download queues in a static embed.
-    Features: Aggressive Deduplication & Smart Status.
+    Features: Highlander Deduplication (There can be only one).
     """
 
     def __init__(self, bot):
@@ -62,7 +62,6 @@ class TorrentsWatch(commands.Cog):
 
     async def _fetch_queue(self, url: str, key: str, app_type: str):
         if not url or not key: return []
-
         if not url.startswith("http"): url = f"http://{url}"
         if not url.endswith("/"): url += "/"
 
@@ -123,7 +122,6 @@ class TorrentsWatch(commands.Cog):
                 time_left = item.get("timeleft", "00:00:00")
                 source = item.get("source", "?")
 
-                # --- STATUS & EMOJI LOGIC ---
                 if size == 0:
                     status_text = "Fetching Metadata..."
                     bar = "📡📡📡📡📡📡📡📡📡📡"
@@ -210,47 +208,51 @@ class TorrentsWatch(commands.Cog):
 
             sonarr_q = await self._fetch_queue(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
             radarr_q = await self._fetch_queue(settings["radarr_url"], settings["radarr_key"], "Radarr")
-
-            # --- AGGRESSIVE DEDUPLICATION ---
-            # Combine raw queues
-            raw_queue = sonarr_q + radarr_q
-            combined_q = []
-            seen_identifiers = set()  # Can be ID or Hash or Title
-
-            for item in raw_queue:
-                # Try to find a unique identifier for the download
-                # 1. downloadId (Hash from client)
-                # 2. id (Sonarr internal ID)
-                # 3. title (Last resort)
-
-                unique_key = item.get("downloadId") or item.get("id") or item.get("title")
-
-                if unique_key:
-                    # Lowercase if it's a string (hash/title) to be safe
-                    if isinstance(unique_key, str):
-                        unique_key = unique_key.lower()
-
-                    if unique_key not in seen_identifiers:
-                        seen_identifiers.add(unique_key)
-                        combined_q.append(item)
-                else:
-                    combined_q.append(item)
-
-            # History fetching (kept separate for simplicity, duplicates less annoying there)
             sonarr_h = await self._fetch_history(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
             radarr_h = await self._fetch_history(settings["radarr_url"], settings["radarr_key"], "Radarr")
 
-            combined_h = sonarr_h + radarr_h
-            # Simple history dedupe by 'id'
-            deduped_h = []
+            # --- HIGHLANDER DEDUPLICATION (There can be only one) ---
+            raw_queue = sonarr_q + radarr_q
+            combined_q = []
+            seen_hashes = set()
+            seen_titles = set()  # Fallback set
+
+            for item in raw_queue:
+                # Priority 1: downloadId (Hash) - The Gold Standard
+                download_id = item.get("downloadId")
+                if download_id:
+                    d_id_lower = download_id.lower()
+                    if d_id_lower in seen_hashes:
+                        continue  # Skip exact hash duplicate
+                    seen_hashes.add(d_id_lower)
+                    combined_q.append(item)
+                    continue  # Done with this item
+
+                # Priority 2: Title - The "Metadata Phase" Fallback
+                # If hash is missing (rare but happens in magnet resolution), check title
+                title = item.get("title")
+                if title:
+                    title_lower = title.lower()
+                    if title_lower in seen_titles:
+                        continue  # Skip exact title duplicate
+                    seen_titles.add(title_lower)
+                    combined_q.append(item)
+                    continue
+
+                # Priority 3: Just add it if it has neither (Ghost item?)
+                combined_q.append(item)
+
+            # Simple history dedupe
+            raw_history = sonarr_h + radarr_h
+            combined_h = []
             seen_h = set()
-            for h in combined_h:
+            for h in raw_history:
                 hid = h.get("id")
                 if hid and hid not in seen_h:
                     seen_h.add(hid)
-                    deduped_h.append(h)
+                    combined_h.append(h)
 
-            embed = await self._build_embed(combined_q, deduped_h)
+            embed = await self._build_embed(combined_q, combined_h)
 
             message_id = settings["message_id"]
             if message_id:
