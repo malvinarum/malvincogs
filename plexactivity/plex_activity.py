@@ -139,7 +139,7 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # Plex uses <Track> for music
+                    # Plex uses <Track> for music/audiobooks
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
@@ -178,7 +178,8 @@ class PlexActivity(commands.Cog):
 
                         # Logic for different media types
                         series_title = session_elem.get("grandparentTitle")
-                        # For music, 'grandparentTitle' is usually Artist, 'parentTitle' is Album
+                        # For music/audio, 'grandparentTitle' is usually Artist/Author
+                        # 'parentTitle' is Album/Book Title
                         artist_name = session_elem.get("grandparentTitle")
                         album_name = session_elem.get("parentTitle")
 
@@ -201,7 +202,7 @@ class PlexActivity(commands.Cog):
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
-                        # Fallback (and Primary for Music)
+                        # Fallback (and Primary for Music/Audiobooks)
                         if not image_url:
                             thumb_path = session_elem.get("art") or session_elem.get("thumb")
                             if thumb_path:
@@ -266,9 +267,9 @@ class PlexActivity(commands.Cog):
             elif media_type == 'episode':
                 color = discord.Color.blue()
             elif media_type == 'track':
-                color = discord.Color.green()  # Music
+                color = discord.Color.teal()  # Teal for Audiobooks/Music
             else:
-                color = discord.Color.purple()  # Unknown
+                color = discord.Color.purple()
 
             if image_url and HAS_PIL:
                 dynamic_color = await self._get_dominant_color(image_url)
@@ -291,11 +292,20 @@ class PlexActivity(commands.Cog):
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('title')}**\n`S{s_num:02}E{e_num:02}`"
             elif media_type == "track":
-                # Music Layout
-                embed.title = session.get("title")  # Song Name
-                artist = session.get("artist") or "Unknown Artist"
-                album = session.get("album") or "Unknown Album"
-                embed.description = f"👤 **{artist}**\n💿 *{album}*"
+                # Audiobook Layout:
+                # Title: Book Title (from Album field usually)
+                # Desc: Chapter Title (from Title field)
+                # Author: Artist field
+
+                # If it's an audiobook library, 'parentTitle' is often the Book Title
+                # and 'grandparentTitle' is the Author.
+                book_title = session.get("album") or session.get("title")
+                chapter_title = session.get("title")
+                author = session.get("artist") or "Unknown Author"
+
+                embed.title = book_title
+                # If chapter title is just "Chapter 1", display it nicely
+                embed.description = f"**{chapter_title}**\n✍️ *{author}*"
             else:
                 # Movie or generic video
                 embed.title = session.get("title")
