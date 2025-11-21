@@ -150,7 +150,7 @@ class PlexActivity(commands.Cog):
                         plex_username = user_elem.get("title", "Unknown User")
                         display_name = plex_username
                         user_thumb = user_elem.get("thumb")
-                        discord_id = None  # Store ID for tagging
+                        discord_id = None
 
                         # Check Map
                         d_id = user_map.get(plex_username)
@@ -161,7 +161,7 @@ class PlexActivity(commands.Cog):
                                 if member:
                                     display_name = member.display_name
                                     user_thumb = member.display_avatar.url
-                                    discord_id = member.id  # Capture the ID
+                                    discord_id = member.id
 
                         if user_thumb and not user_thumb.startswith("http"):
                             user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
@@ -204,7 +204,7 @@ class PlexActivity(commands.Cog):
                         session_data = {
                             "user": display_name,
                             "user_thumb": user_thumb,
-                            "discord_id": discord_id,  # Pass the ID for the tag
+                            "discord_id": discord_id,
                             "type": media_type,
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
@@ -241,7 +241,7 @@ class PlexActivity(commands.Cog):
         embeds = []
         for session in sessions[:10]:
             user = session.get("user", "Unknown")
-            discord_id = session.get("discord_id")  # Retrieve ID
+            discord_id = session.get("discord_id")
             media_type = session.get("type")
             device = session.get("device")
             image_url = session.get("image_url")
@@ -263,23 +263,24 @@ class PlexActivity(commands.Cog):
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
             embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
 
-            # --- TAGGING LOGIC ---
-            # We prepend the tag to the description so it's prominent and clickable
-            tag_str = f"<@{discord_id}>\n" if discord_id else ""
-
+            # --- CLEANER DESCRIPTION (No Tag) ---
             if media_type == "episode":
                 embed.title = session.get("series_title")
-                embed.description = f"{tag_str}**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
+                embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
             else:
                 embed.title = session.get("title")
-                embed.description = f"{tag_str}*{media_type.capitalize()}*"
+                embed.description = f"*{media_type.capitalize()}*"
 
             bar = self._generate_progress_bar(session.get("current_ms"), session.get("total_ms"))
             embed.add_field(name=f"{state_icon} Progress",
                             value=f"`{bar}`\n`{session.get('current_time')} / {session.get('total_duration')}`\nEnds: <t:{session.get('finish_ts')}:R>",
                             inline=False)
+
+            # --- TAG MOVED TO FIELDS ---
+            user_field_str = f"👤 **User:** <@{discord_id}>\n" if discord_id else ""
+
             embed.add_field(name="Tech Specs",
-                            value=f"{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{session.get('stream_info')}`\n📶 **Bitrate:** `{session.get('bandwidth')}`",
+                            value=f"{user_field_str}{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{session.get('stream_info')}`\n📶 **Bitrate:** `{session.get('bandwidth')}`",
                             inline=False)
             if image_url: embed.set_thumbnail(url=image_url)
             embeds.append(embed)
