@@ -1,0 +1,8 @@
+{
+  "author": ["Malvin", "Gemini"],
+  "description": "Static dashboard for Sonarr/Radarr queues.",
+  "hidden": false,
+  "install_msg": "Configure URLs/Keys with [p]tw setup.",
+  "short": "Download Monitor",
+  "min_bot_version": "3.5.0"
+}
