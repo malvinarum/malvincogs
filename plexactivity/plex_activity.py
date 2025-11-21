@@ -33,7 +33,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Features: TMDB, Dynamic Colors, Tech Specs, and User Mapping!
+    Features: TMDB, Dynamic Colors, Tech Specs, User Mapping, and Contextual Verbs!
     """
 
     def __init__(self, bot):
@@ -139,6 +139,7 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
+                    # Plex uses <Track> for music
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
@@ -152,7 +153,6 @@ class PlexActivity(commands.Cog):
                         user_thumb = user_elem.get("thumb")
                         discord_id = None
 
-                        # Check Map
                         d_id = user_map.get(plex_username)
                         if d_id:
                             guild = self.bot.get_guild(guild_id)
@@ -176,7 +176,12 @@ class PlexActivity(commands.Cog):
                         remaining_ms = max(0, duration_ms - view_offset_ms)
                         finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
 
+                        # Logic for different media types
                         series_title = session_elem.get("grandparentTitle")
+                        # For music, 'grandparentTitle' is usually Artist, 'parentTitle' is Album
+                        artist_name = session_elem.get("grandparentTitle")
+                        album_name = session_elem.get("parentTitle")
+
                         media_type = session_elem.get("type", "media")
                         device = player_elem.get("product", "Unknown Device")
                         state = player_elem.get("state", "playing")
@@ -190,11 +195,13 @@ class PlexActivity(commands.Cog):
                             stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
 
                         image_url = None
-                        if tmdb_key:
+                        # Only use TMDB for Video content
+                        if tmdb_key and media_type in ['movie', 'episode']:
                             search_query = series_title if media_type == 'episode' else media_title
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
+                        # Fallback (and Primary for Music)
                         if not image_url:
                             thumb_path = session_elem.get("art") or session_elem.get("thumb")
                             if thumb_path:
@@ -215,17 +222,15 @@ class PlexActivity(commands.Cog):
                             "state": state,
                             "stream_info": stream_info,
                             "bandwidth": bandwidth_str,
-                            "image_url": image_url
+                            "image_url": image_url,
+                            # Metadata fields
+                            "title": media_title,
+                            "series_title": series_title,
+                            "season_num": session_elem.get("parentIndex"),
+                            "episode_num": session_elem.get("index"),
+                            "artist": artist_name,
+                            "album": album_name
                         }
-
-                        if media_type == "episode":
-                            session_data["series_title"] = series_title
-                            session_data["episode_title"] = media_title
-                            session_data["season_num"] = int(session_elem.get("parentIndex", "0"))
-                            session_data["episode_num"] = int(session_elem.get("index", "0"))
-                        else:
-                            session_data["title"] = media_title
-
                         sessions.append(session_data)
                 except ET.ParseError:
                     return []
@@ -254,20 +259,45 @@ class PlexActivity(commands.Cog):
                 state_icon = "⏳"
 
             device_emoji = self._get_device_emoji(device)
-            color = discord.Color.orange() if media_type == 'movie' else discord.Color.blue()
+
+            # Default colors
+            if media_type == 'movie':
+                color = discord.Color.orange()
+            elif media_type == 'episode':
+                color = discord.Color.blue()
+            elif media_type == 'track':
+                color = discord.Color.green()  # Music
+            else:
+                color = discord.Color.purple()  # Unknown
+
             if image_url and HAS_PIL:
                 dynamic_color = await self._get_dominant_color(image_url)
                 if dynamic_color: color = dynamic_color
 
             embed = discord.Embed(color=color)
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
-            embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
 
-            # --- CLEANER DESCRIPTION (No Tag) ---
+            # --- VERB LOGIC ---
+            verb = "is watching..."
+            if media_type == "track" or media_type == "audio":
+                verb = "is listening to..."
+
+            embed.set_author(name=f"{user} {verb}", icon_url=user_icon)
+
+            # --- CONTENT LOGIC ---
             if media_type == "episode":
+                s_num = int(session.get("season_num")) if session.get("season_num") else 0
+                e_num = int(session.get("episode_num")) if session.get("episode_num") else 0
                 embed.title = session.get("series_title")
-                embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
+                embed.description = f"**{session.get('title')}**\n`S{s_num:02}E{e_num:02}`"
+            elif media_type == "track":
+                # Music Layout
+                embed.title = session.get("title")  # Song Name
+                artist = session.get("artist") or "Unknown Artist"
+                album = session.get("album") or "Unknown Album"
+                embed.description = f"👤 **{artist}**\n💿 *{album}*"
             else:
+                # Movie or generic video
                 embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
 
@@ -276,7 +306,6 @@ class PlexActivity(commands.Cog):
                             value=f"`{bar}`\n`{session.get('current_time')} / {session.get('total_duration')}`\nEnds: <t:{session.get('finish_ts')}:R>",
                             inline=False)
 
-            # --- TAG MOVED TO FIELDS ---
             user_field_str = f"👤 **User:** <@{discord_id}>\n" if discord_id else ""
 
             embed.add_field(name="Tech Specs",
