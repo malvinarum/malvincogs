@@ -1,295 +1,422 @@
-import discord
-import aiohttp
 import asyncio
+import aiohttp
 import logging
-from datetime import datetime
+import io
+from datetime import datetime, timedelta
+import xml.etree.ElementTree as ET
+
+import discord
 from redbot.core import commands, Config, app_commands, checks
-from redbot.core.utils.chat_formatting import box
+from redbot.core.utils.chat_formatting import humanize_list, box, pagify
 from discord.ext import tasks
 
-log = logging.getLogger("red.torrentswatch")
+try:
+    from PIL import Image
+
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+log = logging.getLogger("red.plex_activity")
 
 DEFAULT_GUILD_SETTINGS = {
-    "sonarr_url": None,
-    "sonarr_key": None,
-    "radarr_url": None,
-    "radarr_key": None,
-    "channel_id": None,
-    "message_id": None,
+    "plex_url": None,
+    "plex_token": None,
+    "activity_channel": None,
+    "activity_message_id": None,
     "update_interval": 60,
-    "enabled": False
+    "tmdb_api_key": None,
+    "user_map": {}
 }
 
 
-class TorrentsWatch(commands.Cog):
+class PlexActivity(commands.Cog):
     """
-    A cog to monitor Sonarr/Radarr download queues in a static embed.
+    A Redbot cog to track and display Plex Media Server activity.
+    Features: TMDB, Dynamic Colors, Tech Specs, and User Mapping!
     """
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=9876543210, force_registration=True)
+        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
         self.session = aiohttp.ClientSession()
-        self._watch_loop_task = None
+        self._plex_activity_loop_task = None
+        self.color_cache = {}
 
     async def cog_load(self):
-        log.info("TorrentsWatch cog loaded. Starting loop.")
-        self._watch_loop_task = self.watch_loop.start()
+        log.info("PlexActivity cog loaded. Starting activity loop.")
+        if not self._plex_activity_loop_task or self._plex_activity_loop_task.done():
+            self._plex_activity_loop_task = self.plex_activity_loop.start()
 
     async def cog_unload(self):
-        log.info("TorrentsWatch cog unloaded. Stopping loop.")
-        if self._watch_loop_task:
-            self.watch_loop.cancel()
+        log.info("PlexActivity cog unloaded. Stopping activity loop and closing session.")
+        if self._plex_activity_loop_task:
+            self.plex_activity_loop.cancel()
         if self.session:
             await self.session.close()
 
-    def _generate_progress_bar(self, percent: float, length: int = 10) -> str:
-        percent = min(1.0, max(0.0, percent))
+    def _format_milliseconds_to_time(self, milliseconds: int) -> str:
+        total_seconds = milliseconds // 1000
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        if hours > 0:
+            return f"{hours:02}:{minutes:02}:{seconds:02}"
+        else:
+            return f"{minutes:02}:{seconds:02}"
+
+    def _generate_progress_bar(self, current_ms: int, total_ms: int, length: int = 10) -> str:
+        if total_ms == 0:
+            return "░" * length
+        percent = min(1.0, max(0.0, current_ms / total_ms))
         filled = int(length * percent)
         return "▓" * filled + "░" * (length - filled)
 
-    def _format_speed(self, speed_bytes: float) -> str:
-        if speed_bytes < 1024:
-            return f"{speed_bytes:.0f} B/s"
-        elif speed_bytes < 1024 ** 2:
-            return f"{speed_bytes / 1024:.1f} KB/s"
-        else:
-            return f"{speed_bytes / (1024 ** 2):.1f} MB/s"
+    def _get_device_emoji(self, device_name: str) -> str:
+        d = device_name.lower()
+        if any(x in d for x in ["tv", "roku", "chromecast", "fire", "shield", "bravia", "lg", "samsung"]): return "📺"
+        if any(x in d for x in ["playstation", "xbox", "ps4", "ps5", "switch"]): return "🎮"
+        if "mac" in d or "osx" in d or "apple" in d: return "🍎"
+        if "windows" in d or "pc" in d: return "🪟"
+        if "linux" in d: return "🐧"
+        if any(x in d for x in ["desktop", "laptop"]): return "💻"
+        if any(x in d for x in ["web", "chrome", "firefox", "edge", "safari", "opera"]): return "🌐"
+        if any(x in d for x in ["phone", "ipad", "iphone", "android", "mobile", "tablet"]): return "📱"
+        return "📱"
 
-    async def _fetch_queue(self, url: str, key: str, app_type: str):
-        if not url or not key: return []
+    async def _get_dominant_color(self, image_url: str):
+        if not HAS_PIL or not image_url: return None
+        if image_url in self.color_cache: return self.color_cache[image_url]
+        try:
+            async with self.session.get(image_url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
 
-        # Ensure URL has protocol
-        if not url.startswith("http"): url = f"http://{url}"
-        if not url.endswith("/"): url += "/"
+                    def get_color(img_data):
+                        img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((1, 1))
+                        return img.getpixel((0, 0))
 
-        endpoint = f"{url}api/v3/queue"
-        params = {"apikey": key}
+                    rgb = await self.bot.loop.run_in_executor(None, get_color, data)
+                    color = discord.Color.from_rgb(*rgb)
+                    if len(self.color_cache) > 100: self.color_cache.clear()
+                    self.color_cache[image_url] = color
+                    return color
+        except Exception:
+            return None
+
+    async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
+        if not api_key: return None
+        search_url = f"https://api.themoviedb.org/3/search/{media_type}"
+        params = {'api_key': api_key, 'query': query, 'page': 1}
+        if year and media_type == 'movie': params['year'] = year
+        try:
+            async with self.session.get(search_url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data['results']:
+                        path = data['results'][0].get('poster_path')
+                        if path: return f"https://image.tmdb.org/t/p/w500{path}"
+        except Exception:
+            pass
+        return None
+
+    async def _get_plex_sessions(self, guild_id: int):
+        settings = await self.config.guild_from_id(guild_id).all()
+        plex_url = settings["plex_url"]
+        plex_token = settings["plex_token"]
+        tmdb_key = settings.get("tmdb_api_key")
+        user_map = settings.get("user_map", {})
+
+        if not plex_url or not plex_token: return []
+        if not plex_url.endswith("/"): plex_url += "/"
+        api_url = f"{plex_url}status/sessions?X-Plex-Token={plex_token}"
 
         try:
-            async with self.session.get(endpoint, params=params, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    records = data.get("records", [])
-                    # Tag them so we know source
-                    for r in records: r["source"] = app_type
-                    return records
-                else:
-                    log.warning(f"Failed to fetch {app_type} queue: {resp.status}")
+            async with self.session.get(api_url, timeout=10) as response:
+                response.raise_for_status()
+                data = await response.text()
+                sessions = []
+                try:
+                    root = ET.fromstring(data)
+                    for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
+                        user_elem = session_elem.find("User")
+                        player_elem = session_elem.find("Player")
+                        media_elem = session_elem.find("Media")
+                        transcode_elem = session_elem.find("TranscodeSession")
+
+                        if user_elem is None or player_elem is None: continue
+
+                        plex_username = user_elem.get("title", "Unknown User")
+                        display_name = plex_username
+                        user_thumb = user_elem.get("thumb")
+                        discord_id = None
+
+                        # Check Map
+                        d_id = user_map.get(plex_username)
+                        if d_id:
+                            guild = self.bot.get_guild(guild_id)
+                            if guild:
+                                member = guild.get_member(d_id)
+                                if member:
+                                    display_name = member.display_name
+                                    user_thumb = member.display_avatar.url
+                                    discord_id = member.id
+
+                        if user_thumb and not user_thumb.startswith("http"):
+                            user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
+
+                        media_title = session_elem.get("title", "Unknown Title")
+                        view_offset_ms = int(session_elem.get("viewOffset", "0"))
+                        duration_ms = int(session_elem.get("duration", "1"))
+                        year = session_elem.get("year")
+
+                        current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
+                        total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
+                        remaining_ms = max(0, duration_ms - view_offset_ms)
+                        finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
+
+                        series_title = session_elem.get("grandparentTitle")
+                        media_type = session_elem.get("type", "media")
+                        device = player_elem.get("product", "Unknown Device")
+                        state = player_elem.get("state", "playing")
+
+                        bitrate_kbps = int(media_elem.get("bitrate", 0)) if media_elem is not None else 0
+                        bandwidth_str = f"{bitrate_kbps / 1000:.1f} Mbps" if bitrate_kbps > 0 else "Unknown"
+
+                        stream_info = "Direct Play"
+                        if transcode_elem is not None:
+                            video_decision = transcode_elem.get("videoDecision", "unknown")
+                            stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
+
+                        image_url = None
+                        if tmdb_key:
+                            search_query = series_title if media_type == 'episode' else media_title
+                            search_type = 'tv' if media_type == 'episode' else 'movie'
+                            image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
+
+                        if not image_url:
+                            thumb_path = session_elem.get("art") or session_elem.get("thumb")
+                            if thumb_path:
+                                base_plex_url = plex_url.rstrip('/')
+                                image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
+
+                        session_data = {
+                            "user": display_name,
+                            "user_thumb": user_thumb,
+                            "discord_id": discord_id,
+                            "type": media_type,
+                            "current_time": current_time_formatted,
+                            "total_duration": total_duration_formatted,
+                            "current_ms": view_offset_ms,
+                            "total_ms": duration_ms,
+                            "finish_ts": finish_ts,
+                            "device": device,
+                            "state": state,
+                            "stream_info": stream_info,
+                            "bandwidth": bandwidth_str,
+                            "image_url": image_url
+                        }
+
+                        if media_type == "episode":
+                            session_data["series_title"] = series_title
+                            session_data["episode_title"] = media_title
+                            session_data["season_num"] = int(session_elem.get("parentIndex", "0"))
+                            session_data["episode_num"] = int(session_elem.get("index", "0"))
+                        else:
+                            session_data["title"] = media_title
+
+                        sessions.append(session_data)
+                except ET.ParseError:
                     return []
-        except Exception as e:
-            log.error(f"Error fetching {app_type} queue: {e}")
-            return []
-
-    async def _fetch_history(self, url: str, key: str, app_type: str):
-        if not url or not key: return []
-        if not url.startswith("http"): url = f"http://{url}"
-        if not url.endswith("/"): url += "/"
-
-        endpoint = f"{url}api/v3/history"
-        params = {"apikey": key, "page": 1, "pageSize": 5, "sortKey": "date", "sortDir": "desc", "eventType": "grabbed"}
-        # eventType 1 = Grabbed, 3 = Import? API docs vary, usually we want 'grabbed' or 'downloadFolderImported'
-        # Let's try getting general history and filtering or just showing the last few actions
-
-        try:
-            async with self.session.get(endpoint, params=params, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    records = data.get("records", [])
-                    for r in records: r["source"] = app_type
-                    return records
+                return sessions
         except Exception:
             return []
-        return []
 
-    async def _build_embed(self, queue_items: list, history_items: list) -> discord.Embed:
-        if not queue_items and not history_items:
-            return discord.Embed(
-                title="📥 Torrents Watch",
-                description="😴 No active downloads or recent history.",
-                color=discord.Color.dark_grey(),
-                timestamp=datetime.now()
-            )
+    async def _generate_session_embeds(self, sessions: list):
+        if not sessions:
+            return [discord.Embed(title="Plex Media Server", description="😴 No active streams.",
+                                  color=discord.Color.dark_grey(), timestamp=datetime.now())]
 
-        total_speed = sum(item.get("trackedDownloadStatus", "Ok") == "Ok" and
-                          item.get("trackedDownloadState", "") == "Downloading" and
-                          # Note: Sonarr v3 queue doesn't always give speed directly in top level,
-                          # but let's look for it or estimate. Actually, Queue item has 'sizeleft' and time...
-                          # For simplicity, Sonarr Queue endpoint often lacks direct 'current speed' per item
-                          # unless we query the download client.
-                          # We will display "Size Remaining" instead if speed isn't handy.
-                          0 for item in queue_items)
+        embeds = []
+        for session in sessions[:10]:
+            user = session.get("user", "Unknown")
+            discord_id = session.get("discord_id")
+            media_type = session.get("type")
+            device = session.get("device")
+            image_url = session.get("image_url")
+            state = session.get("state")
 
-        # Wait, Sonarr/Radarr Queue object usually has: title, size, sizeleft, status, trackedDownloadState
-        # Speed is often on the DownloadClient, not the Queue item itself easily.
-        # We will focus on Progress %.
+            state_icon = "▶️"
+            if state == "paused":
+                state_icon = "⏸️"
+            elif state == "buffering":
+                state_icon = "⏳"
 
-        embed = discord.Embed(title="📥 Download Queue", color=discord.Color.blue())
+            device_emoji = self._get_device_emoji(device)
+            color = discord.Color.orange() if media_type == 'movie' else discord.Color.blue()
+            if image_url and HAS_PIL:
+                dynamic_color = await self._get_dominant_color(image_url)
+                if dynamic_color: color = dynamic_color
 
-        # --- QUEUE SECTION ---
-        if queue_items:
-            # Sort by time left or progress? Let's do progress.
-            queue_items.sort(key=lambda x: x.get("sizeleft", 0))
+            embed = discord.Embed(color=color)
+            user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
+            embed.set_author(name=f"{user} is watching...", icon_url=user_icon)
 
-            field_val = ""
-            for item in queue_items[:8]:  # Limit to 8 to prevent overflow
-                title = item.get("title", "Unknown")
-                size = item.get("size", 1)
-                size_left = item.get("sizeleft", 0)
-                status = item.get("status", "Unknown")
-                source = item.get("source", "?")
+            # --- CLEANER DESCRIPTION (No Tag) ---
+            if media_type == "episode":
+                embed.title = session.get("series_title")
+                embed.description = f"**{session.get('episode_title')}**\n`S{session.get('season_num'):02}E{session.get('episode_num'):02}`"
+            else:
+                embed.title = session.get("title")
+                embed.description = f"*{media_type.capitalize()}*"
 
-                # Clean title
-                if len(title) > 40: title = title[:38] + "..."
+            bar = self._generate_progress_bar(session.get("current_ms"), session.get("total_ms"))
+            embed.add_field(name=f"{state_icon} Progress",
+                            value=f"`{bar}`\n`{session.get('current_time')} / {session.get('total_duration')}`\nEnds: <t:{session.get('finish_ts')}:R>",
+                            inline=False)
 
-                percent = 1.0 - (size_left / size) if size > 0 else 0.0
-                bar = self._generate_progress_bar(percent, length=12)
+            # --- TAG MOVED TO FIELDS ---
+            user_field_str = f"👤 **User:** <@{discord_id}>\n" if discord_id else ""
 
-                emoji = "📺" if source == "Sonarr" else "🎬"
+            embed.add_field(name="Tech Specs",
+                            value=f"{user_field_str}{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{session.get('stream_info')}`\n📶 **Bitrate:** `{session.get('bandwidth')}`",
+                            inline=False)
+            if image_url: embed.set_thumbnail(url=image_url)
+            embeds.append(embed)
 
-                field_val += f"{emoji} **{title}**\n`{bar}` {int(percent * 100)}% • {status}\n"
-
-            if len(queue_items) > 8:
-                field_val += f"...and {len(queue_items) - 8} more."
-
-            embed.add_field(name="Active Downloads", value=field_val, inline=False)
-        else:
-            embed.add_field(name="Active Downloads", value="*Queue is empty.*", inline=False)
-
-        # --- HISTORY SECTION ---
-        # Combine and sort active history by date
-        if history_items:
-            history_items.sort(key=lambda x: x.get("date", ""), reverse=True)
-
-            hist_val = ""
-            for item in history_items[:5]:
-                source = item.get("source", "?")
-                event = item.get("eventType", "Unknown")
-
-                # Source Title is usually in sourceTitle or just use the series/movie title
-                # Radarr: movie -> title
-                # Sonarr: series -> title
-                title = "Unknown"
-                if "movie" in item:
-                    title = item["movie"]["title"]
-                elif "series" in item:
-                    title = item["series"]["title"]
-                elif "sourceTitle" in item:
-                    title = item["sourceTitle"]
-
-                if len(title) > 45: title = title[:43] + "..."
-
-                # Timestamp
-                dt_str = item.get("date", "")
-                # Try to parse iso format
-                try:
-                    # 2025-05-07T14:22:13.123Z
-                    dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                    ts = int(dt.timestamp())
-                    time_str = f"<t:{ts}:R>"
-                except:
-                    time_str = ""
-
-                emoji = "🟢" if event == "grabbed" else "📂" if event == "downloadFolderImported" else "ℹ️"
-
-                hist_val += f"{emoji} **{title}** ({event})\n{time_str}\n"
-
-            embed.add_field(name="Recent Activity", value=hist_val, inline=False)
-
-        embed.set_footer(text=f"TorrentsWatch • Last Updated: {datetime.now().strftime('%H:%M:%S')}")
-        return embed
+        embeds[-1].timestamp = datetime.now()
+        embeds[-1].set_footer(text="Plex Activity • Live Update")
+        return embeds
 
     @tasks.loop(seconds=60)
-    async def watch_loop(self):
-        await self.bot.wait_until_ready()
+    async def plex_activity_loop(self):
+        for guild_id in await self.config.all_guilds():
+            guild_settings = await self.config.guild_from_id(guild_id).all()
+            channel_id = guild_settings["activity_channel"]
+            message_id = guild_settings["activity_message_id"]
+            update_interval = guild_settings.get("update_interval", 60)
 
-        all_guilds = await self.config.all_guilds()
-        for guild_id, settings in all_guilds.items():
-            if not settings["enabled"]: continue
+            if self.plex_activity_loop.seconds != update_interval:
+                self.plex_activity_loop.change_interval(seconds=update_interval)
 
-            channel_id = settings["channel_id"]
             if not channel_id: continue
-
-            channel = self.bot.get_channel(channel_id)
+            guild = self.bot.get_guild(guild_id)
+            if not guild: continue
+            channel = guild.get_channel(channel_id)
             if not channel: continue
 
-            # Fetch Data
-            sonarr_q = await self._fetch_queue(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
-            radarr_q = await self._fetch_queue(settings["radarr_url"], settings["radarr_key"], "Radarr")
+            sessions = await self._get_plex_sessions(guild_id)
+            embeds = await self._generate_session_embeds(sessions)
 
-            # Ideally we'd fetch history too, but let's keep it simple for now or add it if you want
-            sonarr_h = await self._fetch_history(settings["sonarr_url"], settings["sonarr_key"], "Sonarr")
-            radarr_h = await self._fetch_history(settings["radarr_url"], settings["radarr_key"], "Radarr")
+            try:
+                if message_id:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                        await message.edit(embeds=embeds)
+                    except discord.NotFound:
+                        message = await channel.send(embeds=embeds)
+                        await self.config.guild(guild).activity_message_id.set(message.id)
+                    except discord.Forbidden:
+                        log.warning(f"Forbidden edit in {channel.name}")
+                else:
+                    message = await channel.send(embeds=embeds)
+                    await self.config.guild(guild).activity_message_id.set(message.id)
+            except Exception as e:
+                log.error(f"Error updating message: {e}")
 
-            combined_q = sonarr_q + radarr_q
-            combined_h = sonarr_h + radarr_h
+    @plex_activity_loop.before_loop
+    async def before_plex_activity_loop(self):
+        await self.bot.wait_until_ready()
 
-            embed = await self._build_embed(combined_q, combined_h)
-
-            message_id = settings["message_id"]
-            if message_id:
-                try:
-                    msg = await channel.fetch_message(message_id)
-                    await msg.edit(embed=embed)
-                except discord.NotFound:
-                    msg = await channel.send(embed=embed)
-                    await self.config.guild(discord.Object(id=guild_id)).message_id.set(msg.id)
-                except Exception:
-                    pass
-            else:
-                msg = await channel.send(embed=embed)
-                await self.config.guild(discord.Object(id=guild_id)).message_id.set(msg.id)
-
-    @commands.group(name="torrentswatch", aliases=["tw"])
+    @commands.group(name="plex", invoke_without_command=True)
     @commands.guild_only()
-    @checks.admin_or_permissions(manage_guild=True)
-    async def torrentswatch(self, ctx: commands.Context):
-        """Manage the TorrentsWatch dashboard."""
-        pass
+    @checks.mod_or_permissions(manage_guild=True)
+    async def plex(self, ctx: commands.Context):
+        """Manage Plex Media Server activity tracking."""
+        await ctx.send_help(self.plex)
 
-    @torrentswatch.command(name="setup")
-    async def tw_setup(self, ctx: commands.Context):
-        """Interactive setup for Sonarr/Radarr."""
-        await ctx.send("Enter Sonarr URL (e.g. http://192.168.1.50:8989) or 'skip':")
+    @plex.command(name="setup")
+    async def plex_setup(self, ctx: commands.Context):
+        """Interactive setup for Plex URL and Token."""
+        await ctx.send("Enter Plex URL:")
         try:
-            msg = await self.bot.wait_for("message", check=lambda m: m.author == ctx.author, timeout=60)
-            if msg.content.lower() != 'skip':
-                await self.config.guild(ctx.guild).sonarr_url.set(msg.content.strip())
-                await ctx.send("Enter Sonarr API Key:")
-                msg = await self.bot.wait_for("message", check=lambda m: m.author == ctx.author, timeout=60)
-                await self.config.guild(ctx.guild).sonarr_key.set(msg.content.strip())
+            msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
+            url = msg.content.strip()
+            await ctx.send("Enter Plex Token:")
+            msg = await self.bot.wait_for("message", check=MessagePredicate.same_context(ctx), timeout=60)
+            token = msg.content.strip()
+            await self.config.guild(ctx.guild).plex_url.set(url)
+            await self.config.guild(ctx.guild).plex_token.set(token)
+            await ctx.send("Configured!")
         except asyncio.TimeoutError:
-            return await ctx.send("Timed out.")
+            await ctx.send("Timed out.")
 
-        await ctx.send("Enter Radarr URL (e.g. http://192.168.1.50:7878) or 'skip':")
-        try:
-            msg = await self.bot.wait_for("message", check=lambda m: m.author == ctx.author, timeout=60)
-            if msg.content.lower() != 'skip':
-                await self.config.guild(ctx.guild).radarr_url.set(msg.content.strip())
-                await ctx.send("Enter Radarr API Key:")
-                msg = await self.bot.wait_for("message", check=lambda m: m.author == ctx.author, timeout=60)
-                await self.config.guild(ctx.guild).radarr_key.set(msg.content.strip())
-        except asyncio.TimeoutError:
-            return await ctx.send("Timed out.")
+    @plex.command(name="tmdb")
+    async def plex_tmdb(self, ctx: commands.Context, api_key: str):
+        """Set the TMDB API Key."""
+        await self.config.guild(ctx.guild).tmdb_api_key.set(api_key)
+        await ctx.send("✅ TMDB API Key set!")
 
-        await ctx.send("Configuration saved.")
+    @plex.command(name="setchannel")
+    async def plex_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel for Plex updates."""
+        await self.config.guild(ctx.guild).activity_channel.set(channel.id)
+        await self.config.guild(ctx.guild).activity_message_id.set(None)
+        await ctx.send(f"Updates will post to {channel.mention}.")
+        sessions = await self._get_plex_sessions(ctx.guild.id)
+        embeds = await self._generate_session_embeds(sessions)
+        msg = await channel.send(embeds=embeds)
+        await self.config.guild(ctx.guild).activity_message_id.set(msg.id)
 
-    @torrentswatch.command(name="setchannel")
-    async def tw_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the dashboard channel."""
-        await self.config.guild(ctx.guild).channel_id.set(channel.id)
-        await self.config.guild(ctx.guild).message_id.set(None)  # Reset msg to post new one
-        await ctx.send(f"Dashboard will appear in {channel.mention}.")
+    @plex.command(name="map")
+    async def plex_map(self, ctx: commands.Context, plex_user: str, discord_user: discord.Member):
+        """
+        Map a Plex username to a Discord user.
+        Example: [p]plex map malvinarum @Malvin
+        """
+        async with self.config.guild(ctx.guild).user_map() as user_map:
+            user_map[plex_user] = discord_user.id
 
-    @torrentswatch.command(name="toggle")
-    async def tw_toggle(self, ctx: commands.Context):
-        """Enable/Disable the loop."""
-        curr = await self.config.guild(ctx.guild).enabled()
-        new = not curr
-        await self.config.guild(ctx.guild).enabled.set(new)
-        await ctx.send(f"TorrentsWatch is now {'Enabled' if new else 'Disabled'}.")
+        await ctx.send(f"✅ Mapped Plex user `{plex_user}` to {discord_user.mention}.")
+
+    @plex.command(name="unmap")
+    async def plex_unmap(self, ctx: commands.Context, plex_user: str):
+        """Remove a mapping."""
+        async with self.config.guild(ctx.guild).user_map() as user_map:
+            if plex_user in user_map:
+                del user_map[plex_user]
+                await ctx.send(f"🗑️ Unmapped `{plex_user}`.")
+            else:
+                await ctx.send("User not found in map.")
+
+    @plex.command(name="listmaps")
+    async def plex_listmaps(self, ctx: commands.Context):
+        """List all user mappings."""
+        user_map = await self.config.guild(ctx.guild).user_map()
+        if not user_map: return await ctx.send("No mappings.")
+
+        msg = "**Plex User ➡️ Discord User**\n"
+        for p_user, d_id in user_map.items():
+            d_user = ctx.guild.get_member(d_id)
+            name = d_user.mention if d_user else f"Unknown ID: {d_id}"
+            msg += f"`{p_user}` ➡️ {name}\n"
+
+        await ctx.send(msg)
+
+    @plex.command(name="status")
+    async def plex_status(self, ctx: commands.Context):
+        """Check settings."""
+        data = await self.config.guild(ctx.guild).all()
+        await ctx.send(box(
+            f"URL: {data['plex_url']}\n"
+            f"Token: {'Set' if data['plex_token'] else 'Missing'}\n"
+            f"TMDB Key: {'Set' if data['tmdb_api_key'] else 'Missing'}\n"
+            f"Channel: {data['activity_channel']}\n"
+            f"Mapped Users: {len(data.get('user_map', {}))}"
+        ))
 
 
+# Setup function
 async def setup(bot):
-    await bot.add_cog(TorrentsWatch(bot))
+    await bot.add_cog(PlexActivity(bot))
