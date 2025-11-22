@@ -3,6 +3,7 @@ import aiohttp
 import logging
 import io
 import urllib.parse
+import re  # Added for regex cleaning
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
@@ -27,7 +28,7 @@ DEFAULT_GUILD_SETTINGS = {
     "activity_message_id": None,
     "update_interval": 60,
     "tmdb_api_key": None,
-    "google_books_api_key": None,  # NEW
+    "google_books_api_key": None,
     "user_map": {}
 }
 
@@ -125,11 +126,15 @@ class PlexActivity(commands.Cog):
 
     async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
         """
-        Searches Google Books API for a cover.
+        Searches Google Books API for a cover with smart query cleaning.
         """
         if not api_key or not title: return None
 
-        query = f"intitle:{title}"
+        # --- CLEAN TITLE LOGIC ---
+        # Remove (Unabridged), (Audiobook), [Dramatized], etc.
+        clean_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
+
+        query = f"intitle:{clean_title}"
         if author:
             query += f"+inauthor:{author}"
 
@@ -144,11 +149,7 @@ class PlexActivity(commands.Cog):
                         volume_info = data["items"][0].get("volumeInfo", {})
                         image_links = volume_info.get("imageLinks", {})
 
-                        # Try to get the largest available
-                        # thumbnail, smallThumbnail, small, medium, large, extraLarge
-                        # Google API usually returns 'thumbnail' and 'smallThumbnail'
-                        # We can try to strip the zoom parameter or use the largest key
-
+                        # Google API keys: extraLarge, large, medium, small, thumbnail, smallThumbnail
                         url = image_links.get("extraLarge") or \
                               image_links.get("large") or \
                               image_links.get("medium") or \
@@ -156,15 +157,17 @@ class PlexActivity(commands.Cog):
                               image_links.get("smallThumbnail")
 
                         if url:
-                            # Google often returns http, force https
+                            # Force HTTPS
                             if url.startswith("http://"):
                                 url = url.replace("http://", "https://")
-                            # Hack to get higher res if it's a zoomable image
-                            # Removing zoom&edge sometimes gives the raw image, but not always reliable.
-                            # Let's just return what we found for now.
+                            log.info(f"Google Books found cover for '{clean_title}': {url}")
                             return url
+                    else:
+                        log.info(f"Google Books found NO results for '{clean_title}' by '{author}'")
+                else:
+                    log.error(f"Google Books API Error: {response.status}")
         except Exception as e:
-            log.error(f"Google Books API Error: {e}")
+            log.error(f"Google Books Fetch Exception: {e}")
         return None
 
     async def _get_plex_sessions(self, guild_id: int):
@@ -172,7 +175,7 @@ class PlexActivity(commands.Cog):
         plex_url = settings["plex_url"]
         plex_token = settings["plex_token"]
         tmdb_key = settings.get("tmdb_api_key")
-        gb_key = settings.get("google_books_api_key")  # New Key
+        gb_key = settings.get("google_books_api_key")
         user_map = settings.get("user_map", {})
 
         if not plex_url or not plex_token: return []
@@ -248,9 +251,10 @@ class PlexActivity(commands.Cog):
 
                         # 2. Audio -> Google Books API
                         if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
+                            # Use Parent Title (Book Name) if available, else Title (Chapter Name?)
+                            # Usually album_name holds the Book Title for Audiobooks
                             book_title = album_name or media_title
                             author = artist_name or ""
-                            # Clean search query
                             image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
 
                         # 3. Fallback -> Plex Internal
