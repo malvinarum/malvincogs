@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import logging
 import io
+import urllib.parse
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
@@ -26,6 +27,7 @@ DEFAULT_GUILD_SETTINGS = {
     "activity_message_id": None,
     "update_interval": 60,
     "tmdb_api_key": None,
+    "google_books_api_key": None,  # NEW
     "user_map": {}
 }
 
@@ -33,7 +35,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Features: TMDB, Dynamic Colors, Tech Specs, User Mapping, and Contextual Verbs!
+    Features: TMDB, Google Books, Dynamic Colors, Tech Specs, User Mapping!
     """
 
     def __init__(self, bot):
@@ -121,11 +123,56 @@ class PlexActivity(commands.Cog):
             pass
         return None
 
+    async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
+        """
+        Searches Google Books API for a cover.
+        """
+        if not api_key or not title: return None
+
+        query = f"intitle:{title}"
+        if author:
+            query += f"+inauthor:{author}"
+
+        search_url = "https://www.googleapis.com/books/v1/volumes"
+        params = {'q': query, 'key': api_key, 'maxResults': 1, 'printType': 'books'}
+
+        try:
+            async with self.session.get(search_url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "items" in data and len(data["items"]) > 0:
+                        volume_info = data["items"][0].get("volumeInfo", {})
+                        image_links = volume_info.get("imageLinks", {})
+
+                        # Try to get the largest available
+                        # thumbnail, smallThumbnail, small, medium, large, extraLarge
+                        # Google API usually returns 'thumbnail' and 'smallThumbnail'
+                        # We can try to strip the zoom parameter or use the largest key
+
+                        url = image_links.get("extraLarge") or \
+                              image_links.get("large") or \
+                              image_links.get("medium") or \
+                              image_links.get("thumbnail") or \
+                              image_links.get("smallThumbnail")
+
+                        if url:
+                            # Google often returns http, force https
+                            if url.startswith("http://"):
+                                url = url.replace("http://", "https://")
+                            # Hack to get higher res if it's a zoomable image
+                            # Removing zoom&edge sometimes gives the raw image, but not always reliable.
+                            # Let's just return what we found for now.
+                            return url
+        except Exception as e:
+            log.error(f"Google Books API Error: {e}")
+        return None
+
     async def _get_plex_sessions(self, guild_id: int):
         settings = await self.config.guild_from_id(guild_id).all()
         plex_url = settings["plex_url"]
         plex_token = settings["plex_token"]
         tmdb_key = settings.get("tmdb_api_key")
+        gb_key = settings.get("google_books_api_key")  # New Key
         user_map = settings.get("user_map", {})
 
         if not plex_url or not plex_token: return []
@@ -139,7 +186,6 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # Plex uses <Track> for music/audiobooks
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
@@ -176,10 +222,7 @@ class PlexActivity(commands.Cog):
                         remaining_ms = max(0, duration_ms - view_offset_ms)
                         finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
 
-                        # Logic for different media types
                         series_title = session_elem.get("grandparentTitle")
-                        # For music/audio, 'grandparentTitle' is usually Artist/Author
-                        # 'parentTitle' is Album/Book Title
                         artist_name = session_elem.get("grandparentTitle")
                         album_name = session_elem.get("parentTitle")
 
@@ -196,15 +239,28 @@ class PlexActivity(commands.Cog):
                             stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
 
                         image_url = None
-                        # Only use TMDB for Video content
+
+                        # 1. Video -> TMDB
                         if tmdb_key and media_type in ['movie', 'episode']:
                             search_query = series_title if media_type == 'episode' else media_title
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
-                        # Fallback (and Primary for Music/Audiobooks)
+                        # 2. Audio -> Google Books API
+                        if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
+                            book_title = album_name or media_title
+                            author = artist_name or ""
+                            # Clean search query
+                            image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
+
+                        # 3. Fallback -> Plex Internal
                         if not image_url:
-                            thumb_path = session_elem.get("art") or session_elem.get("thumb")
+                            thumb_path = None
+                            if media_type == 'track' or media_type == 'audio':
+                                thumb_path = session_elem.get("parentThumb") or session_elem.get("thumb")
+                            else:
+                                thumb_path = session_elem.get("thumb") or session_elem.get("art")
+
                             if thumb_path:
                                 base_plex_url = plex_url.rstrip('/')
                                 image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
@@ -224,7 +280,6 @@ class PlexActivity(commands.Cog):
                             "stream_info": stream_info,
                             "bandwidth": bandwidth_str,
                             "image_url": image_url,
-                            # Metadata fields
                             "title": media_title,
                             "series_title": series_title,
                             "season_num": session_elem.get("parentIndex"),
@@ -261,13 +316,12 @@ class PlexActivity(commands.Cog):
 
             device_emoji = self._get_device_emoji(device)
 
-            # Default colors
             if media_type == 'movie':
                 color = discord.Color.orange()
             elif media_type == 'episode':
                 color = discord.Color.blue()
             elif media_type == 'track':
-                color = discord.Color.teal()  # Teal for Audiobooks/Music
+                color = discord.Color.teal()
             else:
                 color = discord.Color.purple()
 
@@ -278,42 +332,28 @@ class PlexActivity(commands.Cog):
             embed = discord.Embed(color=color)
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
 
-            # --- VERB LOGIC ---
             verb = "is watching..."
             if media_type == "track" or media_type == "audio":
                 verb = "is listening to..."
 
             embed.set_author(name=f"{user} {verb}", icon_url=user_icon)
 
-            # --- CONTENT LOGIC ---
             if media_type == "episode":
                 s_num = int(session.get("season_num")) if session.get("season_num") else 0
                 e_num = int(session.get("episode_num")) if session.get("episode_num") else 0
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('title')}**\n`S{s_num:02}E{e_num:02}`"
             elif media_type == "track":
-                # Audiobook Layout:
-                # Title: Book Title (from Album field usually)
-                # Desc: Chapter Title (from Title field)
-                # Author: Artist field
-
-                # If it's an audiobook library, 'parentTitle' is often the Book Title
-                # and 'grandparentTitle' is the Author.
-                # If 'album' is present, use it as the main title (Book Title)
                 book_title = session.get("album")
                 chapter_title = session.get("title")
                 author = session.get("artist") or "Unknown Author"
-
                 if book_title:
                     embed.title = book_title
                     embed.description = f"**{chapter_title}**\n✍️ *{author}*"
                 else:
-                    # Fallback if no album/book title is found (rare for books)
                     embed.title = chapter_title
                     embed.description = f"✍️ *{author}*"
-
             else:
-                # Movie or generic video
                 embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
 
@@ -323,7 +363,6 @@ class PlexActivity(commands.Cog):
                             inline=False)
 
             user_field_str = f"👤 **User:** <@{discord_id}>\n" if discord_id else ""
-
             embed.add_field(name="Tech Specs",
                             value=f"{user_field_str}{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{session.get('stream_info')}`\n📶 **Bitrate:** `{session.get('bandwidth')}`",
                             inline=False)
@@ -403,6 +442,12 @@ class PlexActivity(commands.Cog):
         await self.config.guild(ctx.guild).tmdb_api_key.set(api_key)
         await ctx.send("✅ TMDB API Key set!")
 
+    @plex.command(name="googlebooks")
+    async def plex_googlebooks(self, ctx: commands.Context, api_key: str):
+        """Set the Google Books API Key."""
+        await self.config.guild(ctx.guild).google_books_api_key.set(api_key)
+        await ctx.send("✅ Google Books API Key set!")
+
     @plex.command(name="setchannel")
     async def plex_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for Plex updates."""
@@ -457,6 +502,7 @@ class PlexActivity(commands.Cog):
             f"URL: {data['plex_url']}\n"
             f"Token: {'Set' if data['plex_token'] else 'Missing'}\n"
             f"TMDB Key: {'Set' if data['tmdb_api_key'] else 'Missing'}\n"
+            f"Google Books Key: {'Set' if data.get('google_books_api_key') else 'Missing'}\n"
             f"Channel: {data['activity_channel']}\n"
             f"Mapped Users: {len(data.get('user_map', {}))}"
         ))
