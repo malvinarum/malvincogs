@@ -139,7 +139,6 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # Plex uses <Track> for music/audiobooks
                     for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
                         user_elem = session_elem.find("User")
                         player_elem = session_elem.find("Player")
@@ -176,10 +175,7 @@ class PlexActivity(commands.Cog):
                         remaining_ms = max(0, duration_ms - view_offset_ms)
                         finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
 
-                        # Logic for different media types
                         series_title = session_elem.get("grandparentTitle")
-                        # For music/audio, 'grandparentTitle' is usually Artist/Author
-                        # 'parentTitle' is Album/Book Title
                         artist_name = session_elem.get("grandparentTitle")
                         album_name = session_elem.get("parentTitle")
 
@@ -196,15 +192,23 @@ class PlexActivity(commands.Cog):
                             stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
 
                         image_url = None
-                        # Only use TMDB for Video content
+                        # TMDB for Video only
                         if tmdb_key and media_type in ['movie', 'episode']:
                             search_query = series_title if media_type == 'episode' else media_title
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
-                        # Fallback (and Primary for Music/Audiobooks)
+                        # FALLBACK / AUDIO LOGIC
                         if not image_url:
-                            thumb_path = session_elem.get("art") or session_elem.get("thumb")
+                            thumb_path = None
+                            if media_type == 'track' or media_type == 'audio':
+                                # Check Parent (Album/Book) -> Track -> Grandparent (Artist)
+                                thumb_path = session_elem.get("parentThumb") or session_elem.get(
+                                    "thumb") or session_elem.get("grandparentThumb")
+                            else:
+                                # For video, prefer Thumb (Poster) over Art (Background)
+                                thumb_path = session_elem.get("thumb") or session_elem.get("art")
+
                             if thumb_path:
                                 base_plex_url = plex_url.rstrip('/')
                                 image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
@@ -224,7 +228,6 @@ class PlexActivity(commands.Cog):
                             "stream_info": stream_info,
                             "bandwidth": bandwidth_str,
                             "image_url": image_url,
-                            # Metadata fields
                             "title": media_title,
                             "series_title": series_title,
                             "season_num": session_elem.get("parentIndex"),
@@ -261,13 +264,12 @@ class PlexActivity(commands.Cog):
 
             device_emoji = self._get_device_emoji(device)
 
-            # Default colors
             if media_type == 'movie':
                 color = discord.Color.orange()
             elif media_type == 'episode':
                 color = discord.Color.blue()
             elif media_type == 'track':
-                color = discord.Color.teal()  # Teal for Audiobooks/Music
+                color = discord.Color.teal()
             else:
                 color = discord.Color.purple()
 
@@ -278,36 +280,29 @@ class PlexActivity(commands.Cog):
             embed = discord.Embed(color=color)
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
 
-            # --- VERB LOGIC ---
             verb = "is watching..."
             if media_type == "track" or media_type == "audio":
                 verb = "is listening to..."
 
             embed.set_author(name=f"{user} {verb}", icon_url=user_icon)
 
-            # --- CONTENT LOGIC ---
             if media_type == "episode":
                 s_num = int(session.get("season_num")) if session.get("season_num") else 0
                 e_num = int(session.get("episode_num")) if session.get("episode_num") else 0
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('title')}**\n`S{s_num:02}E{e_num:02}`"
             elif media_type == "track":
-                # Audiobook Layout:
-                # Title: Book Title (from Album field usually)
-                # Desc: Chapter Title (from Title field)
-                # Author: Artist field
-
-                # If it's an audiobook library, 'parentTitle' is often the Book Title
-                # and 'grandparentTitle' is the Author.
-                book_title = session.get("album") or session.get("title")
+                book_title = session.get("album")
                 chapter_title = session.get("title")
                 author = session.get("artist") or "Unknown Author"
 
-                embed.title = book_title
-                # If chapter title is just "Chapter 1", display it nicely
-                embed.description = f"**{chapter_title}**\n✍️ *{author}*"
+                if book_title:
+                    embed.title = book_title
+                    embed.description = f"**{chapter_title}**\n✍️ *{author}*"
+                else:
+                    embed.title = chapter_title
+                    embed.description = f"✍️ *{author}*"
             else:
-                # Movie or generic video
                 embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
 
@@ -317,7 +312,6 @@ class PlexActivity(commands.Cog):
                             inline=False)
 
             user_field_str = f"👤 **User:** <@{discord_id}>\n" if discord_id else ""
-
             embed.add_field(name="Tech Specs",
                             value=f"{user_field_str}{device_emoji} **Device:** `{device}`\n⚙️ **Stream:** `{session.get('stream_info')}`\n📶 **Bitrate:** `{session.get('bandwidth')}`",
                             inline=False)
