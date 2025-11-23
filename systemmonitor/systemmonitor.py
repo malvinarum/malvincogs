@@ -97,7 +97,7 @@ class SystemMonitor(commands.Cog):
         }
 
         TARGET_MOUNTS = {'/': 'root', '/mnt/storage': 'nfs'}
-        VALID_FSTYPES = ('ext4', 'ext3', 'xfs', 'nfs', 'nfs4')
+        VALID_FSTYPES = ('ext4', 'ext3', 'xfs', 'nfs', 'nfs4', 'fuse.sshfs', 'fuse')
 
         if settings.get("show_full_disk", True) or settings.get("split_disk_stats", False):
             for part in psutil.disk_partitions(all=True):
