@@ -178,6 +178,7 @@ class PlexActivity(commands.Cog):
         if not plex_url or not plex_token: return []
         if not plex_url.endswith("/"): plex_url += "/"
         api_url = f"{plex_url}status/sessions?X-Plex-Token={plex_token}"
+        base_plex_url = plex_url.rstrip('/')
 
         try:
             async with self.session.get(api_url, timeout=10) as response:
@@ -213,8 +214,9 @@ class PlexActivity(commands.Cog):
                                         user_thumb = member.display_avatar.url
                                         discord_id = member.id
 
+                                        # FIX: Prepend Base URL to Plex Avatar if it's a relative path
                             if user_thumb and not user_thumb.startswith("http"):
-                                user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
+                                user_thumb = f"{base_plex_url}{user_thumb}?X-Plex-Token={plex_token}"
 
                             media_title = session_elem.get("title", "Unknown Title")
                             view_offset_ms = int(session_elem.get("viewOffset", "0"))
@@ -268,7 +270,6 @@ class PlexActivity(commands.Cog):
                                     thumb_path = session_elem.get("thumb") or session_elem.get("art")
 
                                 if thumb_path:
-                                    base_plex_url = plex_url.rstrip('/')
                                     image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
                             session_data = {
