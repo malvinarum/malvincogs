@@ -3,7 +3,7 @@ import aiohttp
 import logging
 import io
 import urllib.parse
-import re  # Added for regex cleaning
+import re
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
@@ -36,7 +36,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Features: TMDB, Google Books, Dynamic Colors, Tech Specs, User Mapping!
+    Features: Clickable Titles, TMDB/Google Books, Tech Specs, User Mapping!
     """
 
     def __init__(self, bot):
@@ -108,8 +108,9 @@ class PlexActivity(commands.Cog):
         except Exception:
             return None
 
-    async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
-        if not api_key: return None
+    # --- UPDATED: Returns (Image URL, Content Link) ---
+    async def _fetch_tmdb_data(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
+        if not api_key: return None, None
         search_url = f"https://api.themoviedb.org/3/search/{media_type}"
         params = {'api_key': api_key, 'query': query, 'page': 1}
         if year and media_type == 'movie': params['year'] = year
@@ -118,25 +119,25 @@ class PlexActivity(commands.Cog):
                 if response.status == 200:
                     data = await response.json()
                     if data['results']:
-                        path = data['results'][0].get('poster_path')
-                        if path: return f"https://image.tmdb.org/t/p/w500{path}"
+                        first = data['results'][0]
+                        path = first.get('poster_path')
+                        tmdb_id = first.get('id')
+
+                        img_url = f"https://image.tmdb.org/t/p/w500{path}" if path else None
+                        content_link = f"https://www.themoviedb.org/{media_type}/{tmdb_id}" if tmdb_id else None
+
+                        return img_url, content_link
         except Exception:
             pass
-        return None
+        return None, None
 
-    async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
-        """
-        Searches Google Books API for a cover with smart query cleaning.
-        """
-        if not api_key or not title: return None
+    # --- UPDATED: Returns (Image URL, Content Link) ---
+    async def _fetch_google_books_data(self, api_key: str, title: str, author: str):
+        if not api_key or not title: return None, None
 
-        # --- CLEAN TITLE LOGIC ---
-        # Remove (Unabridged), (Audiobook), [Dramatized], etc.
         clean_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
-
         query = f"intitle:{clean_title}"
-        if author:
-            query += f"+inauthor:{author}"
+        if author: query += f"+inauthor:{author}"
 
         search_url = "https://www.googleapis.com/books/v1/volumes"
         params = {'q': query, 'key': api_key, 'maxResults': 1, 'printType': 'books'}
@@ -149,26 +150,22 @@ class PlexActivity(commands.Cog):
                         volume_info = data["items"][0].get("volumeInfo", {})
                         image_links = volume_info.get("imageLinks", {})
 
-                        # Google API keys: extraLarge, large, medium, small, thumbnail, smallThumbnail
-                        url = image_links.get("extraLarge") or \
-                              image_links.get("large") or \
-                              image_links.get("medium") or \
-                              image_links.get("thumbnail") or \
-                              image_links.get("smallThumbnail")
+                        img_url = image_links.get("extraLarge") or \
+                                  image_links.get("large") or \
+                                  image_links.get("medium") or \
+                                  image_links.get("thumbnail") or \
+                                  image_links.get("smallThumbnail")
 
-                        if url:
-                            # Force HTTPS
-                            if url.startswith("http://"):
-                                url = url.replace("http://", "https://")
-                            log.info(f"Google Books found cover for '{clean_title}': {url}")
-                            return url
-                    else:
-                        log.info(f"Google Books found NO results for '{clean_title}' by '{author}'")
-                else:
-                    log.error(f"Google Books API Error: {response.status}")
-        except Exception as e:
-            log.error(f"Google Books Fetch Exception: {e}")
-        return None
+                        if img_url and img_url.startswith("http://"):
+                            img_url = img_url.replace("http://", "https://")
+
+                        # Get the Info Link
+                        content_link = volume_info.get("canonicalVolumeLink") or volume_info.get("infoLink")
+
+                        return img_url, content_link
+        except Exception:
+            pass
+        return None, None
 
     async def _get_plex_sessions(self, guild_id: int):
         settings = await self.config.guild_from_id(guild_id).all()
@@ -242,20 +239,20 @@ class PlexActivity(commands.Cog):
                             stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
 
                         image_url = None
+                        content_link = None  # NEW
 
                         # 1. Video -> TMDB
                         if tmdb_key and media_type in ['movie', 'episode']:
                             search_query = series_title if media_type == 'episode' else media_title
                             search_type = 'tv' if media_type == 'episode' else 'movie'
-                            image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
+                            image_url, content_link = await self._fetch_tmdb_data(tmdb_key, search_query, search_type,
+                                                                                  year)
 
                         # 2. Audio -> Google Books API
                         if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
-                            # Use Parent Title (Book Name) if available, else Title (Chapter Name?)
-                            # Usually album_name holds the Book Title for Audiobooks
                             book_title = album_name or media_title
                             author = artist_name or ""
-                            image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
+                            image_url, content_link = await self._fetch_google_books_data(gb_key, book_title, author)
 
                         # 3. Fallback -> Plex Internal
                         if not image_url:
@@ -284,6 +281,7 @@ class PlexActivity(commands.Cog):
                             "stream_info": stream_info,
                             "bandwidth": bandwidth_str,
                             "image_url": image_url,
+                            "content_link": content_link,  # NEW
                             "title": media_title,
                             "series_title": series_title,
                             "season_num": session_elem.get("parentIndex"),
@@ -310,6 +308,7 @@ class PlexActivity(commands.Cog):
             media_type = session.get("type")
             device = session.get("device")
             image_url = session.get("image_url")
+            content_link = session.get("content_link")  # NEW
             state = session.get("state")
 
             state_icon = "▶️"
@@ -334,8 +333,11 @@ class PlexActivity(commands.Cog):
                 if dynamic_color: color = dynamic_color
 
             embed = discord.Embed(color=color)
-            user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
+            # Make the title clickable if we have a link!
+            if content_link:
+                embed.url = content_link
 
+            user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
             verb = "is watching..."
             if media_type == "track" or media_type == "audio":
                 verb = "is listening to..."
