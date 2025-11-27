@@ -186,110 +186,119 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
-                        user_elem = session_elem.find("User")
-                        player_elem = session_elem.find("Player")
-                        media_elem = session_elem.find("Media")
-                        transcode_elem = session_elem.find("TranscodeSession")
+                    # Combine all interesting elements
+                    all_items = root.findall("./Video") + root.findall("./Photo") + root.findall("./Track")
 
-                        if user_elem is None or player_elem is None: continue
+                    for session_elem in all_items:
+                        try:
+                            user_elem = session_elem.find("User")
+                            player_elem = session_elem.find("Player")
+                            media_elem = session_elem.find("Media")
+                            transcode_elem = session_elem.find("TranscodeSession")
 
-                        plex_username = user_elem.get("title", "Unknown User")
-                        display_name = plex_username
-                        user_thumb = user_elem.get("thumb")
-                        discord_id = None
+                            if user_elem is None or player_elem is None: continue
 
-                        d_id = user_map.get(plex_username)
-                        if d_id:
-                            guild = self.bot.get_guild(guild_id)
-                            if guild:
-                                member = guild.get_member(d_id)
-                                if member:
-                                    display_name = member.display_name
-                                    user_thumb = member.display_avatar.url
-                                    discord_id = member.id
+                            plex_username = user_elem.get("title", "Unknown User")
+                            display_name = plex_username
+                            user_thumb = user_elem.get("thumb")
+                            discord_id = None
 
-                        if user_thumb and not user_thumb.startswith("http"):
-                            user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
+                            d_id = user_map.get(plex_username)
+                            if d_id:
+                                guild = self.bot.get_guild(guild_id)
+                                if guild:
+                                    member = guild.get_member(d_id)
+                                    if member:
+                                        display_name = member.display_name
+                                        user_thumb = member.display_avatar.url
+                                        discord_id = member.id
 
-                        media_title = session_elem.get("title", "Unknown Title")
-                        view_offset_ms = int(session_elem.get("viewOffset", "0"))
-                        duration_ms = int(session_elem.get("duration", "1"))
-                        year = session_elem.get("year")
+                            if user_thumb and not user_thumb.startswith("http"):
+                                user_thumb = f"{user_thumb}?X-Plex-Token={plex_token}"
 
-                        current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
-                        total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
-                        remaining_ms = max(0, duration_ms - view_offset_ms)
-                        finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
+                            media_title = session_elem.get("title", "Unknown Title")
+                            view_offset_ms = int(session_elem.get("viewOffset", "0"))
+                            duration_ms = int(session_elem.get("duration", "1"))
+                            year = session_elem.get("year")
 
-                        series_title = session_elem.get("grandparentTitle")
-                        artist_name = session_elem.get("grandparentTitle")
-                        album_name = session_elem.get("parentTitle")
+                            current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
+                            total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
+                            remaining_ms = max(0, duration_ms - view_offset_ms)
+                            finish_ts = int((datetime.now() + timedelta(milliseconds=remaining_ms)).timestamp())
 
-                        media_type = session_elem.get("type", "media")
-                        device = player_elem.get("product", "Unknown Device")
-                        state = player_elem.get("state", "playing")
+                            series_title = session_elem.get("grandparentTitle")
+                            artist_name = session_elem.get("grandparentTitle")
+                            album_name = session_elem.get("parentTitle")
 
-                        bitrate_kbps = int(media_elem.get("bitrate", 0)) if media_elem is not None else 0
-                        bandwidth_str = f"{bitrate_kbps / 1000:.1f} Mbps" if bitrate_kbps > 0 else "Unknown"
+                            media_type = session_elem.get("type", "media")
+                            device = player_elem.get("product", "Unknown Device")
+                            state = player_elem.get("state", "playing")
 
-                        stream_info = "Direct Play"
-                        if transcode_elem is not None:
-                            video_decision = transcode_elem.get("videoDecision", "unknown")
-                            stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
+                            bitrate_kbps = int(media_elem.get("bitrate", 0)) if media_elem is not None else 0
+                            bandwidth_str = f"{bitrate_kbps / 1000:.1f} Mbps" if bitrate_kbps > 0 else "Unknown"
 
-                        image_url = None
-                        content_link = None  # NEW
+                            stream_info = "Direct Play"
+                            if transcode_elem is not None:
+                                video_decision = transcode_elem.get("videoDecision", "unknown")
+                                stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
 
-                        # 1. Video -> TMDB
-                        if tmdb_key and media_type in ['movie', 'episode']:
-                            search_query = series_title if media_type == 'episode' else media_title
-                            search_type = 'tv' if media_type == 'episode' else 'movie'
-                            image_url, content_link = await self._fetch_tmdb_data(tmdb_key, search_query, search_type,
-                                                                                  year)
+                            image_url = None
+                            content_link = None
 
-                        # 2. Audio -> Google Books API
-                        if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
-                            book_title = album_name or media_title
-                            author = artist_name or ""
-                            image_url, content_link = await self._fetch_google_books_data(gb_key, book_title, author)
+                            # 1. Video -> TMDB
+                            if tmdb_key and media_type in ['movie', 'episode']:
+                                search_query = series_title if media_type == 'episode' else media_title
+                                search_type = 'tv' if media_type == 'episode' else 'movie'
+                                image_url, content_link = await self._fetch_tmdb_data(tmdb_key, search_query,
+                                                                                      search_type, year)
 
-                        # 3. Fallback -> Plex Internal
-                        if not image_url:
-                            thumb_path = None
-                            if media_type == 'track' or media_type == 'audio':
-                                thumb_path = session_elem.get("parentThumb") or session_elem.get("thumb")
-                            else:
-                                thumb_path = session_elem.get("thumb") or session_elem.get("art")
+                            # 2. Audio -> Google Books API
+                            if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
+                                book_title = album_name or media_title
+                                author = artist_name or ""
+                                image_url, content_link = await self._fetch_google_books_data(gb_key, book_title,
+                                                                                              author)
 
-                            if thumb_path:
-                                base_plex_url = plex_url.rstrip('/')
-                                image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
+                            # 3. Fallback -> Plex Internal
+                            if not image_url:
+                                thumb_path = None
+                                if media_type == 'track' or media_type == 'audio':
+                                    thumb_path = session_elem.get("parentThumb") or session_elem.get("thumb")
+                                else:
+                                    thumb_path = session_elem.get("thumb") or session_elem.get("art")
 
-                        session_data = {
-                            "user": display_name,
-                            "user_thumb": user_thumb,
-                            "discord_id": discord_id,
-                            "type": media_type,
-                            "current_time": current_time_formatted,
-                            "total_duration": total_duration_formatted,
-                            "current_ms": view_offset_ms,
-                            "total_ms": duration_ms,
-                            "finish_ts": finish_ts,
-                            "device": device,
-                            "state": state,
-                            "stream_info": stream_info,
-                            "bandwidth": bandwidth_str,
-                            "image_url": image_url,
-                            "content_link": content_link,  # NEW
-                            "title": media_title,
-                            "series_title": series_title,
-                            "season_num": session_elem.get("parentIndex"),
-                            "episode_num": session_elem.get("index"),
-                            "artist": artist_name,
-                            "album": album_name
-                        }
-                        sessions.append(session_data)
+                                if thumb_path:
+                                    base_plex_url = plex_url.rstrip('/')
+                                    image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
+
+                            session_data = {
+                                "user": display_name,
+                                "user_thumb": user_thumb,
+                                "discord_id": discord_id,
+                                "type": media_type,
+                                "current_time": current_time_formatted,
+                                "total_duration": total_duration_formatted,
+                                "current_ms": view_offset_ms,
+                                "total_ms": duration_ms,
+                                "finish_ts": finish_ts,
+                                "device": device,
+                                "state": state,
+                                "stream_info": stream_info,
+                                "bandwidth": bandwidth_str,
+                                "image_url": image_url,
+                                "content_link": content_link,
+                                "title": media_title,
+                                "series_title": series_title,
+                                "season_num": session_elem.get("parentIndex"),
+                                "episode_num": session_elem.get("index"),
+                                "artist": artist_name,
+                                "album": album_name
+                            }
+                            sessions.append(session_data)
+                        except Exception as e:
+                            log.error(f"Error processing a session item: {e}")
+                            continue  # Skip this item but keep processing others
+
                 except ET.ParseError:
                     return []
                 return sessions
@@ -333,6 +342,7 @@ class PlexActivity(commands.Cog):
                 if dynamic_color: color = dynamic_color
 
             embed = discord.Embed(color=color)
+
             # Make the title clickable if we have a link!
             if content_link:
                 embed.url = content_link
