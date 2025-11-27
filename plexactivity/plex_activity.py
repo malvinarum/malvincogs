@@ -108,7 +108,6 @@ class PlexActivity(commands.Cog):
         except Exception:
             return None
 
-    # --- UPDATED: Returns (Image URL, Content Link) ---
     async def _fetch_tmdb_data(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
         if not api_key: return None, None
         search_url = f"https://api.themoviedb.org/3/search/{media_type}"
@@ -131,7 +130,6 @@ class PlexActivity(commands.Cog):
             pass
         return None, None
 
-    # --- UPDATED: Returns (Image URL, Content Link) ---
     async def _fetch_google_books_data(self, api_key: str, title: str, author: str):
         if not api_key or not title: return None, None
 
@@ -159,9 +157,7 @@ class PlexActivity(commands.Cog):
                         if img_url and img_url.startswith("http://"):
                             img_url = img_url.replace("http://", "https://")
 
-                        # Get the Info Link
                         content_link = volume_info.get("canonicalVolumeLink") or volume_info.get("infoLink")
-
                         return img_url, content_link
         except Exception:
             pass
@@ -180,6 +176,11 @@ class PlexActivity(commands.Cog):
         api_url = f"{plex_url}status/sessions?X-Plex-Token={plex_token}"
         base_plex_url = plex_url.rstrip('/')
 
+        # Helper to check if URL is public
+        def is_public_url(url):
+            return url and (url.startswith("https://") or url.startswith("http://")) and not (
+                        "192.168." in url or "10." in url or "172." in url or "localhost" in url or "127.0.0.1" in url)
+
         try:
             async with self.session.get(api_url, timeout=10) as response:
                 response.raise_for_status()
@@ -187,7 +188,6 @@ class PlexActivity(commands.Cog):
                 sessions = []
                 try:
                     root = ET.fromstring(data)
-                    # Combine all interesting elements
                     all_items = root.findall("./Video") + root.findall("./Photo") + root.findall("./Track")
 
                     for session_elem in all_items:
@@ -214,9 +214,18 @@ class PlexActivity(commands.Cog):
                                         user_thumb = member.display_avatar.url
                                         discord_id = member.id
 
-                                        # FIX: Prepend Base URL to Plex Avatar if it's a relative path
+                                        # LOGIC FIX: User Avatar Safety
+                            # If it's a relative path, make it absolute.
+                            # But if it's absolute and PRIVATE (local IP), Discord won't render it.
+                            # So we only use it if it's public (Discord CDN) OR we fall back to generic.
+
                             if user_thumb and not user_thumb.startswith("http"):
                                 user_thumb = f"{base_plex_url}{user_thumb}?X-Plex-Token={plex_token}"
+
+                            # Final check: Is it renderable?
+                            # If not mapped to Discord (public) and Plex is local, use Generic.
+                            if not is_public_url(user_thumb):
+                                user_thumb = "https://i.imgur.com/1F0B7gP.png"
 
                             media_title = session_elem.get("title", "Unknown Title")
                             view_offset_ms = int(session_elem.get("viewOffset", "0"))
@@ -270,6 +279,9 @@ class PlexActivity(commands.Cog):
                                     thumb_path = session_elem.get("thumb") or session_elem.get("art")
 
                                 if thumb_path:
+                                    # If local, this URL is private. Discord CANNOT render it.
+                                    # We construct it, but likely it will fail to render in embed.
+                                    # But at least the embed itself will post.
                                     image_url = f"{base_plex_url}{thumb_path}?X-Plex-Token={plex_token}"
 
                             session_data = {
@@ -297,8 +309,8 @@ class PlexActivity(commands.Cog):
                             }
                             sessions.append(session_data)
                         except Exception as e:
-                            log.error(f"Error processing a session item: {e}")
-                            continue  # Skip this item but keep processing others
+                            log.error(f"Error processing session: {e}")
+                            continue
 
                 except ET.ParseError:
                     return []
@@ -318,7 +330,7 @@ class PlexActivity(commands.Cog):
             media_type = session.get("type")
             device = session.get("device")
             image_url = session.get("image_url")
-            content_link = session.get("content_link")  # NEW
+            content_link = session.get("content_link")
             state = session.get("state")
 
             state_icon = "▶️"
@@ -343,15 +355,11 @@ class PlexActivity(commands.Cog):
                 if dynamic_color: color = dynamic_color
 
             embed = discord.Embed(color=color)
-
-            # Make the title clickable if we have a link!
-            if content_link:
-                embed.url = content_link
+            if content_link: embed.url = content_link
 
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
             verb = "is watching..."
-            if media_type == "track" or media_type == "audio":
-                verb = "is listening to..."
+            if media_type == "track" or media_type == "audio": verb = "is listening to..."
 
             embed.set_author(name=f"{user} {verb}", icon_url=user_icon)
 
