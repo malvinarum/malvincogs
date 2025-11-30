@@ -25,7 +25,7 @@ The ultimate "Now Playing" dashboard. Flex your media library!
 
 A set-it-and-forget-it download monitor.
 
-* **Integrations:** Hooks right into **qBittorrent** (the real MVP) or Sonarr/Radarr.
+* **Integrations:** Hooks right into **qBittorrent**.
 * **Live Stats:** Download speeds, progress bars, and ETAs. All the good stuff.
 * **Deduplication:** Filters out duplicate entries so your list stays clean.
 
@@ -79,4 +79,4 @@ Load it up and follow the setup instructions!
 [p]load plexactivity
 [p]plex setup
 
-*Maintained by Malvin. Powered by Python & Sarcasm.*
+*Maintained by Malvinarum.*
