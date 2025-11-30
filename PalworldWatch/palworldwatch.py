@@ -75,7 +75,17 @@ class PalworldWatch(commands.Cog):
                 try:
                     # Check cmdline for 'PalServer' (more robust than name)
                     # Often looks like: /home/steam/.../PalServer-Linux-Shipping
-                    if proc.info['cmdline'] and any('PalServer' in arg for arg in proc.info['cmdline']):
+                    # Also check for 'Pal' in name just in case cmdline is empty/hidden
+                    cmdline = proc.info['cmdline']
+                    name = proc.info['name']
+
+                    is_pal = False
+                    if cmdline and any('PalServer' in arg for arg in cmdline):
+                        is_pal = True
+                    elif name and 'PalServer' in name:
+                        is_pal = True
+
+                    if is_pal:
                         self.pal_process = proc
                         # Call cpu_percent once to initialize the timer (will return 0.0 first time)
                         proc.cpu_percent()
@@ -330,6 +340,16 @@ class PalworldWatch(commands.Cog):
         """Set the display name for the server."""
         await self.config.guild(ctx.guild).server_name.set(name)
         await ctx.send(f"Server name set to: **{name}**")
+
+    # --- NEW COMMAND: Set Max Players ---
+    @palwatch.command(name="setmax")
+    async def pw_setmax(self, ctx: commands.Context, max_players: int):
+        """Set the maximum player count manually."""
+        if max_players < 1:
+            return await ctx.send("Max players must be at least 1.")
+
+        await self.config.guild(ctx.guild).max_players.set(max_players)
+        await ctx.send(f"Max players set to: **{max_players}**")
 
 
 async def setup(bot):
