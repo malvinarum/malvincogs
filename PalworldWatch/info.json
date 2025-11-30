@@ -1,0 +1,8 @@
+{
+  "author": ["Malvinarum"],
+  "description": "Live Palworld server dashboard using REST API and Process monitoring.",
+  "hidden": false,
+  "install_msg": "Enable REST API in PalWorldSettings.ini and configure with [p]pw setup.",
+  "short": "Palworld Monitor",
+  "min_bot_version": "3.5.0"
+}
