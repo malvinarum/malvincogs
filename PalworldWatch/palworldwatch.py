@@ -34,7 +34,7 @@ class PalworldWatch(commands.Cog):
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
         self.session = aiohttp.ClientSession()
         self._watch_loop_task = None
-        self.pal_process = None  # Persistent process handle for accurate CPU stats
+        self.pal_process = None  # Persistent process handle
 
     async def cog_load(self):
         log.info("PalworldWatch loaded. Starting loop.")
@@ -57,67 +57,64 @@ class PalworldWatch(commands.Cog):
     def _get_process_stats(self):
         """
         Hunts for the PalServer process to get real CPU/RAM usage.
-        Prioritizes the heavy binary (PalServer-Linux-Shipping) over the wrapper script.
+        Uses a blocking interval in a thread for accurate instantaneous CPU stats.
         """
         try:
+            target_proc = None
+
             # 1. Try to reuse existing process handle if valid
             if self.pal_process:
                 if self.pal_process.is_running():
-                    try:
-                        with self.pal_process.oneshot():
-                            cpu = self.pal_process.cpu_percent()
-                            mem = self.pal_process.memory_info().rss / (1024 ** 3)
-                            return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
-                    except psutil.NoSuchProcess:
-                        self.pal_process = None
+                    target_proc = self.pal_process
                 else:
                     self.pal_process = None
 
-            # 2. Deep Search for the Binary
-            # We look specifically for the binary that actually consumes resources
-            target_names = ['PalServer-Linux', 'PalServer-Win64']
+            # 2. Hunt for it if we don't have it
+            if not target_proc:
+                target_names = ['PalServer-Linux', 'PalServer-Win64']
 
-            candidate = None
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        name = proc.info['name']
+                        cmdline = proc.info['cmdline'] or []
 
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'cpu_percent']):
-                try:
-                    name = proc.info['name']
-                    cmdline = proc.info['cmdline'] or []
+                        # Check for the binary name explicitly
+                        if any(t in name for t in target_names) or 'PalServer-Linux-Shipp' in name:
+                            target_proc = proc
+                            break
 
-                    # Check for the binary name explicitly
-                    # Your logs show: PalServer-Linux-Shipp
-                    if any(t in name for t in target_names) or 'PalServer-Linux-Shipp' in name:
-                        candidate = proc
-                        break  # Found the binary, stop looking
+                            # Fallback: Check for the script if binary isn't found yet
+                        if 'PalServer.sh' in name or any('PalServer.sh' in arg for arg in cmdline):
+                            try:
+                                children = proc.children()
+                                for child in children:
+                                    if any(t in child.name() for t in
+                                           target_names) or 'PalServer-Linux' in child.name():
+                                        target_proc = child
+                                        break
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
 
-                    # Fallback: Check for the script if binary isn't found yet
-                    if 'PalServer.sh' in name or any('PalServer.sh' in arg for arg in cmdline):
-                        # If we find the script, try to find its children (the binary)
-                        try:
-                            children = proc.children()
-                            for child in children:
-                                if any(t in child.name() for t in target_names) or 'PalServer-Linux' in child.name():
-                                    candidate = child
-                                    break
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
+                            if not target_proc:
+                                target_proc = proc
 
-                        if not candidate:
-                            candidate = proc  # Better than nothing
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
 
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
+                if target_proc:
+                    self.pal_process = target_proc
 
-            if candidate:
-                self.pal_process = candidate
-                # Initialize CPU counter
-                candidate.cpu_percent()
-                mem = candidate.memory_info().rss / (1024 ** 3)
-                return {
-                    "cpu": 0.0,
-                    "ram_gb": mem,
-                    "status": "Found"
-                }
+            # 3. Get Stats
+            if target_proc:
+                # Memory
+                with target_proc.oneshot():
+                    mem = target_proc.memory_info().rss / (1024 ** 3)
+
+                # CPU: We use a small interval to get an instant reading.
+                # Since this runs in an executor, 0.1s blocking is fine and gives >0 results.
+                cpu = target_proc.cpu_percent(interval=0.1)
+
+                return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
 
         except Exception as e:
             log.error(f"Process check error: {e}")
@@ -280,6 +277,7 @@ class PalworldWatch(commands.Cog):
             if not channel: continue
 
             # 1. Fetch Data
+            # Use run_in_executor for psutil to avoid blocking
             proc_data = await self.bot.loop.run_in_executor(None, self._get_process_stats)
             api_data = await self._fetch_api_metrics(settings["api_url"], settings["api_password"])
 
