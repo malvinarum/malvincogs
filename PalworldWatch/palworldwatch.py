@@ -34,7 +34,7 @@ class PalworldWatch(commands.Cog):
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
         self.session = aiohttp.ClientSession()
         self._watch_loop_task = None
-        self.pal_process = None  # Persistent process handle
+        self.pal_process = None  # Persistent process handle for accurate CPU stats
 
     async def cog_load(self):
         log.info("PalworldWatch loaded. Starting loop.")
@@ -112,7 +112,9 @@ class PalworldWatch(commands.Cog):
 
                 # CPU: We use a small interval to get an instant reading.
                 # Since this runs in an executor, 0.1s blocking is fine and gives >0 results.
-                cpu = target_proc.cpu_percent(interval=0.1)
+                # We divide by cpu_count() to normalize to 0-100% system usage instead of per-core usage.
+                raw_cpu = target_proc.cpu_percent(interval=0.1)
+                cpu = raw_cpu / psutil.cpu_count()
 
                 return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
 
