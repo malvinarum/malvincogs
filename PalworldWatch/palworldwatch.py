@@ -34,6 +34,7 @@ class PalworldWatch(commands.Cog):
         self.config.register_guild(**DEFAULT_GUILD_SETTINGS)
         self.session = aiohttp.ClientSession()
         self._watch_loop_task = None
+        self.pal_process = None  # Persistent process handle for accurate CPU stats
 
     async def cog_load(self):
         log.info("PalworldWatch loaded. Starting loop.")
@@ -56,21 +57,39 @@ class PalworldWatch(commands.Cog):
     def _get_process_stats(self):
         """
         Hunts for the PalServer-Linux process to get real CPU/RAM usage.
+        Uses cmdline inspection for better detection and caches the process object.
         """
-        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
-            try:
-                # Name might vary: 'PalServer-Linux-Test', 'PalServer-Linux', etc.
-                if 'PalServer' in proc.info['name']:
-                    # cpu_percent needs a second call to be accurate usually, but we take what we get
-                    # dividing by cpu_count is optional depending on how you want to display it
-                    mem_gb = proc.info['memory_info'].rss / (1024 ** 3)
-                    return {
-                        "cpu": proc.info['cpu_percent'],
-                        "ram_gb": mem_gb,
-                        "status": "Running"
-                    }
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+        try:
+            # 1. Try to reuse existing process handle
+            if self.pal_process:
+                if self.pal_process.is_running():
+                    with self.pal_process.oneshot():
+                        cpu = self.pal_process.cpu_percent()
+                        mem = self.pal_process.memory_info().rss / (1024 ** 3)
+                        return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
+                else:
+                    self.pal_process = None  # Process died, reset
+
+            # 2. Hunt for it if we don't have it
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    # Check cmdline for 'PalServer' (more robust than name)
+                    # Often looks like: /home/steam/.../PalServer-Linux-Shipping
+                    if proc.info['cmdline'] and any('PalServer' in arg for arg in proc.info['cmdline']):
+                        self.pal_process = proc
+                        # Call cpu_percent once to initialize the timer (will return 0.0 first time)
+                        proc.cpu_percent()
+                        mem = proc.memory_info().rss / (1024 ** 3)
+                        return {
+                            "cpu": 0.0,  # First reading is always 0
+                            "ram_gb": mem,
+                            "status": "Found"
+                        }
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception as e:
+            log.error(f"Process check error: {e}")
+
         return None
 
     async def _fetch_api_metrics(self, url, password):
@@ -103,22 +122,45 @@ class PalworldWatch(commands.Cog):
                     data = await resp.json()
                     players = data.get("players", [])
 
-            # 3. Server Info (Version/Name)
+            # 3. Server Info (Version/Name/MaxPlayers?)
             async with self.session.get(f"{url}v1/api/info", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     info = await resp.json()
+
+            # 4. Settings (Optional: Try to get MaxPlayers from settings if info lacks it)
+            # Some versions expose /v1/api/settings
+            try:
+                async with self.session.get(f"{url}v1/api/settings", headers=headers, timeout=5) as resp:
+                    if resp.status == 200:
+                        settings_data = await resp.json()
+                        # Merge relevant settings into info
+                        if "PublicServerPlayerCount" in settings_data:
+                            info["maxplayers"] = settings_data["PublicServerPlayerCount"]
+                        elif "ServerPlayerMaxNum" in settings_data:
+                            info["maxplayers"] = settings_data["ServerPlayerMaxNum"]
+            except Exception:
+                pass  # Endpoint might not exist on all versions
 
             return {"metrics": metrics, "players": players, "info": info}
 
         except Exception as e:
             # log.error(f"Palworld API Fail: {e}")
-            # Commented out to prevent log spam if server is restarting
             return None
 
     # --- BUILD EMBED ---
     async def _build_embed(self, api_data, proc_data, settings) -> discord.Embed:
         server_name = settings["server_name"]
+
+        # Determine Max Players: API > Config
         max_players = settings["max_players"]
+        if api_data and "info" in api_data:
+            # Try various keys Palworld might use
+            api_max = api_data["info"].get("maxplayers") or api_data["info"].get("MaxPlayers")
+            if api_max:
+                try:
+                    max_players = int(api_max)
+                except ValueError:
+                    pass
 
         if not api_data and not proc_data:
             # Total blackout
@@ -153,7 +195,7 @@ class PalworldWatch(commands.Cog):
             status_text = "🟡 Starting / API Unreachable"
 
         embed = discord.Embed(title=f"🦖 {server_name}", color=status_color)
-        embed.description = f"**Status:** {status_text} • **v{version}**"
+        embed.description = f"**Status:** {status_text} • **{version}**"
 
         # --- PERFORMANCE BLOCK ---
         perf_str = "Waiting for data..."
@@ -183,17 +225,12 @@ class PalworldWatch(commands.Cog):
             for p in players:
                 # Palworld API usually gives: name, playerId, userId, ip, ping, location_x/y
                 name = p.get("name", "Unknown")
-                # Filter weird empty names
                 if not name: name = "Unknown Survivor"
 
-                # Ping (if available)
-                ping = p.get("ping", 0)
-                # Level (sometimes available in newer versions or mods, standard api might lack it)
                 level = p.get("level", None)
 
                 detail = f" • **{name}**"
                 if level: detail += f" (Lvl {level})"
-                # if ping > 0: detail += f" `{ping}ms`" # Ping often broken in API, enable if you trust it
 
                 player_list.append(detail)
 
