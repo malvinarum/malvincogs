@@ -1,81 +1,82 @@
-# Malvinarum's RedBot Cogs 
+# Malvin & Gemini Inc. Cogs 🚀
 
-A repository containing various utility cogs for the Red Discord Bot.
+Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for power users running home labs, game servers, and media empires. Basically, cool stuff for your server! 😎
 
-## Cogs in this Repository
+## 📦 The Cogs
 
-### plexactivity
+### 🦖 PalworldWatch (`palworldwatch`)
 
-Monitors a Plex Media Server and posts notifications to a Discord channel when users start watching new content.
+Your mission control for Palworld! Keep an eye on your server stats like a hawk.
 
-### rssfeed
+* **Live Telemetry:** Watch FPS, CPU, and RAM usage in real-time. No more guessing!
+* **Population:** See who's online and their levels.
+* **Visuals:** Custom images for when the server is up or down. Fancy!
 
-An RSS/Atom feed reader to post updates from websites, blogs, or news sources directly into a Discord channel.
+### 🎬 Plex Activity (`plexactivity`)
 
-### systemmonitor
+The ultimate "Now Playing" dashboard. Flex your media library!
 
-Provides commands to check the system status of the host machine running the bot, such as CPU, memory, and disk usage.
+* **Rich Metadata:** Grabs movie posters from TMDB and audiobook covers from Google Books/iTunes. Looking good!
+* **Tech Specs:** Nerd stats! See transcoding status, bitrate, and player device.
+* **Context:** It knows the difference between "Watching" a movie and "Listening" to an audiobook. Smart!
+* **Multi-User:** Tracks everyone streaming at once.
 
-### xfeed
+### 📥 Torrents Watch (`torrentswatch`)
 
-A dedicated cog for retrieving and posting content from a specific content source or social media platform (e.g., formerly Twitter/X) to a Discord channel.
+A set-it-and-forget-it download monitor.
+
+* **Integrations:** Hooks right into **qBittorrent** (the real MVP) or Sonarr/Radarr.
+* **Live Stats:** Download speeds, progress bars, and ETAs. All the good stuff.
+* **Deduplication:** Filters out duplicate entries so your list stays clean.
+
+### 🖥️ System Monitor (`systemmonitor`)
+
+Check your server's pulse at a glance.
+
+* **Hardware:** Keeps tabs on CPU temps, load averages, and RAM. Don't let it melt!
+* **Process Hogs:** Find out what's eating all your resources.
+* **Network:** Real-time upload/download tracking.
+
+### 📰 RSS Feed (`rssfeed`)
+
+A smarter news ticker for your server.
+
+* **Filtering:** Only see what you want with `include`/`exclude` keywords.
+* **Rich Media:** Pulls images for beautiful embeds. No more wall of text!
+* **Social:** Estimates reading time and can even ping roles.
+
+### 🐦 XFeed (`xfeed`)
+
+Track social media without breaking the bank (or API limits).
+
+* **Budget Mode:** Smart polling to stay within free tier limits. Phew!
+* **Filters:** Ignore the noise with keyword filtering.
 
 ## 🚀 Installation
 
-To install any of these cogs, you need to have Red Discord Bot V3 running.
-
-The entire process involves three main steps. Replace [p] with your bot's custom prefix (e.g., !, ?, or r:).
+To get these running, you'll need [Red Discord Bot V3](https://docs.discord.red/en/stable/).
 
 ### Step 1: Add the Repository
 
-You must first load the downloader cog and then add this repository to Red's list of sources.
-
-Load the Downloader cog (if not already loaded):
+First things first, load the downloader and add the repo:
 
 [p]load downloader
-
-
-Add the malvincogs repository:
-
 [p]repo add malvincogs https://github.com/malvinarum/malvincogs/
 
+### Step 2: Install a Cog
 
-You'll need to confirm that you trust the repository to continue.
+Pick the cog you want and install it:
 
-### Step 2: Install the Cog
+[p]cog install malvincogs <cog_name>
 
-Replace [cog] with the name of the cog you want to install (e.g., plexactivity).
-
-[p]cog install malvincogs [cog]
-
-
-Example (to install plexactivity):
-
+*Example:*
 [p]cog install malvincogs plexactivity
 
+### Step 3: Load and Configure
 
-### Step 3: Load the Cog
-
-After installation, you need to load the cog to activate its commands.
-
-[p]load [cog]
-
-
-Example (to load plexactivity):
+Load it up and follow the setup instructions!
 
 [p]load plexactivity
+[p]plex setup
 
-
-## ❓ Usage and Configuration
-
-Once the cog is loaded, you can view the full list of commands and configuration options by using Red's built-in help command:
-
-[p]help [cog]
-
-
-### Example:
-
-[p]help plexactivity
-
-
-The help menu will detail the commands needed to set up API keys, select channels, and fully configure the cog's features
+*Maintained by Malvin. Powered by Python & Sarcasm.*
