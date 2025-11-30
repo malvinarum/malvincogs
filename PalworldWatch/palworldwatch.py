@@ -8,6 +8,7 @@ from redbot.core import commands, Config, app_commands, checks
 from redbot.core.utils.chat_formatting import box
 from discord.ext import tasks
 import base64
+import time
 
 log = logging.getLogger("red.palworldwatch")
 
@@ -111,14 +112,14 @@ class PalworldWatch(commands.Cog):
                 # Memory
                 with target_proc.oneshot():
                     mem = target_proc.memory_info().rss / (1024 ** 3)
+                    create_ts = target_proc.create_time()
 
                 # CPU: We use a small interval to get an instant reading.
-                # Since this runs in an executor, 0.1s blocking is fine and gives >0 results.
                 # We divide by cpu_count() to normalize to 0-100% system usage instead of per-core usage.
                 raw_cpu = target_proc.cpu_percent(interval=0.1)
                 cpu = raw_cpu / psutil.cpu_count()
 
-                return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
+                return {"cpu": cpu, "ram_gb": mem, "create_ts": create_ts, "status": "Running"}
 
         except Exception as e:
             log.error(f"Process check error: {e}")
@@ -144,7 +145,7 @@ class PalworldWatch(commands.Cog):
         info = {}
 
         try:
-            # 1. Metrics (FPS, FrameTime)
+            # 1. Metrics (FPS, FrameTime, Uptime, Days)
             async with self.session.get(f"{url}v1/api/metrics", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     metrics = await resp.json()
@@ -219,8 +220,16 @@ class PalworldWatch(commands.Cog):
         info = api_data.get("info", {}) if api_data else {}
 
         server_fps = metrics.get("serverfps", 0)
-        frame_time = metrics.get("frametime", 0)
         version = info.get("version", "Unknown")
+
+        # METRICS EXTRACTION
+        ingame_days = metrics.get("days")
+        uptime_seconds_api = metrics.get("uptime")
+
+        # Status Line Builder
+        desc_parts = [f"**Status:** {status_text}", f"**{version}**"]
+        if ingame_days:
+            desc_parts.append(f"☀️ **Day {ingame_days}**")
 
         if server_fps < 30 and server_fps > 0:
             status_color = discord.Color.orange()
@@ -231,7 +240,7 @@ class PalworldWatch(commands.Cog):
             status_text = "🟡 Starting / API Unreachable"
 
         embed = discord.Embed(title=f"🦖 {server_name}", color=status_color)
-        embed.description = f"**Status:** {status_text} • **{version}**"
+        embed.description = " • ".join(desc_parts)
 
         # CHANGED: Use set_thumbnail instead of set_image
         if image_url: embed.set_thumbnail(url=image_url)
@@ -248,6 +257,23 @@ class PalworldWatch(commands.Cog):
             if proc_data:
                 perf_str += f"\n**RAM:** `{proc_data['ram_gb']:.1f} GB`"
                 perf_str += f"\n**CPU:** `{proc_data['cpu']:.1f}%`"
+
+                # --- UPTIME LOGIC ---
+                # Prefer API uptime (server uptime), fallback to process uptime
+                uptime_sec = uptime_seconds_api if uptime_seconds_api else (time.time() - proc_data.get('create_ts', 0))
+
+                if uptime_sec > 0:
+                    td = timedelta(seconds=int(uptime_sec))
+                    d = td.days
+                    h, rem = divmod(td.seconds, 3600)
+                    m, s = divmod(rem, 60)
+
+                    uptime_str = ""
+                    if d > 0: uptime_str += f"{d}d "
+                    if h > 0 or d > 0: uptime_str += f"{h}h "
+                    uptime_str += f"{m}m"
+
+                    perf_str += f"\n**Up:** `{uptime_str}`"
 
         embed.add_field(name="📊 Performance", value=perf_str, inline=True)
 
