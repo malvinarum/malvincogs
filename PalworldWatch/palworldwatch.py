@@ -207,7 +207,8 @@ class PalworldWatch(commands.Cog):
                 color=discord.Color.red(),
                 timestamp=datetime.now()
             )
-            if image_url: embed.set_image(url=image_url)
+            # Use Thumbnail for offline state too if image exists
+            if image_url: embed.set_thumbnail(url=image_url)
             return embed
 
         status_color = discord.Color.green()
@@ -232,7 +233,8 @@ class PalworldWatch(commands.Cog):
         embed = discord.Embed(title=f"🦖 {server_name}", color=status_color)
         embed.description = f"**Status:** {status_text} • **{version}**"
 
-        if image_url: embed.set_image(url=image_url)
+        # CHANGED: Use set_thumbnail instead of set_image
+        if image_url: embed.set_thumbnail(url=image_url)
 
         # --- PERFORMANCE BLOCK ---
         perf_str = "Waiting for data..."
