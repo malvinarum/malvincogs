@@ -145,7 +145,7 @@ class PalworldWatch(commands.Cog):
         info = {}
 
         try:
-            # 1. Metrics (FPS, FrameTime, Uptime, Days)
+            # 1. Metrics (FPS, FrameTime, MaxPlayers)
             async with self.session.get(f"{url}v1/api/metrics", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     metrics = await resp.json()
@@ -156,22 +156,10 @@ class PalworldWatch(commands.Cog):
                     data = await resp.json()
                     players = data.get("players", [])
 
-            # 3. Server Info (Version/Name/MaxPlayers?)
+            # 3. Server Info (Version/Name)
             async with self.session.get(f"{url}v1/api/info", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     info = await resp.json()
-
-            # 4. Settings (Try to get MaxPlayers)
-            try:
-                async with self.session.get(f"{url}v1/api/settings", headers=headers, timeout=5) as resp:
-                    if resp.status == 200:
-                        settings_data = await resp.json()
-                        if "PublicServerPlayerCount" in settings_data:
-                            info["maxplayers"] = settings_data["PublicServerPlayerCount"]
-                        elif "ServerPlayerMaxNum" in settings_data:
-                            info["maxplayers"] = settings_data["ServerPlayerMaxNum"]
-            except Exception:
-                pass
 
             return {"metrics": metrics, "players": players, "info": info}
 
@@ -184,9 +172,12 @@ class PalworldWatch(commands.Cog):
         server_name = settings["server_name"]
 
         # Determine Max Players: API > Config
+        # We prioritize the API 'maxplayernum' if it exists, otherwise fall back to manual config
         max_players = settings["max_players"]
-        if api_data and "info" in api_data:
-            api_max = api_data["info"].get("maxplayers") or api_data["info"].get("MaxPlayers")
+
+        if api_data and "metrics" in api_data:
+            # Try to get maxplayernum from metrics endpoint
+            api_max = api_data["metrics"].get("maxplayernum")
             if api_max:
                 try:
                     max_players = int(api_max)
