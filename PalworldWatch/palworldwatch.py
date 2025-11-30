@@ -18,6 +18,8 @@ DEFAULT_GUILD_SETTINGS = {
     "message_id": None,
     "server_name": "Palworld Server",
     "max_players": 32,
+    "image_url_online": None,  # Image when server is UP
+    "image_url_offline": None,  # Image when server is DOWN
     "enabled": False
 }
 
@@ -190,13 +192,23 @@ class PalworldWatch(commands.Cog):
                 except ValueError:
                     pass
 
-        if not api_data and not proc_data:
-            return discord.Embed(
+        is_online = bool(api_data or proc_data)
+
+        # --- IMAGE LOGIC ---
+        image_url = settings.get("image_url_online") if is_online else settings.get("image_url_offline")
+        # Fallback if one is missing but the other exists
+        if not image_url:
+            image_url = settings.get("image_url_online") or settings.get("image_url_offline")
+
+        if not is_online:
+            embed = discord.Embed(
                 title=f"🦖 {server_name}",
                 description="🔴 **Offline**\nServer is unreachable via API or Process list.",
                 color=discord.Color.red(),
                 timestamp=datetime.now()
             )
+            if image_url: embed.set_image(url=image_url)
+            return embed
 
         status_color = discord.Color.green()
         status_text = "🟢 Online"
@@ -219,6 +231,8 @@ class PalworldWatch(commands.Cog):
 
         embed = discord.Embed(title=f"🦖 {server_name}", color=status_color)
         embed.description = f"**Status:** {status_text} • **{version}**"
+
+        if image_url: embed.set_image(url=image_url)
 
         # --- PERFORMANCE BLOCK ---
         perf_str = "Waiting for data..."
@@ -356,6 +370,34 @@ class PalworldWatch(commands.Cog):
 
         await self.config.guild(ctx.guild).max_players.set(max_players)
         await ctx.send(f"Max players set to: **{max_players}**")
+
+    # --- NEW COMMANDS: Set Images ---
+    @palwatch.command(name="setimage")
+    async def pw_setimage(self, ctx: commands.Context, state: str, image_url: str):
+        """
+        Set the embed image for online/offline states.
+        Usage: [p]pw setimage online <url> OR [p]pw setimage offline <url>
+        """
+        state = state.lower()
+        if state not in ["online", "offline"]:
+            return await ctx.send("State must be 'online' or 'offline'.")
+
+        if not image_url.startswith("http"):
+            return await ctx.send("Please provide a valid URL starting with http/https.")
+
+        if state == "online":
+            await self.config.guild(ctx.guild).image_url_online.set(image_url)
+        else:
+            await self.config.guild(ctx.guild).image_url_offline.set(image_url)
+
+        await ctx.send(f"Server {state} image set!")
+
+    @palwatch.command(name="clearimage")
+    async def pw_clearimage(self, ctx: commands.Context):
+        """Remove both server images."""
+        await self.config.guild(ctx.guild).image_url_online.set(None)
+        await self.config.guild(ctx.guild).image_url_offline.set(None)
+        await ctx.send("Server images removed.")
 
 
 async def setup(bot):
