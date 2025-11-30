@@ -56,47 +56,69 @@ class PalworldWatch(commands.Cog):
 
     def _get_process_stats(self):
         """
-        Hunts for the PalServer-Linux process to get real CPU/RAM usage.
-        Uses cmdline inspection for better detection and caches the process object.
+        Hunts for the PalServer process to get real CPU/RAM usage.
+        Prioritizes the heavy binary (PalServer-Linux-Shipping) over the wrapper script.
         """
         try:
-            # 1. Try to reuse existing process handle
+            # 1. Try to reuse existing process handle if valid
             if self.pal_process:
                 if self.pal_process.is_running():
-                    with self.pal_process.oneshot():
-                        cpu = self.pal_process.cpu_percent()
-                        mem = self.pal_process.memory_info().rss / (1024 ** 3)
-                        return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
+                    try:
+                        with self.pal_process.oneshot():
+                            cpu = self.pal_process.cpu_percent()
+                            mem = self.pal_process.memory_info().rss / (1024 ** 3)
+                            return {"cpu": cpu, "ram_gb": mem, "status": "Running"}
+                    except psutil.NoSuchProcess:
+                        self.pal_process = None
                 else:
-                    self.pal_process = None  # Process died, reset
+                    self.pal_process = None
 
-            # 2. Hunt for it if we don't have it
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            # 2. Deep Search for the Binary
+            # We look specifically for the binary that actually consumes resources
+            target_names = ['PalServer-Linux', 'PalServer-Win64']
+
+            candidate = None
+
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'cpu_percent']):
                 try:
-                    # Check cmdline for 'PalServer' (more robust than name)
-                    # Often looks like: /home/steam/.../PalServer-Linux-Shipping
-                    # Also check for 'Pal' in name just in case cmdline is empty/hidden
-                    cmdline = proc.info['cmdline']
                     name = proc.info['name']
+                    cmdline = proc.info['cmdline'] or []
 
-                    is_pal = False
-                    if cmdline and any('PalServer' in arg for arg in cmdline):
-                        is_pal = True
-                    elif name and 'PalServer' in name:
-                        is_pal = True
+                    # Check for the binary name explicitly
+                    # Your logs show: PalServer-Linux-Shipp
+                    if any(t in name for t in target_names) or 'PalServer-Linux-Shipp' in name:
+                        candidate = proc
+                        break  # Found the binary, stop looking
 
-                    if is_pal:
-                        self.pal_process = proc
-                        # Call cpu_percent once to initialize the timer (will return 0.0 first time)
-                        proc.cpu_percent()
-                        mem = proc.memory_info().rss / (1024 ** 3)
-                        return {
-                            "cpu": 0.0,  # First reading is always 0
-                            "ram_gb": mem,
-                            "status": "Found"
-                        }
+                    # Fallback: Check for the script if binary isn't found yet
+                    if 'PalServer.sh' in name or any('PalServer.sh' in arg for arg in cmdline):
+                        # If we find the script, try to find its children (the binary)
+                        try:
+                            children = proc.children()
+                            for child in children:
+                                if any(t in child.name() for t in target_names) or 'PalServer-Linux' in child.name():
+                                    candidate = child
+                                    break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                        if not candidate:
+                            candidate = proc  # Better than nothing
+
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
+
+            if candidate:
+                self.pal_process = candidate
+                # Initialize CPU counter
+                candidate.cpu_percent()
+                mem = candidate.memory_info().rss / (1024 ** 3)
+                return {
+                    "cpu": 0.0,
+                    "ram_gb": mem,
+                    "status": "Found"
+                }
+
         except Exception as e:
             log.error(f"Process check error: {e}")
 
@@ -137,19 +159,17 @@ class PalworldWatch(commands.Cog):
                 if resp.status == 200:
                     info = await resp.json()
 
-            # 4. Settings (Optional: Try to get MaxPlayers from settings if info lacks it)
-            # Some versions expose /v1/api/settings
+            # 4. Settings (Try to get MaxPlayers)
             try:
                 async with self.session.get(f"{url}v1/api/settings", headers=headers, timeout=5) as resp:
                     if resp.status == 200:
                         settings_data = await resp.json()
-                        # Merge relevant settings into info
                         if "PublicServerPlayerCount" in settings_data:
                             info["maxplayers"] = settings_data["PublicServerPlayerCount"]
                         elif "ServerPlayerMaxNum" in settings_data:
                             info["maxplayers"] = settings_data["ServerPlayerMaxNum"]
             except Exception:
-                pass  # Endpoint might not exist on all versions
+                pass
 
             return {"metrics": metrics, "players": players, "info": info}
 
@@ -164,7 +184,6 @@ class PalworldWatch(commands.Cog):
         # Determine Max Players: API > Config
         max_players = settings["max_players"]
         if api_data and "info" in api_data:
-            # Try various keys Palworld might use
             api_max = api_data["info"].get("maxplayers") or api_data["info"].get("MaxPlayers")
             if api_max:
                 try:
@@ -173,7 +192,6 @@ class PalworldWatch(commands.Cog):
                     pass
 
         if not api_data and not proc_data:
-            # Total blackout
             return discord.Embed(
                 title=f"🦖 {server_name}",
                 description="🔴 **Offline**\nServer is unreachable via API or Process list.",
@@ -181,26 +199,22 @@ class PalworldWatch(commands.Cog):
                 timestamp=datetime.now()
             )
 
-        # Status Logic
         status_color = discord.Color.green()
         status_text = "🟢 Online"
 
-        # API Data
         metrics = api_data.get("metrics", {}) if api_data else {}
         players = api_data.get("players", []) if api_data else []
         info = api_data.get("info", {}) if api_data else {}
 
         server_fps = metrics.get("serverfps", 0)
-        frame_time = metrics.get("frametime", 0)  # In ms usually
+        frame_time = metrics.get("frametime", 0)
         version = info.get("version", "Unknown")
 
-        # Degraded check
         if server_fps < 30 and server_fps > 0:
             status_color = discord.Color.orange()
             status_text = "🟡 Degraded (Low FPS)"
 
         if not api_data and proc_data:
-            # Process exists but API down (Starting up or Crashed)
             status_color = discord.Color.yellow()
             status_text = "🟡 Starting / API Unreachable"
 
@@ -211,13 +225,11 @@ class PalworldWatch(commands.Cog):
         perf_str = "Waiting for data..."
         if api_data:
             perf_str = f"**FPS:** `{server_fps:.1f}`"
-            # Target 60
             if server_fps >= 55:
                 perf_str += " ✨"
             elif server_fps < 20:
                 perf_str += " 💀"
 
-            # Process Data Merge
             if proc_data:
                 perf_str += f"\n**RAM:** `{proc_data['ram_gb']:.1f} GB`"
                 perf_str += f"\n**CPU:** `{proc_data['cpu']:.1f}%`"
@@ -233,18 +245,13 @@ class PalworldWatch(commands.Cog):
         if players:
             player_list = []
             for p in players:
-                # Palworld API usually gives: name, playerId, userId, ip, ping, location_x/y
                 name = p.get("name", "Unknown")
                 if not name: name = "Unknown Survivor"
-
                 level = p.get("level", None)
-
                 detail = f" • **{name}**"
                 if level: detail += f" (Lvl {level})"
-
                 player_list.append(detail)
 
-            # Truncate if too many
             if len(player_list) > 15:
                 pop_str += "\n" + "\n".join(player_list[:15]) + f"\n...and {len(player_list) - 15} more."
             else:
@@ -273,7 +280,6 @@ class PalworldWatch(commands.Cog):
             if not channel: continue
 
             # 1. Fetch Data
-            # Use run_in_executor for psutil to avoid blocking
             proc_data = await self.bot.loop.run_in_executor(None, self._get_process_stats)
             api_data = await self._fetch_api_metrics(settings["api_url"], settings["api_password"])
 
