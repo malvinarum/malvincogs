@@ -40,14 +40,16 @@ class MemberStatus(commands.Cog):
             "grant_type": "client_credentials"
         }
         try:
-            async with self.bot.session.post(IGDB_AUTH_URL, params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    self._igdb_token = data["access_token"]
-                    self._token_expires_at = now + data["expires_in"] - 60
-                    return self._igdb_token
-                else:
-                    log.error(f"IGDB Auth Failed: {resp.status} | {await resp.text()}")
+            # FIX: Use local session to avoid 'Red object has no attribute session' error
+            async with aiohttp.ClientSession() as session:
+                async with session.post(IGDB_AUTH_URL, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self._igdb_token = data["access_token"]
+                        self._token_expires_at = now + data["expires_in"] - 60
+                        return self._igdb_token
+                    else:
+                        log.error(f"IGDB Auth Failed: {resp.status} | {await resp.text()}")
         except Exception as e:
             log.error(f"IGDB Token Error: {e}")
         return None
@@ -76,17 +78,19 @@ class MemberStatus(commands.Cog):
         query = f'search "{safe_name}"; fields cover.url; limit 1;'
 
         try:
-            async with self.bot.session.post(f"{IGDB_API_BASE}/games", headers=headers, data=query) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data and "cover" in data[0]:
-                        url = data[0]["cover"]["url"]
-                        if url.startswith("//"): url = "https:" + url
-                        return url.replace("t_thumb", "t_cover_big")
+            # FIX: Use local session here too
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{IGDB_API_BASE}/games", headers=headers, data=query) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and "cover" in data[0]:
+                            url = data[0]["cover"]["url"]
+                            if url.startswith("//"): url = "https:" + url
+                            return url.replace("t_thumb", "t_cover_big")
+                        else:
+                            log.debug(f"IGDB: No cover found for '{game_name}'")
                     else:
-                        log.debug(f"IGDB: No cover found for '{game_name}'")
-                else:
-                    log.warning(f"IGDB Query Failed: {resp.status}")
+                        log.warning(f"IGDB Query Failed: {resp.status}")
         except Exception as e:
             log.error(f"IGDB Fetch Error: {e}")
         return None
