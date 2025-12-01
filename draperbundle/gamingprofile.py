@@ -1,24 +1,22 @@
 import asyncio
-import contextlib
 import logging
 import time
-
 from collections import defaultdict
 from datetime import datetime
 from operator import itemgetter
 from typing import Union
 
-import aiohttp
 import discord
-
-from redbot.core import commands
+from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import pagify
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu, start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
+from discord.ext import tasks
 
-from draperbundle.config_holder import ConfigHolder
-from draperbundle.constants import CONTINENT_DATA
-from draperbundle.utilities import (
+# Relative imports to keep the bundle self-contained
+from .config_holder import ConfigHolder
+from .constants import CONTINENT_DATA
+from .utilities import (
     account_adder,
     add_username_hyperlink,
     get_all_by_platform,
@@ -38,12 +36,41 @@ log = logging.getLogger("red.drapercogs.profile")
 class GamingProfile(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.session = aiohttp.ClientSession()
+        # Removed self.session = aiohttp.ClientSession() - use self.bot.session instead
         self.profileConfig = ConfigHolder.GamingProfile
         self.config = ConfigHolder.AccountManager
         self._cache = {}
-        self._task = self.bot.loop.create_task(self._save_to_config())
         self.config_cache = defaultdict(dict)
+
+        # Register the task
+        self._save_task = self.save_to_config_loop.start()
+
+    async def cog_unload(self):
+        self._save_task.cancel()
+        # Force a final save before unload
+        await self._save_cache_to_db()
+
+    @tasks.loop(seconds=60)
+    async def save_to_config_loop(self):
+        await self._save_cache_to_db()
+
+    @save_to_config_loop.before_loop
+    async def before_save_loop(self):
+        await self.bot.wait_until_ready()
+
+    async def _save_cache_to_db(self):
+        """Saves cached 'seen' data to Config to reduce DB writes."""
+        if not self._cache:
+            return
+
+        users_data = self._cache.copy()
+        self._cache = {}  # Clear cache immediately so new data can accumulate
+
+        # We can't access Config.USER directly from here easily without the group,
+        # so we iterate. Ideally, we should register a default for this.
+        for member_id, seen_timestamp in users_data.items():
+            async with self.profileConfig.user_from_id(member_id).all() as user_data:
+                user_data["seen"] = seen_timestamp
 
     @commands.group(name="gprofile")
     @commands.bot_has_permissions(embed_links=True, add_reactions=True)
@@ -58,29 +85,33 @@ class GamingProfile(commands.Cog):
         countries = list(CONTINENT_DATA.values())
         roles = countries + ["No Profile", "Has Profile"]
         existing_roles = [r.name for r in ctx.guild.roles]
+
+        created_count = 0
         for role in roles:
             if role not in existing_roles:
                 await ctx.guild.create_role(
-                    name=role, mentionable=False, hoist=False, reason="Profile Setup"
+                    name=role, mentionable=False, hoist=False, reason="GamingProfile Setup"
                 )
-        await ctx.tick()
+                created_count += 1
+        await ctx.send(f"✅ Setup complete. Created {created_count} missing roles.")
 
     @commands.guild_only()
     @commands.bot_has_permissions(manage_roles=True)
     @_profile.command(name="rolemanager")
     async def _profile_role_management(self, ctx: commands.Context):
-        """Toggle whether to manage roles."""
+        """Toggle whether to manage roles automatically."""
         async with self.profileConfig.guild(ctx.guild).all() as guild_data:
-            current_role_management = guild_data["role_management"]
+            # Handle case where key doesn't exist yet
+            current_role_management = guild_data.get("role_management", False)
             guild_data["role_management"] = not current_role_management
             self.config_cache[ctx.guild.id] = not current_role_management
 
         if not current_role_management:
             await ctx.send(
-                f"Gaming profile will manage regional and profile roles, run `{ctx.clean_prefix}gprofile setup` to ensure you have all the required roles in the server."
+                f"✅ Role management **Enabled**. Run `{ctx.clean_prefix}gprofile setup` to ensure roles exist."
             )
         else:
-            await ctx.send("Gaming profile will no longer touch user roles")
+            await ctx.send("❌ Role management **Disabled**.")
 
     @_profile.command(name="create", aliases=["make"])
     async def _profile_create(self, ctx: commands.Context):
@@ -93,117 +124,99 @@ class GamingProfile(commands.Cog):
             "timezone": None,
             "language": None,
         }
+
         try:
             await ctx.author.send(
-                "Creating your profile\nLet's continue here (We don't want to spam the other chat!)"
+                "Creating your profile...\nLet's continue here to avoid spam."
             )
             exists_msg = await ctx.author.send("Do you want to setup your profile now?")
             start_adding_reactions(exists_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
             pred = ReactionPredicate.yes_or_no(exists_msg, ctx.author)
-            await self.bot.wait_for("reaction_add", check=pred)
+            await self.bot.wait_for("reaction_add", check=pred, timeout=60)
         except discord.Forbidden:
-            return await ctx.send(f"I can't DM you, {ctx.author.mention}")
+            return await ctx.send(f"❌ I can't DM you, {ctx.author.mention}. Please enable DMs.")
+        except asyncio.TimeoutError:
+            return await ctx.author.send("Timed out.")
+
         if pred.result:
-            role_to_add = []
-            role_to_remove = []
+            # Note: account_adder and update_profile are in utilities.py.
+            # We assume they work, but they might need the bot.session passed if they do web requests.
+            # Currently they seem to use bot.wait_for, which is fine.
+
             new_user_data = await update_profile(self.bot, user_data, author)
             accounts = await account_adder(self.bot, author)
-            log.debug(f"profile_create: {author.display_name} Accounts:{accounts}")
+
             async with self.profileConfig.user(author).all() as user_data:
                 user_data.update(new_user_data)
-            if accounts:
-                accounts_group = self.config.user(author)
-                async with accounts_group.account() as services:
-                    for platform, username in accounts.items():
-                        account = {platform: username}
-                        services.update(account)
-            if (
-                getattr(author, "guild", None)
-                and await self.profileConfig.guild(author.guild).role_management()
-                and author.guild.me.guild_permissions.manage_roles
-            ):
-                doesnt_have_profile_role = get_role_named(ctx.guild, "No Profile")
-                has_profile_role = get_role_named(ctx.guild, "Has Profile")
-                continent_role = user_data.get("zone")
-                role_names = [role.name for role in author.roles]
-                if has_profile_role:
-                    role_to_add.append(has_profile_role)
-                if continent_role and continent_role not in role_names:
-                    if role := discord.utils.get(
-                        author.guild.roles, name=continent_role
-                    ):
-                        role_to_add.append(role)
-                zone_roles_user_has = [
-                    x for x in list(CONTINENT_DATA.values()) if x in role_names
-                ]
-                if len(zone_roles_user_has) > 1 or not continent_role:
-                    roles = [
-                        discord.utils.get(author.guild.roles, name=role_name)
-                        for role_name in zone_roles_user_has
-                        if discord.utils.get(author.guild.roles, name=role_name).name
-                        != continent_role
-                    ]
-                    if roles := [r for r in roles if r]:
-                        role_to_remove += roles
-                        if doesnt_have_profile_role:
-                            role_to_remove.append(doesnt_have_profile_role)
 
-                await update_member_atomically(
-                    ctx=ctx, member=author, give=role_to_add, remove=role_to_remove
-                )
-            await author.send("Done.")
+            if accounts:
+                async with self.config.user(author).account() as services:
+                    services.update(accounts)
+
+            # Handle Roles
+            await self._handle_roles(ctx, author, new_user_data)
+            await author.send("✅ Profile creation complete!")
+
+    async def _handle_roles(self, ctx, author, user_data):
+        """Helper to handle role updates during create/update."""
+        if not getattr(author, "guild", None):
+            return
+
+        is_managed = await self.profileConfig.guild(author.guild).role_management()
+        if not is_managed or not author.guild.me.guild_permissions.manage_roles:
+            return
+
+        role_to_add = []
+        role_to_remove = []
+
+        doesnt_have_profile_role = get_role_named(ctx.guild, "No Profile")
+        has_profile_role = get_role_named(ctx.guild, "Has Profile")
+        continent_role_name = user_data.get("zone")
+
+        current_role_names = [role.name for role in author.roles]
+
+        if has_profile_role:
+            role_to_add.append(has_profile_role)
+
+        if continent_role_name and continent_role_name not in current_role_names:
+            if role := get_role_named(author.guild, continent_role_name):
+                role_to_add.append(role)
+
+        # Cleanup old zone roles
+        valid_zones = list(CONTINENT_DATA.values())
+        for r_name in valid_zones:
+            if r_name in current_role_names and r_name != continent_role_name:
+                if old_role := get_role_named(author.guild, r_name):
+                    role_to_remove.append(old_role)
+
+        if doesnt_have_profile_role:
+            role_to_remove.append(doesnt_have_profile_role)
+
+        await update_member_atomically(
+            ctx=ctx, member=author, give=role_to_add, remove=role_to_remove
+        )
 
     @_profile.command(name="update")
     async def _profile_update(self, ctx: commands.Context):
         """Updates an existing profile"""
-        role_to_add = []
-        role_to_remove = []
         author = ctx.author
         user = {"country": None, "timezone": None, "language": None, "zone": None}
         try:
-            await ctx.author.send(
-                "Updating your profile\nLet's continue here (We don't want to spam the other chat!)"
-            )
+            await ctx.author.send("Updating your profile...")
         except discord.Forbidden:
-            return await ctx.author.send("I can't DM you")
+            return await ctx.send(f"❌ I can't DM you, {ctx.author.mention}.")
+
         user = await update_profile(self.bot, user, author)
         async with self.profileConfig.user(author).all() as user_data:
             user_data.update(user)
-        accounts = await account_adder(self.bot, author)
-        log.debug(f"profile_update: {author.display_name} Accounts:{accounts}")
-        if accounts:
-            accounts_group = self.config.user(author)
-            async with accounts_group.account() as services:
-                for platform, username in accounts.items():
-                    account = {platform: username}
-                    services.update(account)
-        if (
-            getattr(author, "guild", None)
-            and await self.profileConfig.guild(author.guild).role_management()
-            and author.guild.me.guild_permissions.manage_roles
-        ):
-            continent_role = user.get("zone")
-            role_names = [role.name for role in author.roles]
-            if continent_role and continent_role not in role_names:
-                if role := discord.utils.get(author.guild.roles, name=continent_role):
-                    role_to_add.append(role)
-            zone_roles_user_has = [
-                x for x in list(CONTINENT_DATA.values()) if x in role_names
-            ]
-            if len(zone_roles_user_has) > 1 or not continent_role:
-                roles = [
-                    discord.utils.get(author.guild.roles, name=role_name)
-                    for role_name in zone_roles_user_has
-                    if discord.utils.get(author.guild.roles, name=role_name).name
-                    != continent_role
-                ]
-                if roles := [r for r in roles if r]:
-                    role_to_remove += roles
-            await update_member_atomically(
-                ctx=ctx, member=author, give=role_to_add, remove=role_to_remove
-            )
 
-        await ctx.author.send("I have updated your profile")
+        accounts = await account_adder(self.bot, author)
+        if accounts:
+            async with self.config.user(author).account() as services:
+                services.update(accounts)
+
+        await self._handle_roles(ctx, author, user)
+        await ctx.author.send("✅ Profile updated.")
 
     @_profile.command(name="show", aliases=["display", "get"])
     @commands.guild_only()
@@ -212,352 +225,124 @@ class GamingProfile(commands.Cog):
         """Shows profiles for all members who are specified"""
         members = member or [ctx.author]
         embed_list = []
-        members = list(set(members))
-        for member in members:
-            if member is None:
-                continue
-            embed = None
-            embed = await self.get_member_profile(ctx, member)
-            if embed and isinstance(embed, discord.Embed):
-                embed_list.append(embed)
-        if embed_list:
-            await menu(ctx, embed_list, DEFAULT_CONTROLS)
+        members = list(set(members))  # unique
 
-    @_profile.command(name="list")
-    @commands.guild_only()
-    async def _profile_list_service(self, ctx: commands.Context, *, platform: str):
-        """All members of a specific service"""
-        if not platform:
-            return
-        guild = ctx.guild
-        is_dm = not guild
-        logo = (await ConfigHolder.LogoData.get_raw()).get(platform)
-        data = await get_all_by_platform(platform=platform, guild=guild, pm=is_dm)
-        if not data:
-            return await ctx.send(
-                f"No one has an account registered with {platform.title()}"
-            )
-        usernames = ""
-        discord_names = ""
-        embed_list = []
-        for username, _, mention, _, steamid in sorted(data, key=itemgetter(3, 1)):
-            if username and mention:
-                username = add_username_hyperlink(platform, username, _id=steamid)
-                if (
-                    len(f"{usernames}{username}\n") > 1000
-                    or len(f"{discord_names}{mention}\n") > 1000
-                ):
-                    embed = discord.Embed(title=f"{platform.title()} usernames")
-                    embed.add_field(name="Discord ID", value=discord_names, inline=True)
-                    embed.add_field(name="Usernames", value=usernames, inline=True)
-                    if logo:
-                        embed.set_thumbnail(url=logo)
-                    embed_list.append(embed)
-                    usernames = ""
-                    discord_names = ""
-                usernames += f"{username}\n"
-                discord_names += f"{mention}\n"
-        if usernames:
-            embed = discord.Embed(title=f"{platform.title()} usernames")
-            embed.add_field(name="Discord ID", value=discord_names, inline=True)
-            embed.add_field(name="Usernames", value=usernames, inline=True)
-            if logo:
-                embed.set_thumbnail(url=logo)
-            embed_list.append(embed)
-        await menu(
-            ctx,
-            pages=embed_list,
-            controls=DEFAULT_CONTROLS,
-            message=None,
-            page=0,
-            timeout=60,
-        )
-        embed_list = []
+        for m in members:
+            if m is None: continue
+            embed = await self.get_member_profile(ctx, m)
+            if embed:
+                embed_list.append(embed)
+
+        if embed_list:
+            await menu(ctx, embed_list, DEFAULT_CONTROLS, timeout=60)
+        else:
+            await ctx.send("No profiles found for the specified users.")
 
     @_profile.command(name="delete", aliases=["purge", "remove"])
     async def _profile_delete(self, ctx: commands.Context):
         """Deletes your profile permanently"""
         try:
             exists_msg = await ctx.author.send(
-                "This cannot be undone and you will have to create a new profile, "
-                "do you want to continue? (y/n)"
+                "⚠️ **This cannot be undone.** Do you want to delete your profile? (y/n)"
             )
             start_adding_reactions(exists_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
             pred = ReactionPredicate.yes_or_no(exists_msg, ctx.author)
-            await self.bot.wait_for("reaction_add", check=pred)
+            await self.bot.wait_for("reaction_add", check=pred, timeout=60)
         except discord.Forbidden:
             return await ctx.send(f"I can't DM you, {ctx.author.mention}")
+        except asyncio.TimeoutError:
+            return await ctx.author.send("Timed out.")
 
         if pred.result:
-            user_group = self.profileConfig.user(ctx.author)
-            async with user_group() as user_data:
-                user_data.clear()
-            account_group = self.config.user(ctx.author)
-            async with account_group() as account_data:
-                account_data.clear()
+            await self.profileConfig.user(ctx.author).clear()
+            await self.config.user(ctx.author).clear()
             await ctx.author.send(
-                f"To created a new one please run `{self._profile_create.qualified_name}`"
+                f"🗑️ Profile deleted. Use `{ctx.prefix}gprofile create` to start over."
             )
         else:
-            await ctx.author.send("Your profile hasn't been touched")
+            await ctx.author.send("Cancelled.")
 
-    @commands.Cog.listener()
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        guild = after.guild
-        if self.config_cache[guild.id] == {}:
-            self.config_cache[guild.id] = await self.profileConfig.guild(
-                guild
-            ).role_management()
-        if not self.config_cache[guild.id]:
-            return
-        if guild and guild.me.guild_permissions.manage_roles:
-            continent_role = await self.profileConfig.user(after).zone()
-            role_names = [role.name for role in after.roles]
-            role_to_add = []
-            if continent_role and continent_role not in role_names:
-                if role := discord.utils.get(after.guild.roles, name=continent_role):
-                    role_to_add.append(role)
-            zone_roles_user_has = [
-                x for x in list(CONTINENT_DATA.values()) if x in role_names
-            ]
-            role_to_remove = []
-            if len(zone_roles_user_has) > 1 or not continent_role:
-                if roles := [
-                    discord.utils.get(after.guild.roles, name=role_name)
-                    for role_name in zone_roles_user_has
-                    if discord.utils.get(after.guild.roles, name=role_name).name
-                    != continent_role
-                ]:
-                    role_to_remove += roles
-            doesnt_have_profile_role = get_role_named(after.guild, "No Profile")
-            has_profile_role = get_role_named(after.guild, "Has Profile")
-            if await has_a_profile(after):
-                if has_profile_role:
-                    role_to_add.append(has_profile_role)
-                if doesnt_have_profile_role:
-                    role_to_remove.append(doesnt_have_profile_role)
-            else:
-                if doesnt_have_profile_role:
-                    role_to_add.append(doesnt_have_profile_role)
-                if has_profile_role:
-                    role_to_remove.append(has_profile_role)
-            if role_to_add or role_to_remove:
-                await update_member_atomically(
-                    ctx=after,
-                    member=after,
-                    give=role_to_add,
-                    remove=role_to_remove,
-                    member_update=True,
-                )
+    # --- Listeners ---
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
-        self._cache[message.author.id] = int(time.time())
+        if not message.author.bot and isinstance(message.author, discord.Member):
+            self._cache[message.author.id] = int(time.time())
 
     @commands.Cog.listener()
-    async def on_typing(
-        self,
-        channel: discord.abc.Messageable,
-        user: Union[discord.Member, discord.User],
-        when: datetime,
-    ):
-        self._cache[user.id] = int(time.time())
+    async def on_typing(self, channel, user, when):
+        if not user.bot and isinstance(user, discord.Member):
+            self._cache[user.id] = int(time.time())
 
-    @commands.Cog.listener()
-    async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        self._cache[after.author.id] = int(time.time())
-
-    @commands.Cog.listener()
-    async def on_reaction_remove(
-        self, reaction: discord.Reaction, user: Union[discord.Member, discord.User]
-    ):
-        self._cache[user.id] = int(time.time())
-
-    @commands.Cog.listener()
-    async def on_reaction_add(
-        self, reaction: discord.Reaction, user: Union[discord.Member, discord.User]
-    ):
-        self._cache[user.id] = int(time.time())
-
+    # Helper function to generate the profile Embed
     async def get_member_profile(self, ctx: commands.Context, member: discord.Member):
         data = await self.profileConfig.user(member).get_raw()
-        last_seen = None
-        if data.get("identifier"):
-            if member:
-                last_seen = (
-                    self._cache.get(member.id)
-                    or await self.profileConfig.user(member).seen()
-                )
 
-            if last_seen:
-                last_seen_datetime = get_date_time(last_seen)
-                last_seen_text = get_date_string(last_seen_datetime)
-            else:
-                last_seen_datetime = None
-                last_seen_text = ""
-            description = ""
-            entries_to_remove = (
-                "discord_user_id",
-                "discord_user_name",
-                "discord_true_name",
-                "guild_display_name",
-                "is_bot",
-                "zone",
-                "subzone",
-                "seen",
-                "trial",
-                "nickname_extas",
-            )
-            for k in entries_to_remove:
-                data.pop(k, None)
-            accounts = await self.config.user(member).account()
-            if accounts:
-                accounts = {
-                    key: value
-                    for key, value in accounts.items()
-                    if value and value != "None"
-                }
-            header = ""
-            if activity := get_member_activity(member):
-                header += f"{activity}\n"
-            description += header
-            for key, value in data.items():
-                if value:
-                    description += f"{key.title()}: {value} | "
-            description = description.rstrip("| ")
-            description = description.strip()
-            if description:
-                description += "\n\n"
-            embed = discord.Embed(title="Gaming Profile", description=description)
-            if accounts:
-                platforms = await get_supported_platforms(lists=False)
-                services = ""
-                usernames = ""
-                steamid = None
-                for service, username in sorted(accounts.items()):
-                    if platform_name := platforms.get(service, {}).get("name"):
-                        if platform_name.lower() == "steam":
-                            steamid = accounts.get("steamid", None)
-                        if platform_name.lower() == "spotify":
-                            steamid = accounts.get("spotifyid", None)
-                        username = add_username_hyperlink(
-                            platform_name, username, _id=steamid
-                        )
-                        services += f"{platform_name}\n"
-                        usernames += f"{username}\n"
-                services.strip()
-                usernames.strip()
-                embed.add_field(name="Services", value=services)
-                embed.add_field(name="Usernames", value=usernames)
-            footer = ""
-            if last_seen_datetime:
-                if last_seen_text == "Now":
-                    footer += "Currently online"
-                else:
-                    footer += f"Last online: {last_seen_text}"
-            footer.strip()
-            if footer:
-                embed.set_footer(text=footer)
-            avatar = member.avatar_url or member.default_avatar_url
-            embed.set_author(name=member.display_name, icon_url=avatar)
-            return embed
-        else:
+        # Check if they actually have a profile (identifier check)
+        if not data.get("identifier"):
             if ctx.author == member:
-                await ctx.send(
-                    "You don't have a profile with me\n"
-                    f"To create one say `{self._profile_create.qualified_name}`"
-                )
+                await ctx.send(f"You don't have a profile! Use `{ctx.prefix}gprofile create`.")
             else:
-                await ctx.send(f"{member.mention} doesn't have a profile with me")
+                await ctx.send(f"{member.display_name} doesn't have a profile.")
             return None
 
-    @_profile.group(name="services", case_insensitive=True)
-    async def _profile_username(self, ctx: commands.Context):
-        """Manage your service usernames"""
+        # Determine Last Seen
+        last_seen_ts = self._cache.get(member.id) or data.get("seen")
+        last_seen_text = "Unknown"
+        if last_seen_ts:
+            dt = get_date_time(last_seen_ts)
+            last_seen_text = get_date_string(dt)
 
-    @_profile_username.command(name="add", aliases=["+"])
-    async def _profile_username_add(self, ctx: commands.Context):
-        """Adds/updates an account for the specified service"""
-        try:
-            accounts = await account_adder(self.bot, ctx.author)
-        except discord.Forbidden:
-            return await ctx.send(f"I can't DM you, {ctx.author.mention}")
-        log.debug(f"account_add: {ctx.author.display_name} Accounts:{accounts}")
+        description_parts = []
 
+        # Activity
+        if activity := get_member_activity(member):
+            description_parts.append(f"**{activity}**")
+
+        # Basic Info
+        keys_to_show = ["country", "language", "timezone"]
+        for key in keys_to_show:
+            if val := data.get(key):
+                description_parts.append(f"**{key.title()}:** {val}")
+
+        embed = discord.Embed(
+            title=f"{member.display_name}'s Profile",
+            description="\n".join(description_parts),
+            color=member.color
+        )
+
+        # Services / Accounts
+        accounts = await self.config.user(member).account()
         if accounts:
-            accounts_group = self.config.user(ctx.author)
-            async with accounts_group.account() as services:
-                for platform, username in accounts.items():
-                    account = {platform: username}
-                    services.update(account)
-            await ctx.author.send("I've added your accounts to your profile")
-        else:
-            await ctx.author.send("No accounts to add to your profile")
+            # Filter out empty accounts
+            valid_accounts = {k: v for k, v in accounts.items() if v and v != "None"}
 
-    @_profile_username.command(name="remove", aliases=["delete", "purge", "-"])
-    async def account_remove(self, ctx: commands.Context, *, platform: str):
-        """Removes an account from the specified service"""
-        supported_platforms = await get_supported_platforms(supported=True)
-        platform = platform.lower()
-        try:
-            if platform in supported_platforms:
-                account_group = self.config.user(ctx.author)
-                async with account_group.account() as services:
-                    deleted_data = services.pop(platform)
-                if deleted_data:
-                    await ctx.send(
-                        f"I've deleted your {platform.title()} username: {deleted_data}"
-                    )
-                else:
-                    await ctx.send(
-                        f"You don't have a {platform.title()} username with me"
-                    )
-            else:
-                platforms = await get_supported_platforms()
-                pos_len = 3
-                platforms_text = f"{'#':{pos_len}}\n"
-                for number, (command, name) in enumerate(platforms, 1):
-                    line = (
-                        "{number}." "    <{name}>\n" " - Command:  < {scope} >\n"
-                    ).format(
-                        number=number,
-                        name=name,
-                        command=command,
-                    )
-                    platforms_text += line
-                pages = list(pagify(platforms_text, page_length=1800))
-                await menu(ctx.author, pages, DEFAULT_CONTROLS)
-        except discord.Forbidden:
-            return await ctx.send(f"I can't DM you, {ctx.author.mention}")
+            if valid_accounts:
+                platforms = await get_supported_platforms(lists=False)
+                lines = []
+                steamid = valid_accounts.get("steamid")
+                spotifyid = valid_accounts.get("spotifyid")  # Not usually public but handling logic
 
-    async def cog_unload(self):
-        await self._clean_up()
+                for service, username in valid_accounts.items():
+                    # Skip internal IDs in list
+                    if service in ["steamid", "spotifyid"]: continue
 
-    async def _clean_up(self):
-        if self._task:
-            self._task.cancel()
-        if self._cache:
-            group = self.profileConfig._get_base_group(
-                self.config.USER
-            )  # Bulk update to config
-            async with group.all() as new_data:
-                for member_id, seen in self._cache.items():
-                    if str(member_id) not in new_data:
-                        new_data[str(member_id)] = {"seen": 0}
-                    new_data[str(member_id)]["seen"] = seen
+                    platform_name = platforms.get(service, {}).get("name", service.title())
 
-    async def _save_to_config(self):
-        await self.bot.wait_until_ready()
-        with contextlib.suppress(asyncio.CancelledError):
-            while True:
-                users_data = self._cache.copy()
-                self._cache = {}
-                group = self.profileConfig._get_base_group(
-                    self.config.USER
-                )  # Bulk update to config
-                async with group.all() as new_data:
-                    for member_id, seen in users_data.items():
-                        if str(member_id) not in new_data:
-                            new_data[str(member_id)] = {"seen": 0}
-                        new_data[str(member_id)]["seen"] = seen
-                await asyncio.sleep(60)
+                    # Logic for hyperlinks
+                    link_id = steamid if service == "steam" else None
+
+                    display_text = add_username_hyperlink(platform_name, username, _id=link_id)
+                    lines.append(f"**{platform_name}:** {display_text}")
+
+                if lines:
+                    embed.add_field(name="Connected Accounts", value="\n".join(lines), inline=False)
+
+        footer_text = f"Last seen: {last_seen_text}"
+        if last_seen_text.startswith("Today") and member.status != discord.Status.offline:
+            footer_text = "Currently Online"
+
+        embed.set_footer(text=footer_text)
+        embed.set_thumbnail(url=member.display_avatar.url)
+
+        return embed
