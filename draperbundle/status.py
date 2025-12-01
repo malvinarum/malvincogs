@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from operator import attrgetter
 from typing import Union
 
@@ -24,6 +25,32 @@ class MemberStatus(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = ConfigHolder.PlayerStatus
+        self._igdb_token = None
+        self._token_expires_at = 0
+
+    async def _get_igdb_token(self, c_id, c_secret):
+        """Gets or refreshes the IGDB App Access Token."""
+        now = time.time()
+        if self._igdb_token and now < self._token_expires_at:
+            return self._igdb_token
+
+        params = {
+            "client_id": c_id,
+            "client_secret": c_secret,
+            "grant_type": "client_credentials"
+        }
+        try:
+            async with self.bot.session.post(IGDB_AUTH_URL, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    self._igdb_token = data["access_token"]
+                    self._token_expires_at = now + data["expires_in"] - 60
+                    return self._igdb_token
+                else:
+                    log.error(f"IGDB Auth Failed: {resp.status} | {await resp.text()}")
+        except Exception as e:
+            log.error(f"IGDB Token Error: {e}")
+        return None
 
     async def _get_game_cover(self, game_name: str):
         """Fetches game cover from IGDB using PublisherManager credentials."""
@@ -32,25 +59,21 @@ class MemberStatus(commands.Cog):
         c_secret = creds.get("client_secret")
 
         if not c_id or not c_secret:
-            log.debug("IGDB Credentials missing.")
+            # Silent fail if not configured
             return None
 
-        # Get Token (Simplified flow for specific command usage)
-        params = {"client_id": c_id, "client_secret": c_secret, "grant_type": "client_credentials"}
-        try:
-            async with self.bot.session.post(IGDB_AUTH_URL, params=params) as resp:
-                if resp.status != 200:
-                    log.error(f"IGDB Auth failed: {resp.status}")
-                    return None
-                data = await resp.json()
-                token = data["access_token"]
-        except Exception as e:
-            log.error(f"IGDB Auth Exception: {e}")
-            return None
+        token = await self._get_igdb_token(c_id, c_secret)
+        if not token: return None
 
-        headers = {"Client-ID": c_id, "Authorization": f"Bearer {token}", "Accept": "application/json"}
-        # Search for game, asking for cover url
-        query = f'search "{game_name}"; fields cover.url; limit 1;'
+        headers = {
+            "Client-ID": c_id,
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+
+        # Escape quotes in game name to prevent query breakage
+        safe_name = game_name.replace('"', '\\"')
+        query = f'search "{safe_name}"; fields cover.url; limit 1;'
 
         try:
             async with self.bot.session.post(f"{IGDB_API_BASE}/games", headers=headers, data=query) as resp:
@@ -63,7 +86,7 @@ class MemberStatus(commands.Cog):
                     else:
                         log.debug(f"IGDB: No cover found for '{game_name}'")
                 else:
-                    log.error(f"IGDB Query failed: {resp.status}")
+                    log.warning(f"IGDB Query Failed: {resp.status}")
         except Exception as e:
             log.error(f"IGDB Fetch Error: {e}")
         return None
