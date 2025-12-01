@@ -19,6 +19,8 @@ class ConfigHolderClass:
         self.AccountManager = Config.get_conf(
             None, identifier=1273062035, force_registration=True, cog_name="AccountManager"
         )
+        # FIX: Register default user settings for AccountManager
+        self.AccountManager.register_user(account={})
 
         # GamingProfile: Stores region, timezone, bio
         self.GamingProfile = Config.get_conf(
@@ -26,11 +28,38 @@ class ConfigHolderClass:
         )
         # FIX: Register default guild settings for GamingProfile
         self.GamingProfile.register_guild(role_management=False)
+        self.GamingProfile.register_user(
+            discord_user_id=None,
+            discord_user_name=None,
+            discord_true_name=None,
+            guild_display_name=None,
+            is_bot=False,
+            country=None,
+            timezone=None,
+            language=None,
+            zone=None,
+            subzone=None,
+            seen=None,
+            trial=None,
+            nickname_extas=None,
+        )
 
         # PCSpecs: Stores hardware details
         self.PCSpecs = Config.get_conf(
             None, identifier=8205491788, force_registration=True, cog_name="PCSpecs"
         )
+        self.PCSpecs.register_user(rig={
+            "CPU": None,
+            "GPU": None,
+            "RAM": None,
+            "Motherboard": None,
+            "Storage": None,
+            "Monitor": None,
+            "Mouse": None,
+            "Keyboard": None,
+            "Case": None,
+            "Headset": None
+        })
 
         # PublisherManager: Stores supported game services
         self.PublisherManager = Config.get_conf(
@@ -54,6 +83,7 @@ class ConfigHolderClass:
         self.LogoData = Config.get_conf(
             None, identifier=7056820599, force_registration=True, cog_name="LogoData"
         )
+        self.LogoData.register_global()  # Just register empty global if it's dynamic
 
         # DynamicChannels: Auto-creating voice channels
         self.DynamicChannels = Config.get_conf(
@@ -91,7 +121,7 @@ class ConfigHolderClass:
 ConfigHolder = ConfigHolderClass()
 
 # --- DEFAULT SCHEMAS ---
-# These are referenced but handled above via register calls now for safety.
+# These are essentially documentation now since we registered them above.
 
 default_member_AccountManager = {"account": {"origin": None, "uplay": None}}
 
