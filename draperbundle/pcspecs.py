@@ -1,30 +1,32 @@
 import logging
-
+import asyncio
 from copy import copy
 from operator import itemgetter
 
 import discord
 import regex
 
-from discord.ext.commands.converter import Greedy
 from redbot.core import commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
-from draperbundle.config_holder import ConfigHolder
-from draperbundle.constants import REPLACE_BRACKER
-from draperbundle.utilities import (
+# FIX: Changed import from 'draperbundle' to '.' (relative) or 'drapercogs'
+from .config_holder import ConfigHolder
+from .constants import REPLACE_BRACKER
+from .utilities import (
     get_all_user_rigs,
     get_date_string,
     get_date_time,
     get_member_activity,
 )
 
-__updated__ = "27-04-2019"
-
-logger = logging.getLogger("red.drapercogs.pc_specs")
+log = logging.getLogger("red.drapercogs.pc_specs")
 
 
 class PCSpecs(commands.Cog):
+    """
+    Manage and display PC Specifications for users.
+    """
+
     def __init__(self, bot):
         self.bot = bot
         self.config = ConfigHolder.PCSpecs
@@ -32,309 +34,182 @@ class PCSpecs(commands.Cog):
     @commands.group()
     async def specs(self, ctx: commands.Context):
         """Rig management"""
+        pass
 
     @specs.group(name="show", invoke_without_command=True)
-    async def _specs_show(self, ctx, *, show_all: str = None):  # @ReservedAssignment
-        """Shows your info"""
+    async def _specs_show(self, ctx, *, show_all: str = None):
+        """Shows your rig info or all users."""
         if ctx.invoked_subcommand is not None:
             return
-        if show_all and show_all == "all":
+
+        if show_all and show_all.lower() == "all":
             data = await get_all_user_rigs(
                 ctx.guild, pm=isinstance(ctx.channel, discord.DMChannel)
             )
             if not data:
-                return await ctx.send("No one here has a rig profile with me")
-            discord_names = ""
+                return await ctx.send("No one here has a rig profile with me.")
+
             embed_list = []
+            description = ""
+
             for rig_data, _, mention, _ in sorted(data, key=itemgetter(3, 1)):
                 if rig_data and mention:
-                    if len(f"{discord_names}{mention}\n") > 1000:
-                        embed = discord.Embed(title="Users with a rig profile")
-                        embed.add_field(
-                            name="Discord ID", value=discord_names, inline=True
-                        )
+                    line = f"{mention}\n"
+                    if len(description) + len(line) > 1000:
+                        embed = discord.Embed(title="Users with a Rig Profile", description=description,
+                                              color=await ctx.embed_color())
                         embed_list.append(embed)
-                        discord_names = ""
-                    discord_names += f"{mention}\n"
-            if discord_names:
-                embed = discord.Embed(title="Users with a rig profile")
-                embed.add_field(name="Discord ID", value=discord_names, inline=True)
+                        description = ""
+                    description += line
+
+            if description:
+                embed = discord.Embed(title="Users with a Rig Profile", description=description,
+                                      color=await ctx.embed_color())
                 embed_list.append(embed)
-            # await embeder.send_webhook(embeds=embed_list)
-            await menu(
-                ctx,
-                pages=embed_list,
-                controls=DEFAULT_CONTROLS,
-                message=None,
-                page=0,
-                timeout=60,
-            )
-            embed_list = []
+
+            await menu(ctx, embed_list, DEFAULT_CONTROLS, timeout=60)
+
         elif not show_all:
             embed = await self._get_member_rig(ctx, ctx.author)
             if embed:
                 await ctx.send(embed=embed)
         else:
-            return await ctx.send_help()
+            await ctx.send_help()
 
     @_specs_show.command(name="member")
-    async def _show_member(self, ctx, members: Greedy[discord.Member]):
-        """Show Rig Data for multiple Members"""
+    async def _show_member(self, ctx, members: commands.Greedy[discord.Member]):
+        """Show Rig Data for multiple Members."""
         if not members:
-            return
+            return await ctx.send("Please specify at least one member.")
+
         members = list(set(members))
         embed_list = []
         for member in members:
-            if member is None:
-                continue
-            embed = None
             embed = await self._get_member_rig(ctx, member)
-            if embed and isinstance(embed, discord.Embed):
+            if embed:
                 embed_list.append(embed)
+
         if embed_list:
             await menu(ctx, embed_list, DEFAULT_CONTROLS)
+        else:
+            await ctx.send("No rig data found for the specified members.")
 
     @specs.command(name="add")
     async def _specs_add(self, ctx: commands.Context):
-        """Add your rig specs to your profile"""
+        """Interactive wizard to add your rig specs."""
         try:
-            member = ctx.guild.get_member(ctx.author.id)
-            rig_data = await self.config.user(member).rig.get_raw()
-            rig_data_new = await self.update_rig(rig_data, ctx.author)
-            rig_group = self.config.user(member)
-            async with rig_group.rig() as rigs_data:
-                for component, value in rig_data_new.items():
-                    ring_component = {component: value}
-                    rigs_data.update(ring_component)
-            await ctx.author.send("I've updated your rig data")
+            # Initialize default struct if missing
+            member = ctx.author
+            current_data = await self.config.user(member).rig()
+
+            # Run the interactive updater
+            updated_data = await self.update_rig(current_data, ctx.author)
+
+            if updated_data:
+                await self.config.user(member).rig.set(updated_data)
+                await ctx.author.send("✅ **Success!** I've updated your rig data.")
+            else:
+                await ctx.author.send("❌ Setup cancelled.")
+
         except discord.Forbidden:
-            return await ctx.send(f"I can't DM you, {ctx.author.mention}")
+            await ctx.send(f"I can't DM you, {ctx.author.mention}. Please enable DMs to set up your specs.")
 
     @specs.command(name="remove")
     async def _specs_remove(self, ctx: commands.Context, *, component: str):
-        """Remove a component from your rig profile"""
-        component_user = component
-        member = ctx.message.guild.get_member(ctx.author.id)
-        completed = 0
-        try:
-            rigs_data = await self.config.user(member).rig()
-            rig_temp = copy(rigs_data)
-            for component, _ in rig_temp.items():
-                if component.lower() == component_user.strip().lower():
-                    await ctx.send(f"Removed {component} from your rig")
-                    rigs_data.pop(component, None)
-            await self.config.user(member).rig.set(rigs_data)
-            completed = 1
-        except discord.Forbidden:
-            return await ctx.send(f"I can't DM you, {ctx.author.mention}")
+        """Remove a specific component from your rig profile."""
+        member = ctx.author
+        component_clean = component.strip().lower()
 
-        if completed == 0:
-            await ctx.send(
-                "The provided component is not valid, no changes made to your rig"
-            )
+        async with self.config.user(member).rig() as rig_data:
+            found = False
+            for key in list(rig_data.keys()):
+                if key.lower() == component_clean:
+                    rig_data[key] = None
+                    await ctx.send(f"🗑️ Removed **{key}** from your rig.")
+                    found = True
+                    break
+
+            if not found:
+                await ctx.send(
+                    f"❌ Component `{component}` not found in your rig. Valid components: CPU, GPU, RAM, etc.")
 
     async def update_rig(self, rig_data: dict, author: discord.User):
+        """Interactive DM session to update rig stats."""
+
+        questions = [
+            ("CPU", "What CPU do you have?"),
+            ("GPU", "What/How many GPUs do you have? (Separate with |)"),
+            ("RAM", "How much RAM do you have?"),
+            ("Motherboard", "What motherboard do you have?"),
+            ("Storage", "What is your storage setup?"),
+            ("Monitor", "What monitor(s) do you have?"),
+            ("Mouse", "What mouse do you use?"),
+            ("Keyboard", "What keyboard do you use?"),
+            ("Headset", "What headset/audio do you use?"),
+            ("Case", "What case do you have?")
+        ]
+
         def check(m):
             return m.author == author and isinstance(m.channel, discord.DMChannel)
 
         await author.send(
-            'Each question you can enter "Cancel" or "Skip"'
-            "\nCancel will stop all the question up to the point you gotten to"
-            "\nSkip will skip that question and take you to the next question"
+            "**PC Specs Setup**\n"
+            "Type `skip` to keep current/empty value.\n"
+            "Type `cancel` to stop completely.\n"
+            "Type `clear` to remove a value."
         )
 
-        await author.send("What CPU do you have (Cancel|Skip)?")
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["CPU"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping CPU, onto the next question we go")
-            if not rig_data.get("CPU"):
-                rig_data["CPU"] = None
+        new_data = rig_data.copy()
 
-        await author.send("What/How many GPUs do you have (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["GPU"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping GPU, onto the next question we go")
-            if not rig_data.get("GPU"):
-                rig_data["GPU"] = None
+        for key, question in questions:
+            current_val = new_data.get(key)
+            prompt = f"**{question}**"
+            if current_val:
+                prompt += f"\n(Current: {current_val})"
 
-        await author.send("What/How much RAM do you have (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["RAM"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping RAM, onto the next question we go")
-            if not rig_data.get("RAM"):
-                rig_data["RAM"] = None
+            await author.send(prompt)
 
-        await author.send("What motherboard do you have (Cancel|Skip)?")
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Motherboard"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping Motherboard, onto the next question we go")
-            if not rig_data.get("Motherboard"):
-                rig_data["Motherboard"] = None
+            try:
+                msg = await self.bot.wait_for("message", check=check, timeout=60)
+            except asyncio.TimeoutError:
+                await author.send("⏳ **Timed out.** Setup cancelled.")
+                return None
 
-        await author.send("What is your storage setup (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Storage"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping Storage, onto the next question we go")
-            if not rig_data.get("Storage"):
-                rig_data["Storage"] = None
+            content = msg.content.strip()
 
-        await author.send("What Monitor do you have (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Monitor"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping monitor, onto the next question we go")
-            if not rig_data.get("Monitor"):
-                rig_data["Monitor"] = None
+            if content.lower() == "cancel":
+                await author.send("🚫 Setup cancelled.")
+                return None
+            elif content.lower() == "skip":
+                continue
+            elif content.lower() == "clear":
+                new_data[key] = None
+            else:
+                new_data[key] = content
 
-        await author.send("What mouse do you have (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Mouse"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping mouse, onto the next question we go")
-            if not rig_data.get("Mouse"):
-                rig_data["Mouse"] = None
-
-        await author.send("What keyboard do you have (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Keyboard"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping keyboard, onto the next question we go")
-            if not rig_data.get("Keyboard"):
-                rig_data["Keyboard"] = None
-
-        await author.send("What headset do you have (Cancel|Skip)?")
-        await author.send('NOTE: If more than 1 separate with "|"')
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Headset"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping headset, onto the next question we go")
-            if not rig_data.get("Headset"):
-                rig_data["Headset"] = None
-
-        await author.send("What case do you have (Cancel|Skip)?")
-        msg = await self.bot.wait_for("message", check=check)
-        if msg and msg.content.lower().strip() not in ["cancel", "skip"]:
-            rig_data["Case"] = msg.content.strip()
-        elif msg and msg.content.lower().strip() == "cancel":
-            await author.send("Skipping the rest of the setup")
-            return rig_data
-        elif msg and msg.content.lower().strip() == "skip":
-            await author.send("Skipping case")
-            if not rig_data.get("Case"):
-                rig_data["Case"] = None
-
-        return rig_data
+        return new_data
 
     async def _get_member_rig(self, ctx: commands.Context, member: discord.Member):
-        rig_data = await self.config.user(member).rig.get_raw()
-        has_profile = [True for _, value in rig_data.items() if value]
-        if not has_profile:
-            await ctx.send(
-                f"Member: {member.mention} does not have any rig data with me"
-            )
+        rig_data = await self.config.user(member).rig()
+
+        # Check if rig has any data
+        if not any(rig_data.values()):
+            if ctx.author == member:
+                await ctx.send(f"You don't have a rig profile yet! Use `{ctx.prefix}specs add` to create one.")
             return None
-        gaming_cog = ctx.bot.get_cog("GamingProfile")
-        discord_user_name = member.display_name
-        description = ""
-        last_seen = (
-            gaming_cog._cache.get(member.id)
-            or await ConfigHolder.GamingProfile.user(member).seen()
-        )
 
-        if last_seen:
-            last_seen_datetime = get_date_time(last_seen)
-            last_seen_text = get_date_string(last_seen_datetime)
-        else:
-            last_seen_datetime = None
-            last_seen_text = ""
+        embed = discord.Embed(title=f"{member.display_name}'s Rig", color=member.color)
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
 
-        header = ""
-        activity = get_member_activity(member)
-        if activity:
-            header += f"{activity}\n"
-        description += header
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
 
-        embed = discord.Embed(
-            title=f"{discord_user_name}'{'s' if not discord_user_name.endswith('s') else ''} rig",
-            description=description,
-        )
-        footer = ""
-        if last_seen_datetime:
-            if last_seen_text == "Now":
-                footer += "Currently online"
-            else:
-                footer += f"Last online: {last_seen_text}"
-        footer.strip()
-        if footer:
-            embed.set_footer(text=footer)
+        for component, value in rig_data.items():
+            if value:
+                # Format cleaner values
+                clean_val = value.replace("|", "\n").replace(",", "\n")
+                clean_val = regex.sub(REPLACE_BRACKER, "", clean_val).strip()
 
-        component_field = ""
-        component_name_field = ""
-        for component, component_value in rig_data.items():
-            new_line = ""
-            if component_value:
-                if "|" in component_value:
-                    component_value = component_value.replace("|", "\n")
-                else:
-                    component_value = component_value.replace(",", "\n")
-                if "\n" in component_value:
-                    new_line = "\n" * component_value.count("\n")
-                component_name_field += f"{component_value}\n"
-                component_name_field = regex.sub(
-                    REPLACE_BRACKER, "", component_name_field
-                )
-                component_field += f"{component}{new_line}\n"
-        component_field = component_field.strip()
-        component_name_field = component_name_field.strip()
-        embed.add_field(name=f"Component", value=component_field, inline=True)
-        embed.add_field(name=f"Component Name", value=component_name_field, inline=True)
-        avatar = member.avatar_url or member.default_avatar_url
-        embed.set_author(name=member.display_name, icon_url=avatar)
+                embed.add_field(name=component, value=clean_val, inline=True)
+
         return embed
