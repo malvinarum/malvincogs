@@ -38,6 +38,8 @@ class ConfigHolderClass:
         # Register the new IGDB credentials global group
         self.PublisherManager.register_global(igdb_creds={})
         self.PublisherManager.register_global(services={})  # Ensure services dict exists
+        # FIX: Register 'publisher' group which maps games to services
+        self.PublisherManager.register_global(publisher={})
 
         # PlayerStatus: Tracks active players
         self.PlayerStatus = Config.get_conf(
