@@ -1,10 +1,10 @@
-from draperbundle.customchannels import CustomChannels
-from draperbundle.dynamicchannels import DynamicChannels
-from draperbundle.gamingprofile import GamingProfile
-from draperbundle.pcspecs import PCSpecs
-from draperbundle.playerstats import PlayerStats
-from draperbundle.publishermanager import PublisherManager
-from draperbundle.status import MemberStatus
+from .customchannels import CustomChannels
+from .dynamicchannels import DynamicChannels
+from .gamingprofile import GamingProfile
+from .pcspecs import PCSpecs
+from .playerstats import PlayerStats
+from .publishermanager import PublisherManager
+from .status import MemberStatus
 
 
 async def setup(bot):

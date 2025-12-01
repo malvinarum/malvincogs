@@ -5,7 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="2fb1fb44-6539-43d5-904a-507b45ad9d8e" name="Changes" comment=".">
-      <change beforePath="$PROJECT_DIR$/draperbundle/gamingprofile.py" beforeDir="false" afterPath="$PROJECT_DIR$/draperbundle/gamingprofile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/draperbundle/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/draperbundle/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/draperbundle/publishermanager.py" beforeDir="false" afterPath="$PROJECT_DIR$/draperbundle/publishermanager.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -81,22 +83,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1760894813376</updated>
-    </task>
-    <task id="LOCAL-00048" summary=".">
-      <option name="closed" value="true" />
-      <created>1763623053868</created>
-      <option name="number" value="00048" />
-      <option name="presentableId" value="LOCAL-00048" />
-      <option name="project" value="LOCAL" />
-      <updated>1763623053868</updated>
-    </task>
-    <task id="LOCAL-00049" summary=".">
-      <option name="closed" value="true" />
-      <created>1763623363257</created>
-      <option name="number" value="00049" />
-      <option name="presentableId" value="LOCAL-00049" />
-      <option name="project" value="LOCAL" />
-      <updated>1763623363257</updated>
     </task>
     <task id="LOCAL-00050" summary=".">
       <option name="closed" value="true" />
@@ -474,7 +460,23 @@
       <option name="project" value="LOCAL" />
       <updated>1764629063522</updated>
     </task>
-    <option name="localTasksCounter" value="97" />
+    <task id="LOCAL-00097" summary=".">
+      <option name="closed" value="true" />
+      <created>1764629182346</created>
+      <option name="number" value="00097" />
+      <option name="presentableId" value="LOCAL-00097" />
+      <option name="project" value="LOCAL" />
+      <updated>1764629182346</updated>
+    </task>
+    <task id="LOCAL-00098" summary=".">
+      <option name="closed" value="true" />
+      <created>1764629425608</created>
+      <option name="number" value="00098" />
+      <option name="presentableId" value="LOCAL-00098" />
+      <option name="project" value="LOCAL" />
+      <updated>1764629425608</updated>
+    </task>
+    <option name="localTasksCounter" value="99" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">

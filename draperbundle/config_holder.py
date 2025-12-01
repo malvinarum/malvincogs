@@ -35,6 +35,9 @@ class ConfigHolderClass:
             None, identifier=2064553666, force_registration=True, cog_name="PublisherManager",
         )
 
+        # Register the new IGDB credentials global group
+        self.PublisherManager.register_global(igdb_creds={})
+
         # PlayerStatus: Tracks active players
         self.PlayerStatus = Config.get_conf(
             None, identifier=3584065639, force_registration=True, cog_name="PlayerStatus"
