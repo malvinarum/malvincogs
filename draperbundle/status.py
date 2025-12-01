@@ -42,6 +42,7 @@ class MemberStatus(commands.Cog):
             return None
 
         headers = {"Client-ID": c_id, "Authorization": f"Bearer {token}", "Accept": "application/json"}
+        # Search for game, asking for cover url
         query = f'search "{game_name}"; fields cover.url; limit 1;'
 
         try:
@@ -101,19 +102,10 @@ class MemberStatus(commands.Cog):
         )
 
         if playing_data:
-            # We need to inject the cover_url into the embed generation logic
-            # get_activity_list creates the embeds.
-            # We might need to modify the embeds *after* they return or update utilities.
-            # Updating logic locally is cleaner than changing shared utilities for one specific visual.
-
+            # Pass cover_url to get_activity_list
             embed_list = await get_activity_list(
-                ctx, playing_data, game_name, discord.ActivityType.playing
+                ctx, playing_data, game_name, discord.ActivityType.playing, thumbnail_url=cover_url
             )
-
-            # Inject thumbnail into the first page if we have one
-            if cover_url and embed_list:
-                for embed in embed_list:
-                    embed.set_thumbnail(url=cover_url)
 
             await menu(
                 ctx,
@@ -197,13 +189,10 @@ class MemberStatus(commands.Cog):
             forced_channel=game_channel,
         )
         if streaming_data:
+            # Pass cover_url here too
             embed_list = await get_activity_list(
-                ctx, streaming_data, game_name, discord.ActivityType.streaming
+                ctx, streaming_data, game_name, discord.ActivityType.streaming, thumbnail_url=cover_url
             )
-
-            if cover_url and embed_list:
-                for embed in embed_list:
-                    embed.set_thumbnail(url=cover_url)
 
             await menu(
                 ctx,
