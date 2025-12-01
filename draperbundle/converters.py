@@ -1,6 +1,4 @@
 import discord
-
-from discord.ext.commands import BadArgument
 from redbot.core import commands
 
 
@@ -8,31 +6,40 @@ class ConvertMember(commands.MemberConverter):
     """Converts to a :class:`Member`.
 
     All lookups are via the local guild. If in a DM context, then the lookup
-    is done by the global cache.
+    is done by the global cache (best effort).
 
     The lookup strategy is as follows (in order):
-
     1. Lookup by ID.
     2. Lookup by mention.
     3. Lookup by name#discrim
     4. Lookup by name
     5. Lookup by nickname
-    6. Lookup by name lower in arg lower
-    7. Lookup by nickname lower in arg lower
     """
 
     async def convert(self, ctx, argument):
         try:
-            member = await super().convert(ctx, argument)
+            return await super().convert(ctx, argument)
         except commands.BadArgument:
+            # Fallback manual search
+            if not ctx.guild:
+                raise
+
+            argument = argument.lower()
+
+            # Name match
             member = discord.utils.find(
-                lambda x: argument.lower() in x.name.lower(), ctx.guild.members
+                lambda x: x.name.lower() == argument,
+                ctx.guild.members
             )
-            if member is None:
+
+            if not member:
+                # Nick match
                 member = discord.utils.find(
-                    lambda x: argument.lower() in x.display_name.lower(),
+                    lambda x: x.display_name.lower() == argument,
                     ctx.guild.members,
                 )
+
             if member is None:
-                raise BadArgument(f'Member "{argument}" was not found')
-        return member
+                raise commands.BadArgument(f'Member "{argument}" was not found')
+
+            return member

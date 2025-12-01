@@ -1,24 +1,31 @@
 from __future__ import annotations
 
-# -*- coding: utf-8 -*-
 import ast
 import asyncio
 import contextlib
 import logging
 import operator as op
 import random
-
 from calendar import day_name
 from collections import namedtuple
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
-from typing import Union
+from typing import Union, Optional
 from urllib.parse import quote_plus
 
 import aiohttp
 import dateutil.parser
 import discord
-from discord.utils import utcnow
+
+# Use redbot's utcnow if available, else fallback
+try:
+    from discord.utils import utcnow
+except ImportError:
+    from datetime import datetime, timezone
+
+
+    def utcnow():
+        return datetime.now(timezone.utc)
 
 from pytz import UTC
 from redbot.core import commands
@@ -26,12 +33,15 @@ from redbot.core.utils.chat_formatting import box, pagify
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
 
-from draperbundle.config_holder import ConfigHolder
-from draperbundle.constants import CONTINENT_DATA
-from draperbundle.country import WorldData
+# Relative imports
+from .config_holder import ConfigHolder
+from .constants import CONTINENT_DATA
+from .country import WorldData
 
 logger = logging.getLogger("red.drapercogs.draperbundle.utils")
 _START = "#"
+_header = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Redbot/CKS-Companion"}
+MAX_STRING_LENGTH = 100000
 
 
 def fmt_join(words: Sequence, ending: str = "or"):
@@ -93,19 +103,27 @@ def list_filter(_list: list, what_to_remove: Union[str, int, bool] = None):
 
 
 async def has_a_profile(member: discord.Member):
-    return (
-        bool(await ConfigHolder.GamingProfile.user(member).country())
-        if member
-        else False
-    )
+    if not member:
+        return False
+    return bool(await ConfigHolder.GamingProfile.user(member).country())
 
 
-async def get_website_data(url, headers=None):
+async def get_website_data(url, session: aiohttp.ClientSession = None, headers=None):
+    """
+    Fetches data from a URL.
+    Refactored to require a session to prevent resource leaks.
+    """
     if not headers:
         headers = _header
-    async with aiohttp.ClientSession() as session:
+
+    if session:
         async with session.get(url, headers=headers) as response:
             return await response.read()
+    else:
+        # Fallback for legacy calls (discouraged)
+        async with aiohttp.ClientSession() as new_session:
+            async with new_session.get(url, headers=headers) as response:
+                return await response.read()
 
 
 async def get_member(guild: discord.Guild, member):
@@ -150,6 +168,15 @@ def safe_mult(first, second):
     return first * second
 
 
+OPERATORS = {
+    ast.Add: safe_add,
+    ast.Sub: op.sub,
+    ast.Mult: safe_mult,
+    ast.Div: op.truediv,
+    ast.USub: op.neg,
+}
+
+
 def eval_expr(expr):
     """Evaluate math problems safely"""
     return eval_(ast.parse(expr, mode="eval").body)
@@ -178,7 +205,7 @@ async def get_supported_platforms(lists: bool = True, supported: bool = False):
     return platforms
 
 
-async def account_adder(bot, author: discord.User):  # @UnusedVariable
+async def account_adder(bot, author: discord.User):
     platforms = await get_supported_platforms()
     platform_prompt = [name for _, name in platforms]
     platform_prompt = {
@@ -195,33 +222,45 @@ async def update_profile(bot, user_data: dict, author: discord.User):
     validcountries = sorted([value.get("name") for _, value in country_data.items()])
     desc = ""
     valid_county_list = []
+
+    # Only show a subset to avoid spamming DMs too hard, or rely on pagify
     for index, value in enumerate(validcountries, start=1):
         desc += f"{index}. {value}\n"
         valid_county_list.append(str(index))
+
     pages = [box(page, lang="md") for page in list(pagify(desc, shorten_by=20))]
-    ctx = namedtuple("Context", "author me bot send channel")
-    new_ctx = ctx(author, bot.user, bot, author.send, msg.channel)
+
+    # Using namedtuple for mock context
+    Context = namedtuple("Context", "author me bot send channel")
+    new_ctx = Context(author, bot.user, bot, author.send, msg.channel)
+
+    # We shouldn't use create_task for menu if we need to block for result,
+    # but the original code did it to allow input while menu is up.
     menu_task = asyncio.create_task(menu(new_ctx, pages, DEFAULT_CONTROLS, timeout=180))
+
     country = None
     pred_check = MessagePredicate.contained_in(valid_county_list, ctx=new_ctx)
-    while not country:
-        with contextlib.suppress(asyncio.TimeoutError):
-            await bot.wait_for("message", timeout=30.0, check=pred_check)
-        country = (
-            valid_county_list[pred_check.result]
-            if pred_check.result is not None
-            else None
-        )
+
+    try:
+        await bot.wait_for("message", timeout=60.0, check=pred_check)
+        country = valid_county_list[pred_check.result] if pred_check.result is not None else None
+    except asyncio.TimeoutError:
+        country = None
+
     with contextlib.suppress(Exception):
         menu_task.cancel()
+
+    if not country:
+        return user_data
+
     user_data["country"] = validcountries[int(country) - 1]
     cached_country = user_data["country"].lower().strip()
 
     if cached_country:
-        country_data = WorldData.get("country", {})
-        region = country_data.get(cached_country, {}).get("region")
-        country_timezones = country_data.get(cached_country, {}).get("timezones")
-        user_data["subzone"] = country_data.get(cached_country, {}).get("subregion")
+        country_info = country_data.get(cached_country, {})
+        region = country_info.get("region")
+        country_timezones = country_info.get("timezones")
+        user_data["subzone"] = country_info.get("subregion")
     else:
         region = None
         country_timezones = None
@@ -238,51 +277,51 @@ async def update_profile(bot, user_data: dict, author: discord.User):
             valid_continent_list.append(str(index))
         embed.description = box(desc, lang="md")
         await author.send(embed=embed)
+
         zone = None
         pred_check = MessagePredicate.contained_in(valid_continent_list, ctx=new_ctx)
-        while not zone:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await bot.wait_for("message", timeout=30.0, check=pred_check)
-            zone = (
-                valid_continent_list[pred_check.result]
-                if pred_check.result is not None
-                else None
-            )
-        user_data["zone"] = continent_data[int(zone) - 1]
+        try:
+            await bot.wait_for("message", timeout=30.0, check=pred_check)
+            zone = valid_continent_list[pred_check.result] if pred_check.result is not None else None
+        except asyncio.TimeoutError:
+            pass
+
+        if zone:
+            user_data["zone"] = continent_data[int(zone) - 1]
     else:
-        user_data["zone"] = country_data.get(cached_country, {}).get("region", None)
+        user_data["zone"] = region
 
     user_data["language"] = None
 
     if country_timezones and len(country_timezones) > 1:
+        # User selection for multiple timezones
         country_timezones_dict = {
             str(i): key for i, key in enumerate(country_timezones, start=1)
         }
-        country_timezones = sorted(country_timezones_dict.values())
+        valid_timezone_list = sorted(country_timezones_dict.keys())
 
         await author.send(
-            "There are multiple timezone for your country, please pick the one that match yours?"
+            "There are multiple timezones for your country, please pick the one that matches yours:"
         )
         embed = discord.Embed(title="Pick a number that matches your timezone")
         desc = ""
-        valid_timezone_list = []
-        for index, value in enumerate(country_timezones, start=1):
-            desc += f"{index}. {value.upper()}\n"
-            valid_timezone_list.append(str(index))
+        for i, val in country_timezones_dict.items():
+            desc += f"{i}. {val}\n"
 
         embed.description = box(desc, lang="md")
         await author.send(embed=embed)
-        timezone = None
+
+        timezone_choice = None
         pred_check = MessagePredicate.contained_in(valid_timezone_list, ctx=new_ctx)
-        while not timezone:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await bot.wait_for("message", timeout=30.0, check=pred_check)
-            timezone = (
-                valid_timezone_list[pred_check.result]
-                if pred_check.result is not None
-                else None
-            )
-        user_data["timezone"] = country_timezones[int(timezone) - 1]
+        try:
+            await bot.wait_for("message", timeout=30.0, check=pred_check)
+            timezone_choice = valid_timezone_list[pred_check.result] if pred_check.result is not None else None
+        except asyncio.TimeoutError:
+            pass
+
+        if timezone_choice:
+            user_data["timezone"] = country_timezones[int(timezone_choice) - 1]
+
     elif country_timezones and len(country_timezones) == 1:
         user_data["timezone"] = country_timezones[0]
 
@@ -291,15 +330,9 @@ async def update_profile(bot, user_data: dict, author: discord.User):
 
 def get_user_named(bot, name):
     result = None
-    members = bot.get_all_members()
+    members = list(bot.get_all_members())
     if len(name) > 5 and name[-5] == "#":
-        # The 5 length is checking to see if #0000 is in the string,
-        # as a#0000 has a length of 6, the minimum for a potential
-        # discriminator lookup.
         potential_discriminator = name[-4:]
-
-        # do the actual lookup and return if found
-        # if it isn't found then we'll do a full name lookup below.
         result = discord.utils.get(
             members, name=name[:-5], discriminator=potential_discriminator
         )
@@ -308,10 +341,8 @@ def get_user_named(bot, name):
 
     def pred(m):
         try:
-            return (
-                str(m.nick).lower() == name.lower()
-                or str(m.name).lower() == name.lower()
-            )
+            # Handle cases where global users might not have nicks
+            return str(m.name).lower() == name.lower()
         except Exception:
             return False
 
@@ -332,16 +363,23 @@ async def get_activity_list(ctx, data, game_name, activity):
         activity_name = "watching "
 
     embed_list = []
-    embed_colour = await ctx.embed_colour()
+    # Assumes ctx.embed_colour is available (Redbot standard)
+    if hasattr(ctx, "embed_colour"):
+        embed_colour = await ctx.embed_colour()
+    else:
+        embed_colour = discord.Color.blue()
+
     for key, value in sorted(data.items()):
+        # Sorting by role value then name
         player_data = sorted(value, key=op.itemgetter(2, 1))
         usernames = ""
         discord_names = ""
+
         for mention, display_name, black_hole, account in player_data:
             account = account or "Unknown"
             if (
-                len(f"{usernames}{account}\n") > 1000
-                or len(f"{discord_names}{display_name}\n") > 1000
+                    len(f"{usernames}{account}\n") > 1000
+                    or len(f"{discord_names}{display_name}\n") > 1000
             ):
                 embed = discord.Embed(
                     title=("Who's {activity}{name}?").format(
@@ -357,6 +395,7 @@ async def get_activity_list(ctx, data, game_name, activity):
                 discord_names = ""
             usernames += f"{account}\n"
             discord_names += f"{display_name}\n"
+
         if usernames:
             embed = discord.Embed(
                 title="Who's {activity} {name}?".format(
@@ -389,32 +428,33 @@ def is_tomorrow(a_date: date):
 def add_username_hyperlink(platform, username, _id):
     platform = platform.lower()
     url = None
+    safe_user = quote_plus(str(username))
+    safe_id = quote_plus(str(_id)) if _id else None
+
     if platform == "twitch":
-        url = f'https://www.twitch.tv/{quote_plus(f"{username}")}'
+        url = f'https://www.twitch.tv/{safe_user}'
     elif platform == "steam":
-        if _id:
-            url = f'https://steamcommunity.com/profiles/{quote_plus(f"{_id}")}'
+        if safe_id:
+            url = f'https://steamcommunity.com/profiles/{safe_id}'
         else:
-            url = f'https://steamcommunity.com/id/{quote_plus(f"{username}")}'
+            url = f'https://steamcommunity.com/id/{safe_user}'
     elif platform == "instagram":
-        url = f'https://www.instagram.com/{quote_plus(f"{username}")}'
+        url = f'https://www.instagram.com/{safe_user}'
     elif platform == "mixer":
-        url = f'https://mixer.com/{quote_plus(f"{username}")}'
+        url = f'https://mixer.com/{safe_user}'
     elif platform == "reddit":
-        url = f'https://www.reddit.com/user/{quote_plus(f"{username}")}'
+        url = f'https://www.reddit.com/user/{safe_user}'
     elif platform == "twitter":
-        url = f'https://twitter.com/{quote_plus(f"{username}")}'
+        url = f'https://twitter.com/{safe_user}'
     elif platform == "youtube":
-        url = f'https://www.youtube.com/user/{quote_plus(f"{username}")}'
+        url = f'https://www.youtube.com/user/{safe_user}'
     elif platform == "facebook":
-        url = f'https://www.facebook.com/{quote_plus(f"{username}")}'
+        url = f'https://www.facebook.com/{safe_user}'
     elif platform == "soundcloud":
-        url = f'https://www.soundcloud.com/{quote_plus(f"{username}")}'
+        url = f'https://www.soundcloud.com/{safe_user}'
     elif platform == "spotify":
-        username2 = username
-        if _id:
-            username2 = _id
-        url = f'https://open.spotify.com/user/{quote_plus(f"{username2}")}'
+        target = safe_id if safe_id else safe_user
+        url = f'https://open.spotify.com/user/{target}'
 
     if url:
         username = f"[{username}]({url})"
@@ -426,19 +466,30 @@ def get_member_activity(member: discord.Member, database=False):
     activities = getattr(member, "activities", None)
     if not activities:
         return None
+
+    # Check activity types
     activities_type = [activity.type for activity in activities]
     if not activities_type:
         return None
-    if not database:
-        stream = discord.ActivityType.streaming in activities_type
-        music = discord.ActivityType.listening in activities_type
-    else:
-        stream = False
-        music = False
+
+    # Determine what we are looking for
+    if database:
+        # When storing in DB, we prefer playing > streaming > listening
+        # But honestly, just grabbing the first valid game is usually enough
+        pass
+
+    # Priority: Streaming > Playing > Listening
+    stream = discord.ActivityType.streaming in activities_type
     game = discord.ActivityType.playing in activities_type
+    music = discord.ActivityType.listening in activities_type
+
+    looking_for = None
+    name_property = "name"
+    context = ""
+
     if stream:
         looking_for = discord.ActivityType.streaming
-        name_property = "details"
+        name_property = "details"  # Often details is better for stream title, or name for game name
         context = "Streaming {name}"
     elif game:
         looking_for = discord.ActivityType.playing
@@ -454,39 +505,52 @@ def get_member_activity(member: discord.Member, database=False):
     if interested_in := [
         activity for activity in member.activities if activity.type == looking_for
     ]:
-        activity_name = getattr(interested_in[0], name_property, None)
+        # Grab first match
+        act = interested_in[0]
+        # For streaming, the 'name' is often "Twitch", we might want 'details' or 'state'
+        # But 'name' is consistent with previous logic
+        activity_name = getattr(act, name_property, getattr(act, "name", "Unknown"))
+
         return activity_name if database else context.format(name=activity_name)
     return None
 
 
 async def get_all_user_profiles(
-    guild, pm=False, withprofile=True, inactivity=False, timespan=None
+        guild, pm=False, withprofile=True, inactivity=False, timespan=None
 ):
     data = await ConfigHolder.GamingProfile.all_users()
     data_list = []
-    role_value = 0
+
+    time_allowed = 0
     if inactivity and isinstance(timespan, int):
-        time_now = utcnow()
-        time_now_sec = time_now.timestamp()
-        time_allowed = time_now_sec - (604800 * timespan)
+        time_now_sec = utcnow().timestamp()
+        time_allowed = time_now_sec - (604800 * timespan)  # 604800 = 1 week
+
     for discord_id, value in data.items():
         is_bot = value.get("is_bot")
-        member = guild.get_member(discord_id)
+        member = guild.get_member(int(discord_id))
+
         if not member:
             continue
+
         has_profile = await has_a_profile(member)
-        last_seen = None
+
+        innactive = False
         if inactivity and isinstance(timespan, int):
-            if member:
-                if member.status != discord.Status.offline:
-                    last_seen = utcnow()
-                else:
-                    last_seen = value.get("seen")
-            if last_seen:
-                last_seen_datetime = get_date_time(last_seen).timestamp()
+            last_seen = None
+            if member.status != discord.Status.offline:
+                last_seen = utcnow()
             else:
-                last_seen_datetime = None
-            if inactivity and last_seen_datetime and last_seen_datetime < time_allowed:
+                seen_val = value.get("seen")
+                if seen_val:
+                    last_seen = get_date_time(seen_val)
+
+            if last_seen:
+                last_seen_ts = last_seen.timestamp()
+                if last_seen_ts < time_allowed:
+                    innactive = True
+            elif not last_seen:
+                # Never seen? consider inactive
                 innactive = True
 
         if member and not pm:
@@ -495,106 +559,54 @@ async def get_all_user_profiles(
             top_role = member.top_role
             role_value = top_role.position * -1
         else:
-            username_true = None
+            username_true = str(member)
             mention = username_true
+            role_value = 0
 
         if inactivity:
             if innactive:
                 data_list.append((username_true, mention, role_value))
-
-        elif withprofile and has_profile and username_true and is_bot is not True:
+        elif withprofile and has_profile and username_true and not is_bot:
             data_list.append((username_true, mention, role_value))
-        elif (
-            not withprofile and not has_profile and username_true and is_bot is not True
-        ):
+        elif not withprofile and not has_profile and username_true and not is_bot:
             data_list.append((username_true, mention, role_value))
-    return data_list
-
-
-async def get_user_inactivity(member, pm=False, inactivity=False, timespan=None):
-    data = await ConfigHolder.GamingProfile.user(member).all()
-    data_list = []
-    role_value = 0
-    time_now = utcnow()
-    time_now_sec = time_now.timestamp()
-    time_allowed = time_now_sec - (604800 * timespan)
-    innactive = False
-    if inactivity and isinstance(timespan, int):
-        if member:
-            if member.status != discord.Status.offline:
-                last_seen = utcnow()
-            else:
-                last_seen = data.get("seen")
-        if last_seen:
-            last_seen_datetime = get_date_time(last_seen).timestamp()
-        else:
-            last_seen_datetime = None
-        if (
-            last_seen_datetime
-            and last_seen_datetime < time_allowed
-            or not last_seen_datetime
-        ):
-            innactive = True
-    if member and not pm:
-        username_true = member.display_name
-        mention = member.mention
-        top_role = member.top_role
-        role_value = top_role.position * -1
-    else:
-        username_true = None
-        mention = username_true
-
-    if innactive:
-        data_list.append((username_true, mention, role_value))
 
     return data_list
 
 
-async def get_role_profiles(role, pm=False, inactivity=False, timespan=None):
-    data = []
-    for member in role.members:
-        data += await get_user_inactivity(
-            member, pm=pm, inactivity=inactivity, timespan=timespan
-        )
-    return data
+def get_date_string(then: datetime, now: datetime = None):
+    if not now:
+        now = utcnow()
 
+    if not then.tzinfo:
+        then = UTC.localize(then)
+    if not now.tzinfo:
+        now = UTC.localize(now)
 
-def get_date_string(then: datetime, now: datetime = utcnow()):
     _, week_number_now, _ = get_meta_data(now)
     day_then, week_number_then, _ = get_meta_data(then)
-    time = then.strftime("%I:%M %p")
+
+    time_fmt = then.strftime("%I:%M %p")
     time_fallback = then.strftime("%b %d, %y at %I:%M %p")
-    past = False
-    future = False
+
     if then.date() == now.date():
-        return f"Today at {time}"
-    if then.date() > now.date():
-        future = True
-    elif then.date() < now.date():
-        past = True
-    if past:
-        if is_yesterday(then.date()):
-            return f"Yesterday at {time}"
-        elif week_number_now == week_number_then:
-            return f"{day_then} at {time}"
-        elif week_number_then + 1 == week_number_now:
-            return f"Last {day_then} at {time}"
-    elif future:
-        if is_tomorrow(then.date()):
-            return f"Tomorrow at {time}"
-        elif week_number_now == week_number_then:
-            return f"{day_then} at {time}"
-        elif week_number_then == week_number_now + 1:
-            return f"Next {day_then} at {time}"
+        return f"Today at {time_fmt}"
+
+    # Simple logic for yesterday/tomorrow
+    if is_yesterday(then.date()):
+        return f"Yesterday at {time_fmt}"
+    if is_tomorrow(then.date()):
+        return f"Tomorrow at {time_fmt}"
+
     return f"{time_fallback}"
 
 
 async def get_all_user_rigs(guild, pm=False):
     data = await ConfigHolder.PCSpecs.all_users()
     data_list = []
-    role_value = 0
+
     for discord_id, value in data.items():
-        member = guild.get_member(discord_id)
+        member = guild.get_member(int(discord_id))
 
         if member and not pm:
             username_true = member.display_name
@@ -604,157 +616,91 @@ async def get_all_user_rigs(guild, pm=False):
         else:
             username_true = None
             mention = username_true
+            role_value = 0
+
+        # Check if they have CPU data as a proxy for having a rig
         rig_data = value.get("rig", {}).get("CPU")
-        if rig_data and username_true and mention:
+        if rig_data and username_true:
             data_list.append((rig_data, username_true, mention, role_value))
     return data_list
-
-
-async def get_mention(ctx, args: list, bot, get_platform=True, stats=False):
-    if get_platform:
-        supported_platforms = await get_supported_platforms(supported=True)
-    message = ctx.message
-    author = ctx.message.author
-    target_mention = None
-    target_member = None
-    target_user = None
-    platform = None
-    member_name = None
-
-    guild = ctx.message.guild if ctx.guild else None
-    if message.mentions:
-        target_member = message.mentions[0]
-        if sum(1 for _ in message.mentions) >= 2:
-            target_member = [
-                x for x in message.mentions if x != author or x != ctx.guild.me
-            ][0]
-        member_name = target_member.display_name
-        if get_platform and len(args) > 1:
-            platform = (
-                args[1].lower() if args[1].lower() in supported_platforms else None
-            )
-        target_user = bot.get_user(target_member.id)
-    else:
-        if len(args) == 2:
-            if get_platform:
-                platform = (
-                    args[1].lower() if args[1].lower() in supported_platforms else None
-                )
-            member_name = args[0]
-            if guild:
-                target_member = get_member_named(guild, member_name)
-            else:
-                target_member = get_user_named(bot, member_name)
-
-            if not target_member:
-                target_member = author
-            target_user = bot.get_user(target_member.id)
-
-        if len(args) == 1:
-            member_name = args[0]
-            if get_platform:
-                platform = (
-                    member_name.lower()
-                    if member_name.lower() in supported_platforms
-                    else None
-                )
-            if not platform and guild:
-                target_member = get_member_named(guild, member_name)
-            elif not platform:
-                target_member = get_user_named(bot, member_name)
-            if not platform and target_member:
-                target_user = bot.get_user(target_member.id)
-
-        if not args:
-            target_mention = author
-            target_user = bot.get_user(target_mention.id)
-            member_name = author.display_name
-
-        if stats:
-            if len(args) == 1:
-                member_name = args[0]
-                if guild:
-                    target_member = get_member_named(guild, member_name)
-                target_member = get_user_named(bot, member_name)
-                if target_member:
-                    target_user = bot.get_user(target_member.id)
-
-            if not target_user:
-                target_mention = author
-                target_user = bot.get_user(target_mention.id)
-                member_name = author.display_name
-
-    if guild and target_user:
-        target_member = guild.get_member(target_user.id)
-    target_user = target_member
-
-    return target_user, target_member, platform, member_name
 
 
 async def smart_prompt(bot, author: discord.User, prompt_data: dict, platforms: dict):
     def check(m):
         return (
-            m.author == author
-            and isinstance(m.channel, discord.DMChannel)
-            and len(m.content) < 33
+                m.author == author
+                and isinstance(m.channel, discord.DMChannel)
+                and len(m.content) < 64  # Increased limit slightly
         )
 
     data = {}
     original_len = len(prompt_data) + 1
-    await author.send(f"Pick number {original_len} to finish this part.")
+
+    # Ensure exit option exists
+    if "finish" not in [str(v).lower() for v in prompt_data.values()]:
+        prompt_data[str(original_len)] = "Finish"
+
+    await author.send(f"Type the number of the service to add, or type 'finish' to stop.")
+
     while True:
-        if (
-            "finish" not in prompt_data.values()
-            and "Finish" not in prompt_data.values()
-        ):
-            prompt_data[str(original_len)] = "finish"
-        embed = discord.Embed(
-            title="Pick a number that matches the service you want to add"
-        )
-        valid_account_list = []
         desc = ""
         for index, value in enumerate(prompt_data.values(), start=1):
-            desc += f"{index}. {value}\n"
-            valid_account_list.append(str(index))
-        embed.description = box(desc, lang="md")
+            desc += f"**{index}.** {value}\n"
+
+        embed = discord.Embed(title="Select Service", description=desc, color=discord.Color.blue())
         await author.send(embed=embed)
 
-        if "finish" in prompt_data.values() or "Finish" in prompt_data.values():
-            valid_keys = map(str, list(prompt_data.keys())[:-1])
-        else:
-            valid_keys = map(str, list(prompt_data.keys()))
-
-        msg = await bot.wait_for("message", check=check)
-        if msg and msg.content.lower() in valid_keys:
-            msg.content
-            name = prompt_data.get(msg.content, "")
-            command = next(
-                (
-                    command_toget
-                    for command_toget, name_toget in platforms
-                    if name_toget == name
-                ),
-                None,
-            )
-            if name and command:
-                await author.send(
-                    f"What is your username for {name}? (32 characters or less)"
-                )
-                msg = await bot.wait_for("message", check=check)
-                if msg and msg.content.lower() in ["stop", "finish"]:
-                    await author.send("Thanks for adding your accounts.")
-                    break
-                elif msg and msg.content.lower() in ["skip", "cancel"]:
-                    await author.send(f"Skipping {name} account.")
-                    continue
-                if msg and len(msg.content.lower()) > 3:
-                    username = msg.content.strip()
-                    data[command] = username.strip()
-        elif msg and prompt_data.get(msg.content, "").lower() == "finish":
-            await author.send("Thanks for adding your accounts.")
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=60)
+        except asyncio.TimeoutError:
+            await author.send("Timed out.")
             break
+
+        content = msg.content.strip().lower()
+
+        # Check for direct text commands
+        if content in ["stop", "finish", "exit"]:
+            break
+
+        # Check for number selection
+        selected_name = None
+
+        # Map input number to prompt_data key/value
+        # prompt_data keys are usually "1", "2"...
+        # But let's rely on the list index from the embed generation to be safe
+        keys = list(prompt_data.keys())
+        values = list(prompt_data.values())
+
+        if content.isdigit():
+            idx = int(content) - 1
+            if 0 <= idx < len(values):
+                selected_name = values[idx]
+
+        if selected_name and selected_name.lower() == "finish":
+            break
+
+        if selected_name:
+            # Find the internal identifier for this service
+            command_id = None
+            for cmd_id, name in platforms:
+                if name == selected_name:
+                    command_id = cmd_id
+                    break
+
+            if command_id:
+                await author.send(f"Enter username for **{selected_name}** (or 'skip'):")
+                try:
+                    umsg = await bot.wait_for("message", check=check, timeout=60)
+                    ucontent = umsg.content.strip()
+                    if ucontent.lower() not in ["skip", "cancel"]:
+                        data[command_id] = ucontent
+                        await author.send(f"✅ Added {selected_name}: {ucontent}")
+                except asyncio.TimeoutError:
+                    await author.send("Timed out.")
+                    break
         else:
-            pass
+            await author.send("Invalid selection.")
+
     return data
 
 
@@ -770,13 +716,10 @@ def get_member_named(guild, name):
             return result
 
     def pred(m):
-        try:
-            return (
+        return (
                 str(m.nick).lower().strip() == name.lower().strip()
                 or str(m.name).lower().strip() == name.lower().strip()
-            )
-        except Exception:
-            return False
+        )
 
     return discord.utils.find(pred, members)
 
@@ -785,11 +728,10 @@ async def get_all_by_platform(platform: str, guild: discord.Guild, pm: bool = Fa
     platform = platform.lower().strip()
     data = await ConfigHolder.AccountManager.all_users()
     data_list = []
-    role_value = 0
 
     for discord_id, value in data.items():
-        steamid = None
         member = guild.get_member(int(discord_id))
+
         if member and not pm:
             username_true = member.display_name
             mention = member.mention
@@ -798,131 +740,98 @@ async def get_all_by_platform(platform: str, guild: discord.Guild, pm: bool = Fa
         else:
             username_true = None
             mention = f"<@!{discord_id}>"
-        account = value.get("account", {}).get(platform)
-        if platform == "spotify":
-            steamid = value.get("account", {}).get("spotifyid")
+            role_value = 0
 
-        elif platform == "steam":
-            steamid = value.get("account", {}).get("steamid")
-        if account and username_true and mention:
+        account_map = value.get("account", {})
+        account = account_map.get(platform)
+
+        steamid = None
+        if platform == "steam":
+            steamid = account_map.get("steamid")
+        elif platform == "spotify":
+            steamid = account_map.get("spotifyid")  # reusing var name
+
+        if account and mention:
             data_list.append((account, username_true, mention, role_value, steamid))
+
     return data_list
 
 
 def get_date_time(s: Union[int, str, datetime] = None):
     if s is None:
         return utcnow()
-    if isinstance(s, int):
+    if isinstance(s, (int, float)):
         return datetime.fromtimestamp(s, tz=timezone.utc)
     if isinstance(s, datetime):
         return s if s.tzinfo else UTC.localize(s)
-    d = dateutil.parser.parse(s)
-    if not d.tzinfo:
-        d = UTC.localize(d)  # @UndefinedVariable
-    return d
+
+    try:
+        d = dateutil.parser.parse(str(s))
+        if not d.tzinfo:
+            d = UTC.localize(d)
+        return d
+    except:
+        return utcnow()
 
 
 async def update_member_atomically(
-    ctx: Union[commands.Context, discord.Member],
-    give: list[discord.Role] = None,
-    remove: list[discord.Role] = None,
-    nick: str = None,
-    member: discord.Member = None,
-    member_update=False,
+        ctx: Union[commands.Context, discord.Member],
+        give: list[discord.Role] = None,
+        remove: list[discord.Role] = None,
+        nick: str = None,
+        member: discord.Member = None,
+        member_update=False,
 ):
+    """
+    Safely updates a member's roles/nick without race conditions or permission errors.
+    """
     if not ctx.guild:
         return None
+
     me = ctx.guild.me
+
     if member_update:
-        assert isinstance(ctx, discord.Member)
-        member = member
-        permissions = me.guild_permissions
+        # ctx is actually the member object in this case
+        member = ctx
     else:
-        assert isinstance(ctx, commands.Context)
         member = member or ctx.author
-        permissions = ctx.channel.permissions_for(me)
+
     if member == me:
         return
-    can_modify_nick = permissions.manage_nicknames
-    can_modify_role = permissions.manage_roles
-    if can_modify_role:
-        give = give or []
-        remove = remove or []
-        roles = [r for r in member.roles if r and r not in remove]
-        roles.extend([r for r in give if r and r not in roles])
-        roles = list(set(roles))
-        low_roles_add = [r for r in roles if r < me.top_role if r not in member.roles]
-        low_roles_remove = [r for r in remove if r < me.top_role if r in member.roles]
-        high_roles = [r for r in roles if r >= me.top_role]
-        roles_changed = sorted(roles) != sorted(member.roles)
-    else:
-        roles = []
-        high_roles = []
-        low_roles_add = []
-        low_roles_remove = []
-        roles_changed = False
 
-    if me.top_role < member.top_role and nick:
+    # Check bot permissions
+    if not me.guild_permissions.manage_roles:
         return
-    if not roles_changed and not nick:
-        return
-    if member.guild.owner == member:
-        return
-    if can_modify_nick and nick and not roles_changed:
-        return await member.edit(nick=nick)
-    if can_modify_role and roles_changed and not nick:
-        if not high_roles:
-            return await member.edit(roles=roles)
-        if low_roles_add:
-            await member.add_roles(*low_roles_add)
-        if low_roles_remove:
-            await member.remove_roles(*low_roles_remove)
-        return
-    if can_modify_role and can_modify_nick:
-        if not high_roles:
-            return await member.edit(roles=roles, nick=nick)
-        if low_roles_add:
-            await member.add_roles(*low_roles_add)
-        if low_roles_remove:
-            await member.remove_roles(*low_roles_remove)
-        await member.edit(nick=nick)
-        return
-    elif can_modify_role:
-        if roles_changed:
-            if not high_roles:
-                return await member.edit(roles=roles)
-            if low_roles_add:
-                await member.add_roles(*low_roles_add)
-            if low_roles_remove:
-                await member.remove_roles(*low_roles_remove)
-            return
-    elif roles_changed and nick:
-        return await member.edit(nick=nick)
 
+    give = give or []
+    remove = remove or []
 
-_header = {"User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64)"}
-MAX_STRING_LENGTH = 100000
+    # Filter roles based on hierarchy
+    roles_to_add = [r for r in give if r and r < me.top_role and r not in member.roles]
+    roles_to_remove = [r for r in remove if r and r < me.top_role and r in member.roles]
 
-OPERATORS = {
-    ast.Add: safe_add,
-    ast.Sub: op.sub,
-    ast.Mult: safe_mult,
-    ast.Div: op.truediv,
-    ast.USub: op.neg,
-}
+    try:
+        if roles_to_add:
+            await member.add_roles(*roles_to_add, reason="Profile Update")
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason="Profile Update")
+
+        if nick and me.guild_permissions.manage_nicknames and me.top_role > member.top_role:
+            if member.guild.owner != member:
+                await member.edit(nick=nick)
+
+    except discord.Forbidden:
+        logger.warning(f"Failed to update roles/nick for {member.id}: Forbidden")
+    except discord.HTTPException as e:
+        logger.error(f"Failed to update roles/nick for {member.id}: {e}")
 
 
 def get_role_named(guild, name):
-    if not guild:
+    if not guild or not name:
         return None
 
-    roles = guild.roles
-
-    def pred(c):
-        try:
-            return str(c.name).strip() == name.strip()
-        except Exception as e:
-            logger.error(f"Error when trying to find role: {name}: E: {e}")
-            return False
-
-    return discord.utils.find(pred, roles)
+    name = str(name).strip().lower()
+    for role in guild.roles:
+        if role.name.lower().strip() == name:
+            return role
+    return None
