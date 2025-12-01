@@ -24,6 +24,8 @@ class ConfigHolderClass:
         self.GamingProfile = Config.get_conf(
             None, identifier=9420012589, force_registration=True, cog_name="GamingProfile"
         )
+        # FIX: Register default guild settings for GamingProfile
+        self.GamingProfile.register_guild(role_management=False)
 
         # PCSpecs: Stores hardware details
         self.PCSpecs = Config.get_conf(
