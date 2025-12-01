@@ -1,6 +1,7 @@
 from redbot.core.config import Config
 
-from draperbundle.constants import (
+# Relative import to ensure portability
+from .constants import (
     anthem_icon,
     apex_icon,
     bfv_icon,
@@ -13,73 +14,98 @@ from draperbundle.constants import (
 
 
 class ConfigHolderClass:
-    AccountManager = Config.get_conf(
-        None, identifier=1273062035, force_registration=True, cog_name="AccountManager"
-    )
-    GamingProfile = Config.get_conf(
-        None, identifier=9420012589, force_registration=True, cog_name="GamingProfile"
-    )
-    PCSpecs = Config.get_conf(
-        None, identifier=8205491788, force_registration=True, cog_name="PCSpecs"
-    )
-    PublisherManager = Config.get_conf(
-        None,
-        identifier=2064553666,
-        force_registration=True,
-        cog_name="PublisherManager",
-    )
-    PlayerStatus = Config.get_conf(
-        None, identifier=3584065639, force_registration=True, cog_name="PlayerStatus"
-    )
-    LogoData = Config.get_conf(
-        None, identifier=7056820599, force_registration=True, cog_name="LogoData"
-    )
-    DynamicChannels = Config.get_conf(
-        None, identifier=3172784244, force_registration=True, cog_name="DynamicChannels"
-    )
-    CustomChannels = Config.get_conf(
-        None, identifier=7861412794, force_registration=True, cog_name="CustomChannels"
-    )
-    RandomQuotes = Config.get_conf(
-        None, identifier=8475527184, force_registration=True, cog_name="RandomQuotes"
-    )
-    BFV_USER_IDS = Config.get_conf(
-        None, identifier=8475527184, force_registration=True, cog_name="BFVUserIDs"
-    )
+    def __init__(self):
+        # AccountManager: Stores game usernames (Steam, Origin, etc.)
+        self.AccountManager = Config.get_conf(
+            None, identifier=1273062035, force_registration=True, cog_name="AccountManager"
+        )
+
+        # GamingProfile: Stores region, timezone, bio
+        self.GamingProfile = Config.get_conf(
+            None, identifier=9420012589, force_registration=True, cog_name="GamingProfile"
+        )
+
+        # PCSpecs: Stores hardware details
+        self.PCSpecs = Config.get_conf(
+            None, identifier=8205491788, force_registration=True, cog_name="PCSpecs"
+        )
+
+        # PublisherManager: Stores supported game services
+        self.PublisherManager = Config.get_conf(
+            None, identifier=2064553666, force_registration=True, cog_name="PublisherManager",
+        )
+
+        # PlayerStatus: Tracks active players
+        self.PlayerStatus = Config.get_conf(
+            None, identifier=3584065639, force_registration=True, cog_name="PlayerStatus"
+        )
+
+        # LogoData: Stores icons for services
+        self.LogoData = Config.get_conf(
+            None, identifier=7056820599, force_registration=True, cog_name="LogoData"
+        )
+
+        # DynamicChannels: Auto-creating voice channels
+        self.DynamicChannels = Config.get_conf(
+            None, identifier=3172784244, force_registration=True, cog_name="DynamicChannels"
+        )
+
+        # CustomChannels: User-managed channels
+        self.CustomChannels = Config.get_conf(
+            None, identifier=7861412794, force_registration=True, cog_name="CustomChannels"
+        )
+
+        # RandomQuotes: (Legacy?)
+        self.RandomQuotes = Config.get_conf(
+            None, identifier=8475527184, force_registration=True, cog_name="RandomQuotes"
+        )
+
+        # BFVUserIDs: Specific IDs for Battlefield V
+        self.BFV_USER_IDS = Config.get_conf(
+            None, identifier=8475527184, force_registration=True, cog_name="BFVUserIDs"
+        )
 
 
+# Initialize the singleton
 ConfigHolder = ConfigHolderClass()
 
-default_member_AccountManager = dict(account=dict(origin=None, uplay=None))
-default_member_GamingProfile = dict(
-    discord_user_id=None,
-    discord_user_name=None,
-    discord_true_name=None,
-    guild_display_name=None,
-    is_bot=False,
-    country=None,
-    timezone=None,
-    language=None,
-    zone=None,
-    subzone=None,
-    seen=None,
-    trial=None,
-    nickname_extas=None,
-)
-default_member_PCSpecs = dict(
-    rig=dict(
-        CPU=None,
-        GPU=None,
-        RAM=None,
-        Motherboard=None,
-        Storage=None,
-        Monitor=None,
-        Mouse=None,
-        Keyboard=None,
-        Case=None,
-        Headset=None
-    )
-)
+# --- DEFAULT SCHEMAS ---
+# We define these here but they should be registered in the respective cogs' __init__
+# to ensure they are applied only when needed.
+
+default_member_AccountManager = {"account": {"origin": None, "uplay": None}}
+
+default_member_GamingProfile = {
+    "discord_user_id": None,
+    "discord_user_name": None,
+    "discord_true_name": None,
+    "guild_display_name": None,
+    "is_bot": False,
+    "country": None,
+    "timezone": None,
+    "language": None,
+    "zone": None,
+    "subzone": None,
+    "seen": None,
+    "trial": None,
+    "nickname_extas": None,
+}
+
+default_member_PCSpecs = {
+    "rig": {
+        "CPU": None,
+        "GPU": None,
+        "RAM": None,
+        "Motherboard": None,
+        "Storage": None,
+        "Monitor": None,
+        "Mouse": None,
+        "Keyboard": None,
+        "Case": None,
+        "Headset": None
+    }
+}
+
 default_custom_PublisherManager = {
     "services": {
         "battlenet": {
@@ -107,4 +133,6 @@ default_custom_PublisherManager = {
             "games": ["Tom Clancy's The Division 2"],
         },
         "xbox": {"name": "Xbox Live", "identifier": "xbox", "games": []},
-        "youtube": {"name": "YouTube", "identifier": "
+        "youtube": {"name": "YouTube", "identifier": "youtube", "games": []},
+    }
+}
