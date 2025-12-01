@@ -37,11 +37,14 @@ class ConfigHolderClass:
 
         # Register the new IGDB credentials global group
         self.PublisherManager.register_global(igdb_creds={})
+        self.PublisherManager.register_global(services={})  # Ensure services dict exists
 
         # PlayerStatus: Tracks active players
         self.PlayerStatus = Config.get_conf(
             None, identifier=3584065639, force_registration=True, cog_name="PlayerStatus"
         )
+        # FIX: Register default channel settings for PlayerStatus
+        self.PlayerStatus.register_channel(game=None)
 
         # LogoData: Stores icons for services
         self.LogoData = Config.get_conf(
@@ -52,11 +55,21 @@ class ConfigHolderClass:
         self.DynamicChannels = Config.get_conf(
             None, identifier=3172784244, force_registration=True, cog_name="DynamicChannels"
         )
+        self.DynamicChannels.register_guild(dynamic_channels={}, blacklist={"blacklist": []})
 
         # CustomChannels: User-managed channels
         self.CustomChannels = Config.get_conf(
             None, identifier=7861412794, force_registration=True, cog_name="CustomChannels"
         )
+        self.CustomChannels.register_guild(
+            category_with_button={},
+            blacklist={"blacklist": []},
+            user_created_voice_channels_bypass_roles=[],
+            mute_roles=[],
+            custom_channels={},
+            user_created_voice_channels={}
+        )
+        self.CustomChannels.register_member(currentRooms={})
 
         # RandomQuotes: (Legacy?)
         self.RandomQuotes = Config.get_conf(
@@ -67,14 +80,14 @@ class ConfigHolderClass:
         self.BFV_USER_IDS = Config.get_conf(
             None, identifier=8475527184, force_registration=True, cog_name="BFVUserIDs"
         )
+        self.BFV_USER_IDS.register_user(user_id=None)
 
 
 # Initialize the singleton
 ConfigHolder = ConfigHolderClass()
 
 # --- DEFAULT SCHEMAS ---
-# We define these here but they should be registered in the respective cogs' __init__
-# to ensure they are applied only when needed.
+# These are referenced but handled above via register calls now for safety.
 
 default_member_AccountManager = {"account": {"origin": None, "uplay": None}}
 
@@ -109,6 +122,8 @@ default_member_PCSpecs = {
     }
 }
 
+# Ensure PublisherManager services are populated if empty
+# This logic usually belongs in the cog itself, but defining the default structure here helps.
 default_custom_PublisherManager = {
     "services": {
         "battlenet": {
