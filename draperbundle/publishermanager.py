@@ -26,10 +26,6 @@ class PublisherManager(commands.Cog):
         self.bot = bot
         self.config = ConfigHolder.PublisherManager
 
-        # New Config defaults for API keys if not present
-        # We need to register these defaults manually or handle them dynamically
-        # Since ConfigHolder handles registration, we'll just set values if missing in commands
-
         self._igdb_token = None
         self._token_expires_at = 0
 
@@ -100,31 +96,7 @@ class PublisherManager(commands.Cog):
 
         return None
 
-    def _infer_service_from_igdb(self, game_data: Dict, platforms: list) -> Optional[str]:
-        """Analyzes IGDB data to guess the service (identifier)."""
-        if not game_data: return None
-
-        # 1. Check Websites (Official stores often linked)
-        websites = game_data.get("websites", [])
-        # We need to resolve the URLs if they are expanded, but the query above returns structure
-        # Actually, standard query returns IDs unless expanded.
-        # Let's refine the query in _query_igdb to be safer, or just use basic name matching for now.
-        # IGDB 'external_games' category enums:
-        # 1: steam, 5: gog, 10: epic, 11: battle.net, 36: psn, 49: xbox
-
-        # Since we didn't ask to expand 'external_games' in the query above, we can't use IDs directly without expansion.
-        # Let's rely on a simpler heuristic map for now, or update the query to `fields ..., external_games.category;`
-
-        # Simplified logic: If we find a match, great. If not, manual.
-        # But actually, querying IGDB for just the NAME is valuable enough to fix typos.
-
-        # For this implementation, let's keep it simple:
-        # If IGDB finds the game, we try to match keywords in the result or just return the canonical name.
-        # Real auto-discovery needs 'fields websites.url;' and checking for 'store.steampowered', etc.
-
-        return None
-
-        # --- COMMANDS ---
+    # --- COMMANDS ---
 
     @commands.group(enabled=True, case_insensitive=True)
     async def service(self, ctx: commands.Context):
@@ -153,9 +125,6 @@ class PublisherManager(commands.Cog):
             if msg.content.lower() == "cancel": return await ctx.send("Cancelled.")
             c_secret = msg.content.strip()
 
-            # Save to config (we assume 'igdb_creds' group exists or we register it dynamically)
-            # Since ConfigHolder defines schemas, we might need to rely on ad-hoc dict updates if not registered
-            # But Config.get_conf allows unstructured data in dictionaries usually.
             await self.config.igdb_creds.set({"client_id": c_id, "client_secret": c_secret})
             await ctx.send("✅ Credentials saved! I will now try to fetch metadata for games.")
 
@@ -234,12 +203,11 @@ class PublisherManager(commands.Cog):
         if not unparsed:
             return await ctx.send("Nothing to parse.")
 
-        platforms = await get_supported_platforms()  # [(id, name), ...]
-        platform_map = {n.lower(): i for i, n in platforms}
+        platforms = await get_supported_platforms()
+        # platforms structure is [(id, name), ...]
 
-        # Common keywords to skip IGDB for speed
         manual_map = {
-            "visual studio": "coding",  # Example
+            "visual studio": "coding",
             "chrome": "web",
             "spotify": "spotify"
         }
@@ -254,16 +222,11 @@ class PublisherManager(commands.Cog):
                 found = False
                 for k, v in manual_map.items():
                     if k in lower_game:
-                        # Only if v exists in platforms
-                        # For now we skip logic if service doesn't exist
+                        # Logic to apply mapped service if it exists could go here
                         pass
 
                 # 2. IGDB Query
                 if not found:
-                    # We query for websites to find stores
-                    # 13 = Steam, 1 = Official, 16 = Epic, 17 = GOG
-                    # Note: We need to authorize first
-
                     token = await self._get_igdb_token(creds['client_id'], creds['client_secret'])
                     if not token:
                         await ctx.send("Failed to authenticate with IGDB.")
@@ -273,8 +236,7 @@ class PublisherManager(commands.Cog):
                         "Client-ID": creds['client_id'],
                         "Authorization": f"Bearer {token}",
                     }
-                    # Query for external_games (Steam=1, Epic=26 etc? Enum varies, let's use websites)
-                    # category 1 = official, 13 = steam, 16 = epic, 17 = gog,
+
                     q = f'search "{game}"; fields name, websites.category, websites.url; limit 1;'
 
                     try:
@@ -283,27 +245,10 @@ class PublisherManager(commands.Cog):
                                 res_json = await resp.json()
                                 if res_json:
                                     g_data = res_json[0]
-                                    websites = g_data.get("websites", [])
+                                    logger.info(f"IGDB Found match for '{game}': {g_data['name']}")
+                                    # Future: Implement logic to map IGDB website categories to your services
 
-                                    # Simple Heuristic
-                                    detected_service = None
-
-                                    # We don't have expanded websites in the search result usually unless expanded
-                                    # But let's assume we get category IDs
-                                    # We need to map IGDB categories to our Services
-                                    # For now, let's just use string matching on the game name if it matches a platform?
-                                    # No, that's weak.
-
-                                    # Let's try to match known platform names in our config
-                                    # e.g. if we have a service named "Steam" and the game has a steam link
-
-                                    # Since this is complex to implement perfectly blindly,
-                                    # let's just mark it as "Found on IGDB" by printing it for now
-                                    # or simple keyword match.
-
-                                    logger.info(f"IGDB Found: {g_data['name']}")
-
-                            await asyncio.sleep(0.25)  # Rate limit safe (4 requests/sec limit usually)
+                            await asyncio.sleep(0.25)
                     except Exception:
                         pass
 
@@ -361,7 +306,6 @@ class PublisherManager(commands.Cog):
                 content = reply.content.lower().strip()
                 choice = prompt_map.get(content)
 
-                # Also handle text inputs like "stop" directly
                 if content == "stop" or choice == "Stop":
                     break
 
@@ -380,7 +324,6 @@ class PublisherManager(commands.Cog):
                 else:
                     await ctx.send("Invalid, skipping.")
 
-                # Cleanup
                 try:
                     await msg.delete()
                     await reply.delete()
@@ -415,88 +358,3 @@ class PublisherManager(commands.Cog):
     @update_game_database_loop.before_loop
     async def before_update_loop(self):
         await self.bot.wait_until_ready()
-
-
-```
-
-### Key Improvements in this Version:
-1. ** IGDB
-Integration **: Added
-`_get_igdb_token` and `_query_igdb`
-to
-handle
-the
-OAuth
-flow and querying.
-2. ** Setup
-Command **: Added
-`[p]
-service
-igdb
-` to
-easily
-save
-your
-credentials.
-3. ** Enhanced
-Manual
-Parsing **: When
-you
-run
-`[p]
-service
-parse
-manual
-` (or `incomplete`), it
-now ** queries
-IGDB in the
-background ** and shows
-you
-the
-best
-match in the
-Embed.This
-gives
-you
-context("Oh, 'Destiny 2' is a game, cool")
-helping
-you
-make
-the
-decision
-faster.
-4. ** Auto - Parser
-Placeholder **: Added
-`_parse_auto`
-scaffold.Fully
-automating
-this is complex
-because
-"Steam"
-isn
-'t just one ID in IGDB, but the structure is there if you want to expand it later.
-
-You
-will
-need
-to
-manually
-register
-the
-`igdb_creds`
-config
-group in `ConfigHolder` if you
-want
-it
-to
-persist
-properly, OR
-just
-rely
-on
-Redbot
-'s flexible config creation (which usually works fine for new keys). Given your monolith `ConfigHolder`, you might want to add:
-
-```python
-# In ConfigHolderClass
-self.PublisherManager.register_global(igdb_creds={})
