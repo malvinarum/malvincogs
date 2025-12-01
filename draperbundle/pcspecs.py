@@ -1,23 +1,15 @@
 import logging
 import asyncio
-from copy import copy
-from operator import itemgetter
-
-import discord
 import regex
-
+import discord
 from redbot.core import commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
+from operator import itemgetter
 
-# FIX: Changed import from 'draperbundle' to '.' (relative) or 'drapercogs'
+# Relative imports
 from .config_holder import ConfigHolder
 from .constants import REPLACE_BRACKER
-from .utilities import (
-    get_all_user_rigs,
-    get_date_string,
-    get_date_time,
-    get_member_activity,
-)
+from .utilities import get_all_user_rigs
 
 log = logging.getLogger("red.drapercogs.pc_specs")
 
@@ -43,6 +35,7 @@ class PCSpecs(commands.Cog):
             return
 
         if show_all and show_all.lower() == "all":
+            # get_all_user_rigs is in utilities.py
             data = await get_all_user_rigs(
                 ctx.guild, pm=isinstance(ctx.channel, discord.DMChannel)
             )
@@ -52,9 +45,11 @@ class PCSpecs(commands.Cog):
             embed_list = []
             description = ""
 
-            for rig_data, _, mention, _ in sorted(data, key=itemgetter(3, 1)):
-                if rig_data and mention:
+            # Sorted by role value (index 3) and name (index 1)
+            for rig_cpu, username, mention, role_val in sorted(data, key=itemgetter(3, 1)):
+                if rig_cpu and mention:
                     line = f"{mention}\n"
+
                     if len(description) + len(line) > 1000:
                         embed = discord.Embed(title="Users with a Rig Profile", description=description,
                                               color=await ctx.embed_color())
@@ -70,6 +65,7 @@ class PCSpecs(commands.Cog):
             await menu(ctx, embed_list, DEFAULT_CONTROLS, timeout=60)
 
         elif not show_all:
+            # Show own rig
             embed = await self._get_member_rig(ctx, ctx.author)
             if embed:
                 await ctx.send(embed=embed)
@@ -98,7 +94,6 @@ class PCSpecs(commands.Cog):
     async def _specs_add(self, ctx: commands.Context):
         """Interactive wizard to add your rig specs."""
         try:
-            # Initialize default struct if missing
             member = ctx.author
             current_data = await self.config.user(member).rig()
 
@@ -122,6 +117,7 @@ class PCSpecs(commands.Cog):
 
         async with self.config.user(member).rig() as rig_data:
             found = False
+            # Iterate copy of keys to modify dict safely
             for key in list(rig_data.keys()):
                 if key.lower() == component_clean:
                     rig_data[key] = None
@@ -192,7 +188,7 @@ class PCSpecs(commands.Cog):
     async def _get_member_rig(self, ctx: commands.Context, member: discord.Member):
         rig_data = await self.config.user(member).rig()
 
-        # Check if rig has any data
+        # Check if rig has any data (values that are not None/Empty)
         if not any(rig_data.values()):
             if ctx.author == member:
                 await ctx.send(f"You don't have a rig profile yet! Use `{ctx.prefix}specs add` to create one.")
@@ -200,9 +196,6 @@ class PCSpecs(commands.Cog):
 
         embed = discord.Embed(title=f"{member.display_name}'s Rig", color=member.color)
         embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-
-        if member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
 
         for component, value in rig_data.items():
             if value:
