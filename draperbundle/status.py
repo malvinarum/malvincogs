@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from operator import attrgetter
 from typing import Union
 
@@ -13,6 +14,7 @@ from .config_holder import ConfigHolder
 from .utilities import get_activity_list
 
 _ = lambda s: s
+log = logging.getLogger("red.drapercogs.status")
 
 IGDB_AUTH_URL = "https://id.twitch.tv/oauth2/token"
 IGDB_API_BASE = "https://api.igdb.com/v4"
@@ -29,16 +31,21 @@ class MemberStatus(commands.Cog):
         c_id = creds.get("client_id")
         c_secret = creds.get("client_secret")
 
-        if not c_id or not c_secret: return None
+        if not c_id or not c_secret:
+            log.debug("IGDB Credentials missing.")
+            return None
 
         # Get Token (Simplified flow for specific command usage)
         params = {"client_id": c_id, "client_secret": c_secret, "grant_type": "client_credentials"}
         try:
             async with self.bot.session.post(IGDB_AUTH_URL, params=params) as resp:
-                if resp.status != 200: return None
+                if resp.status != 200:
+                    log.error(f"IGDB Auth failed: {resp.status}")
+                    return None
                 data = await resp.json()
                 token = data["access_token"]
-        except:
+        except Exception as e:
+            log.error(f"IGDB Auth Exception: {e}")
             return None
 
         headers = {"Client-ID": c_id, "Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -53,8 +60,12 @@ class MemberStatus(commands.Cog):
                         url = data[0]["cover"]["url"]
                         if url.startswith("//"): url = "https:" + url
                         return url.replace("t_thumb", "t_cover_big")
-        except:
-            pass
+                    else:
+                        log.debug(f"IGDB: No cover found for '{game_name}'")
+                else:
+                    log.error(f"IGDB Query failed: {resp.status}")
+        except Exception as e:
+            log.error(f"IGDB Fetch Error: {e}")
         return None
 
     @commands.command()

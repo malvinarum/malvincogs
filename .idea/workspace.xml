@@ -5,9 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="2fb1fb44-6539-43d5-904a-507b45ad9d8e" name="Changes" comment=".">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/draperbundle/status.py" beforeDir="false" afterPath="$PROJECT_DIR$/draperbundle/status.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/draperbundle/utilities.py" beforeDir="false" afterPath="$PROJECT_DIR$/draperbundle/utilities.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -83,14 +81,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1760894813376</updated>
-    </task>
-    <task id="LOCAL-00061" summary=".">
-      <option name="closed" value="true" />
-      <created>1763703754662</created>
-      <option name="number" value="00061" />
-      <option name="presentableId" value="LOCAL-00061" />
-      <option name="project" value="LOCAL" />
-      <updated>1763703754662</updated>
     </task>
     <task id="LOCAL-00062" summary=".">
       <option name="closed" value="true" />
@@ -476,7 +466,15 @@
       <option name="project" value="LOCAL" />
       <updated>1764631542644</updated>
     </task>
-    <option name="localTasksCounter" value="110" />
+    <task id="LOCAL-00110" summary=".">
+      <option name="closed" value="true" />
+      <created>1764632073569</created>
+      <option name="number" value="00110" />
+      <option name="presentableId" value="LOCAL-00110" />
+      <option name="project" value="LOCAL" />
+      <updated>1764632073569</updated>
+    </task>
+    <option name="localTasksCounter" value="111" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
