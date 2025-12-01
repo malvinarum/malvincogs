@@ -35,14 +35,12 @@ from redbot.core.utils.predicates import MessagePredicate
 
 # Relative imports
 from .config_holder import ConfigHolder
-
-# ... existing imports ...
+from .constants import CONTINENT_DATA
+from .country import WorldData
 
 # Add IGDB Constants
 IGDB_AUTH_URL = "https://id.twitch.tv/oauth2/token"
 IGDB_API_BASE = "https://api.igdb.com/v4"
-
-from .country import WorldData
 
 logger = logging.getLogger("red.drapercogs.draperbundle.utils")
 _START = "#"
