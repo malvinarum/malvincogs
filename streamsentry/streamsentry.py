@@ -1,6 +1,6 @@
 import discord
 from redbot.core import commands, Config, checks
-from redbot.core.utils.chat_formatting import box
+from redbot.core.utils.chat_formatting import box, humanize_list
 import logging
 import re
 
@@ -22,13 +22,12 @@ class StreamSentry(commands.Cog):
             "live_role_id": None,
             "alert_channel_id": None,
             "clip_channel_id": None,
-            "whitelist_role_id": None,  # If set, only users with this role trigger alerts
+            "whitelist_role_ids": [],  # CHANGED: Now a list of IDs
             "enabled": False,
-            "cleanup_on_offline": True  # Remove role when offline
+            "cleanup_on_offline": True
         }
         self.config.register_guild(**default_guild)
 
-        # Regex for common clip URLs
         self.clip_regex = re.compile(
             r"(https?://(?:www\.)?(?:twitch\.tv/\w+/clip/[^ \n]+|clips\.twitch\.tv/[^ \n]+|"
             r"medal\.tv/games/[^ \n]+|youtube\.com/clip/[^ \n]+))"
@@ -41,9 +40,6 @@ class StreamSentry(commands.Cog):
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
-        """
-        Detects when a member starts or stops streaming.
-        """
         guild = after.guild
         if before.bot or after.bot:
             return
@@ -52,30 +48,32 @@ class StreamSentry(commands.Cog):
         if not settings["enabled"]:
             return
 
-        # 1. Check Whitelist (Optional)
-        if settings["whitelist_role_id"]:
-            whitelist_role = guild.get_role(settings["whitelist_role_id"])
-            if whitelist_role and whitelist_role not in after.roles:
+        # 1. Check Whitelist (Updated for Multiple Roles)
+        whitelist_ids = settings["whitelist_role_ids"]
+        if whitelist_ids:
+            # Check if user has ANY of the whitelisted roles
+            # We use set intersection for efficiency
+            user_role_ids = {r.id for r in after.roles}
+            has_whitelisted_role = bool(user_role_ids.intersection(whitelist_ids))
+
+            if not has_whitelisted_role:
                 return
 
         # 2. Determine Stream State
-        # We look for an activity of type Streaming
         before_stream = next((a for a in before.activities if a.type == discord.ActivityType.streaming), None)
         after_stream = next((a for a in after.activities if a.type == discord.ActivityType.streaming), None)
 
         live_role = guild.get_role(settings["live_role_id"]) if settings["live_role_id"] else None
         alert_channel = guild.get_channel(settings["alert_channel_id"]) if settings["alert_channel_id"] else None
 
-        # --- CASE: STARTED STREAMING ---
+        # --- STARTED STREAMING ---
         if not before_stream and after_stream:
-            # Assign Role
             if live_role:
                 try:
                     await after.add_roles(live_role, reason="StreamSentry: User went live")
                 except discord.Forbidden:
-                    log.warning(f"StreamSentry: Missing permissions to add role in {guild.name}")
+                    pass
 
-            # Send Alert
             if alert_channel and after_stream.url:
                 embed = discord.Embed(
                     title=f"🔴 {after.display_name} is Now Live!",
@@ -85,8 +83,6 @@ class StreamSentry(commands.Cog):
                 )
                 embed.set_thumbnail(url=after.display_avatar.url)
 
-                # If it's Twitch, we can try to guess the thumbnail/preview
-                # (Simple heuristic, not perfect without API)
                 if "twitch.tv" in after_stream.url:
                     embed.set_footer(text="Twitch.tv", icon_url="https://i.imgur.com/v9E8D6p.png")
 
@@ -95,7 +91,7 @@ class StreamSentry(commands.Cog):
                 except discord.Forbidden:
                     pass
 
-        # --- CASE: STOPPED STREAMING ---
+        # --- STOPPED STREAMING ---
         elif before_stream and not after_stream:
             if live_role and settings["cleanup_on_offline"]:
                 try:
@@ -105,9 +101,6 @@ class StreamSentry(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """
-        Watches for clips and reposts them to the vault.
-        """
         if message.author.bot or not message.guild:
             return
 
@@ -115,7 +108,6 @@ class StreamSentry(commands.Cog):
         if not clip_channel_id or message.channel.id == clip_channel_id:
             return
 
-        # Check if the message contains a clip URL
         found_clips = self.clip_regex.findall(message.content)
         if found_clips:
             clip_channel = message.guild.get_channel(clip_channel_id)
@@ -133,9 +125,9 @@ class StreamSentry(commands.Cog):
 
                 try:
                     await clip_channel.send(embed=embed)
-                    await message.add_reaction("💾")  # Ack that we saved it
-                except Exception as e:
-                    log.error(f"Failed to archive clip: {e}")
+                    await message.add_reaction("💾")
+                except Exception:
+                    pass
 
     # --- COMMANDS ---
 
@@ -148,7 +140,7 @@ class StreamSentry(commands.Cog):
 
     @streamset.command(name="toggle")
     async def streamset_toggle(self, ctx: commands.Context):
-        """Enable or disable the entire cog system."""
+        """Enable or disable the system."""
         current = await self.config.guild(ctx.guild).enabled()
         new_state = not current
         await self.config.guild(ctx.guild).enabled.set(new_state)
@@ -156,36 +148,52 @@ class StreamSentry(commands.Cog):
 
     @streamset.command(name="role")
     async def streamset_role(self, ctx: commands.Context, role: discord.Role):
-        """Set the 'Now Live' role to assign to streamers."""
+        """Set the 'Now Live' role."""
         await self.config.guild(ctx.guild).live_role_id.set(role.id)
         await ctx.send(f"✅ Live role set to: {role.mention}")
 
     @streamset.command(name="alertchannel")
     async def streamset_alert(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where live notifications are posted."""
+        """Set the live notification channel."""
         await self.config.guild(ctx.guild).alert_channel_id.set(channel.id)
-        await ctx.send(f"✅ Alerts will promote streamers in: {channel.mention}")
+        await ctx.send(f"✅ Alerts will post in: {channel.mention}")
 
     @streamset.command(name="clipvault")
     async def streamset_clips(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where clips detected in chat are archived."""
+        """Set the clip archive channel."""
         await self.config.guild(ctx.guild).clip_channel_id.set(channel.id)
         await ctx.send(f"✅ Clips will be archived to: {channel.mention}")
 
-    @streamset.command(name="whitelist")
-    async def streamset_whitelist(self, ctx: commands.Context, role: discord.Role = None):
-        """
-        Set a required role to trigger alerts.
-        If set, only users with this role will get the Live Role/Alerts.
-        Leave empty to clear.
-        """
-        if role:
-            await self.config.guild(ctx.guild).whitelist_role_id.set(role.id)
-            await ctx.send(f"🔒 StreamSentry locked to role: {role.mention}")
-        else:
-            await self.config.guild(ctx.guild).whitelist_role_id.set(None)
-            await ctx.send
-            "🔓 StreamSentry is open to **everyone**."
+    # --- UPDATED WHITELIST COMMANDS ---
+
+    @streamset.group(name="whitelist")
+    async def streamset_whitelist(self, ctx: commands.Context):
+        """Manage the role whitelist."""
+        pass
+
+    @streamset_whitelist.command(name="add")
+    async def whitelist_add(self, ctx: commands.Context, role: discord.Role):
+        """Add a role to the whitelist."""
+        async with self.config.guild(ctx.guild).whitelist_role_ids() as ids:
+            if role.id in ids:
+                return await ctx.send(f"⚠️ {role.name} is already whitelisted.")
+            ids.append(role.id)
+        await ctx.send(f"🔐 Added **{role.name}** to the whitelist.")
+
+    @streamset_whitelist.command(name="remove")
+    async def whitelist_remove(self, ctx: commands.Context, role: discord.Role):
+        """Remove a role from the whitelist."""
+        async with self.config.guild(ctx.guild).whitelist_role_ids() as ids:
+            if role.id not in ids:
+                return await ctx.send(f"⚠️ {role.name} is not in the whitelist.")
+            ids.remove(role.id)
+        await ctx.send(f"🔓 Removed **{role.name}** from the whitelist.")
+
+    @streamset_whitelist.command(name="clear")
+    async def whitelist_clear(self, ctx: commands.Context):
+        """Clear all whitelisted roles (Open to everyone)."""
+        await self.config.guild(ctx.guild).whitelist_role_ids.set([])
+        await ctx.send("🔓 Whitelist cleared. StreamSentry is now open to **everyone**.")
 
     @streamset.command(name="settings")
     async def streamset_show(self, ctx: commands.Context):
@@ -195,7 +203,14 @@ class StreamSentry(commands.Cog):
         live_role = ctx.guild.get_role(data['live_role_id']) if data['live_role_id'] else "None"
         alert_ch = ctx.guild.get_channel(data['alert_channel_id']) if data['alert_channel_id'] else "None"
         clip_ch = ctx.guild.get_channel(data['clip_channel_id']) if data['clip_channel_id'] else "None"
-        whitelist = ctx.guild.get_role(data['whitelist_role_id']) if data['whitelist_role_id'] else "None"
+
+        # Format Whitelist
+        whitelist_ids = data['whitelist_role_ids']
+        if whitelist_ids:
+            roles = [ctx.guild.get_role(rid).mention for rid in whitelist_ids if ctx.guild.get_role(rid)]
+            whitelist_str = humanize_list(roles) if roles else "None (IDs invalid)"
+        else:
+            whitelist_str = "Everyone (No restrictions)"
 
         status = "🟢 Enabled" if data['enabled'] else "🔴 Disabled"
 
@@ -205,6 +220,6 @@ class StreamSentry(commands.Cog):
             f"🎭 **Live Role:** {live_role.mention if isinstance(live_role, discord.Role) else live_role}\n"
             f"📢 **Alert Channel:** {alert_ch.mention if isinstance(alert_ch, discord.TextChannel) else alert_ch}\n"
             f"🎬 **Clip Vault:** {clip_ch.mention if isinstance(clip_ch, discord.TextChannel) else clip_ch}\n"
-            f"🔐 **Whitelist:** {whitelist.mention if isinstance(whitelist, discord.Role) else whitelist}\n"
+            f"🔐 **Allowed Roles:** {whitelist_str}\n"
         )
         await ctx.send(msg)
