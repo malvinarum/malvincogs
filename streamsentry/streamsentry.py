@@ -24,7 +24,8 @@ class StreamSentry(commands.Cog):
             "clip_channel_id": None,
             "whitelist_role_ids": [],
             "enabled": False,
-            "cleanup_on_offline": True
+            "cleanup_on_offline": True,
+            "mention_here": True  # New setting
         }
         self.config.register_guild(**default_guild)
 
@@ -71,7 +72,7 @@ class StreamSentry(commands.Cog):
                     pass
 
             if alert_channel and after_stream.url:
-                await self._send_alert(alert_channel, after, after_stream)
+                await self._send_alert(alert_channel, after, after_stream, settings["mention_here"])
 
         # --- STOPPED STREAMING ---
         elif before_stream and not after_stream:
@@ -113,7 +114,7 @@ class StreamSentry(commands.Cog):
 
     # --- HELPERS ---
 
-    async def _send_alert(self, channel, member, activity):
+    async def _send_alert(self, channel, member, activity, mention_here):
         """Shared alert sending logic."""
         embed = discord.Embed(
             title=f"🔴 {member.display_name} is Now Live!",
@@ -126,8 +127,10 @@ class StreamSentry(commands.Cog):
         if "twitch.tv" in activity.url:
             embed.set_footer(text="Twitch.tv", icon_url="https://i.imgur.com/v9E8D6p.png")
 
+        content_str = f"Hey @here, {member.mention} is live!" if mention_here else f"Hey {member.mention} is live!"
+
         try:
-            await channel.send(content=f"Hey @here, {member.mention} is live!", embed=embed)
+            await channel.send(content=content_str, embed=embed)
         except discord.Forbidden:
             pass
 
@@ -166,6 +169,15 @@ class StreamSentry(commands.Cog):
         await self.config.guild(ctx.guild).clip_channel_id.set(channel.id)
         await ctx.send(f"✅ Clips will be archived to: {channel.mention}")
 
+    @streamset.command(name="mention")
+    async def streamset_mention(self, ctx: commands.Context):
+        """Toggle the @here mention in alerts."""
+        current = await self.config.guild(ctx.guild).mention_here()
+        new_state = not current
+        await self.config.guild(ctx.guild).mention_here.set(new_state)
+        state_str = "Enabled" if new_state else "Disabled"
+        await ctx.send(f"🔔 @here mentions are now **{state_str}**.")
+
     @streamset.group(name="whitelist")
     async def streamset_whitelist(self, ctx: commands.Context):
         """Manage the role whitelist."""
@@ -198,15 +210,13 @@ class StreamSentry(commands.Cog):
     @streamset.command(name="check")
     async def streamset_check(self, ctx: commands.Context, member: discord.Member = None):
         """
-        Manually trigger the live check for a user with DEBUG output.
+        Manually trigger the live check for a user.
         """
         if not member:
             member = ctx.author
 
-        # 1. Fetch fresh member object from cache to ensure Activity list is up to date
         member = ctx.guild.get_member(member.id)
 
-        # 2. Debug Activities
         detected_activities = []
         for act in member.activities:
             detected_activities.append(f"{act.type.name}: {act.name}")
@@ -220,7 +230,6 @@ class StreamSentry(commands.Cog):
                 f"**Bot sees these activities:**\n{box(debug_str)}"
             )
 
-        # 3. Whitelist Check
         settings = await self.config.guild(ctx.guild).all()
         whitelist_ids = settings["whitelist_role_ids"]
 
@@ -229,13 +238,11 @@ class StreamSentry(commands.Cog):
             if not user_role_ids.intersection(whitelist_ids):
                 return await ctx.send(f"❌ {member.display_name} does not have a whitelisted role.")
 
-        # 4. Apply Role & Alert
         live_role = ctx.guild.get_role(settings["live_role_id"]) if settings["live_role_id"] else None
         alert_channel = ctx.guild.get_channel(settings["alert_channel_id"]) if settings["alert_channel_id"] else None
 
         actions = []
 
-        # Role
         if live_role:
             if live_role not in member.roles:
                 try:
@@ -246,10 +253,9 @@ class StreamSentry(commands.Cog):
             else:
                 actions.append("already has role")
 
-        # Alert
         if alert_channel:
             try:
-                await self._send_alert(alert_channel, member, stream_activity)
+                await self._send_alert(alert_channel, member, stream_activity, settings["mention_here"])
                 actions.append("sent alert")
             except Exception as e:
                 actions.append(f"failed alert ({e})")
@@ -273,12 +279,14 @@ class StreamSentry(commands.Cog):
             whitelist_str = "Everyone (No restrictions)"
 
         status = "🟢 Enabled" if data['enabled'] else "🔴 Disabled"
+        mention_status = "✅ Enabled" if data['mention_here'] else "❌ Disabled"
 
         msg = (
             f"**StreamSentry Config**\n"
             f"Status: {status}\n\n"
             f"🎭 **Live Role:** {live_role.mention if isinstance(live_role, discord.Role) else live_role}\n"
             f"📢 **Alert Channel:** {alert_ch.mention if isinstance(alert_ch, discord.TextChannel) else alert_ch}\n"
+            f"🔔 **@here Mention:** {mention_status}\n"
             f"🎬 **Clip Vault:** {clip_ch.mention if isinstance(clip_ch, discord.TextChannel) else clip_ch}\n"
             f"🔐 **Allowed Roles:** {whitelist_str}\n"
         )
