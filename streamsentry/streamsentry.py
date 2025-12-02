@@ -25,7 +25,8 @@ class StreamSentry(commands.Cog):
             "whitelist_role_ids": [],
             "enabled": False,
             "cleanup_on_offline": True,
-            "mention_here": True  # New setting
+            "mention_here": True,
+            "active_streams": {}  # New: Stores {user_id: message_id}
         }
         self.config.register_guild(**default_guild)
 
@@ -65,22 +66,41 @@ class StreamSentry(commands.Cog):
 
         # --- STARTED STREAMING ---
         if not before_stream and after_stream:
+            # Assign Role
             if live_role:
                 try:
                     await after.add_roles(live_role, reason="StreamSentry: User went live")
                 except discord.Forbidden:
                     pass
 
+            # Send Alert & Save ID
             if alert_channel and after_stream.url:
                 await self._send_alert(alert_channel, after, after_stream, settings["mention_here"])
 
         # --- STOPPED STREAMING ---
         elif before_stream and not after_stream:
+            # Remove Role
             if live_role and settings["cleanup_on_offline"]:
                 try:
                     await after.remove_roles(live_role, reason="StreamSentry: User went offline")
                 except discord.Forbidden:
                     pass
+
+            # Delete Alert Message (NEW)
+            active_streams = settings.get("active_streams", {})
+            if str(after.id) in active_streams:
+                msg_id = active_streams[str(after.id)]
+                if alert_channel:
+                    try:
+                        msg = await alert_channel.fetch_message(msg_id)
+                        await msg.delete()
+                    except (discord.NotFound, discord.Forbidden):
+                        pass  # Message already deleted or no perms
+
+                # Clean up DB
+                async with self.config.guild(guild).active_streams() as streams:
+                    if str(after.id) in streams:
+                        del streams[str(after.id)]
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -115,7 +135,7 @@ class StreamSentry(commands.Cog):
     # --- HELPERS ---
 
     async def _send_alert(self, channel, member, activity, mention_here):
-        """Shared alert sending logic."""
+        """Sends the alert and saves the message ID."""
         embed = discord.Embed(
             title=f"🔴 {member.display_name} is Now Live!",
             description=f"**Playing:** {activity.game}\n**Title:** {activity.name}",
@@ -130,7 +150,10 @@ class StreamSentry(commands.Cog):
         content_str = f"Hey @here, {member.mention} is live!" if mention_here else f"Hey {member.mention} is live!"
 
         try:
-            await channel.send(content=content_str, embed=embed)
+            msg = await channel.send(content=content_str, embed=embed)
+            # Save ID for later deletion
+            async with self.config.guild(member.guild).active_streams() as streams:
+                streams[str(member.id)] = msg.id
         except discord.Forbidden:
             pass
 
@@ -254,6 +277,8 @@ class StreamSentry(commands.Cog):
                 actions.append("already has role")
 
         if alert_channel:
+            # We skip deletion logic here to avoid clearing DB accidentally, assuming manual check means
+            # we want to FORCE an alert.
             try:
                 await self._send_alert(alert_channel, member, stream_activity, settings["mention_here"])
                 actions.append("sent alert")
