@@ -145,7 +145,6 @@ class CustomChannels(commands.Cog):
         if not channel.guild.me.guild_permissions.manage_channels: return
 
         cat_id = str(channel.category.id) if channel.category else None
-        # Cache check could go here, but direct DB is safer for delete events
         whitelist = await self.config.guild(channel.guild).category_with_button()
 
         if cat_id and cat_id in whitelist:
@@ -183,11 +182,17 @@ class CustomChannels(commands.Cog):
 
         if "category_with_button" not in self.config_cache[guild.id]:
             self.config_cache[guild.id]["category_with_button"] = await self.config.guild(guild).category_with_button()
+
         whitelist = self.config_cache[guild.id]["category_with_button"]
 
         # AntiSpam Init
         if member.id not in self.antispam[guild.id]:
             self.antispam[guild.id][member.id] = AntiSpam([(timedelta(seconds=600), 1)])
+
+        # Initialize user_created_voice_channels cache if missing
+        if "user_created_voice_channels" not in self.config_cache[guild.id]:
+            self.config_cache[guild.id]["user_created_voice_channels"] = await self.config.guild(
+                guild).user_created_voice_channels()
 
         # Channel Creation Logic
         if (after.channel and after.channel.category
@@ -215,6 +220,9 @@ class CustomChannels(commands.Cog):
                 async with self.config.guild(guild).user_created_voice_channels() as user_voice:
                     user_voice[str(created_channel.id)] = created_channel.id
 
+                # FIX: Update cache immediately so deletion works if they leave quickly
+                self.config_cache[guild.id]["user_created_voice_channels"][str(created_channel.id)] = created_channel.id
+
                 async with self.config.member(member).currentRooms() as user_rooms:
                     user_rooms[str(created_channel.id)] = created_channel.id
 
@@ -222,10 +230,6 @@ class CustomChannels(commands.Cog):
                 logger.error(f"Failed to create channel: {e}")
 
         # Cleanup Trigger
-        if "user_created_voice_channels" not in self.config_cache[guild.id]:
-            self.config_cache[guild.id]["user_created_voice_channels"] = await self.config.guild(
-                guild).user_created_voice_channels()
-
         user_created_channels = self.config_cache[guild.id]["user_created_voice_channels"]
         await self.channel_cleaner(before, guild, user_created_channels)
 
@@ -255,13 +259,20 @@ class CustomChannels(commands.Cog):
                     await channel.delete(reason="Custom channel empty")
 
                     async with self.config.guild(guild).user_created_voice_channels() as db:
-                        if str(channel.id) in db: del db[str(channel.id)]
+                        if str(channel.id) in db:
+                            del db[str(channel.id)]
 
                     # Update local cache
                     if str(channel.id) in self.config_cache[guild.id].get("user_created_voice_channels", {}):
                         del self.config_cache[guild.id]["user_created_voice_channels"][str(channel.id)]
+
                 except discord.NotFound:
-                    pass
+                    # Already gone, just clean cache/db
+                    async with self.config.guild(guild).user_created_voice_channels() as db:
+                        if str(channel.id) in db: del db[str(channel.id)]
+                    if str(channel.id) in self.config_cache[guild.id].get("user_created_voice_channels", {}):
+                        del self.config_cache[guild.id]["user_created_voice_channels"][str(channel.id)]
+
                 except Exception as e:
                     logger.error(f"Error deleting channel {channel.id}: {e}")
 
