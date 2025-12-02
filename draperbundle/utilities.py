@@ -338,7 +338,6 @@ def get_user_named(bot, name):
 
 
 async def get_activity_list(ctx, data, game_name, activity, thumbnail_url=None):
-    logger.info(f"DEBUG: get_activity_list called. Thumbnail: {thumbnail_url}")
     username = False
     if activity == discord.ActivityType.playing:
         activity_name = "playing "
@@ -379,7 +378,6 @@ async def get_activity_list(ctx, data, game_name, activity, thumbnail_url=None):
                     embed.add_field(name="Username", value=usernames, inline=True)
 
                 if thumbnail_url:
-                    logger.info(f"DEBUG: Setting thumbnail in mid-loop embed to {thumbnail_url}")
                     embed.set_thumbnail(url=thumbnail_url)
 
                 embed_list.append(embed)
@@ -400,7 +398,6 @@ async def get_activity_list(ctx, data, game_name, activity, thumbnail_url=None):
                 embed.add_field(name="Username", value=usernames, inline=True)
 
             if thumbnail_url:
-                logger.info(f"DEBUG: Setting thumbnail in final embed to {thumbnail_url}")
                 embed.set_thumbnail(url=thumbnail_url)
 
             embed_list.append(embed)

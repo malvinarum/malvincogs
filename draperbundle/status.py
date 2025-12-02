@@ -56,20 +56,15 @@ class MemberStatus(commands.Cog):
 
     async def _get_game_cover(self, game_name: str):
         """Fetches game cover from IGDB using PublisherManager credentials."""
-        log.info(f"DEBUG: Fetching cover for '{game_name}'")  # DEBUG LOG
-
         creds = await ConfigHolder.PublisherManager.igdb_creds()
         c_id = creds.get("client_id")
         c_secret = creds.get("client_secret")
 
         if not c_id or not c_secret:
-            log.warning("DEBUG: IGDB Credentials missing in config.")  # DEBUG LOG
             return None
 
         token = await self._get_igdb_token(c_id, c_secret)
-        if not token:
-            log.warning("DEBUG: Could not get IGDB Token.")  # DEBUG LOG
-            return None
+        if not token: return None
 
         headers = {
             "Client-ID": c_id,
@@ -87,18 +82,11 @@ class MemberStatus(commands.Cog):
                 async with session.post(f"{IGDB_API_BASE}/games", headers=headers, data=query) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        log.info(f"DEBUG: IGDB Raw Response for '{game_name}': {data}")  # DEBUG LOG
-
                         if data and "cover" in data[0]:
                             url = data[0]["cover"]["url"]
                             if url.startswith("//"): url = "https:" + url
                             final_url = url.replace("t_thumb", "t_cover_big")
-                            log.info(f"DEBUG: Found URL: {final_url}")  # DEBUG LOG
                             return final_url
-                        else:
-                            log.info(f"DEBUG: No cover found in response for '{game_name}'")
-                    else:
-                        log.warning(f"IGDB Query Failed: {resp.status} | {await resp.text()}")
         except Exception as e:
             log.error(f"IGDB Fetch Error: {e}")
         return None
