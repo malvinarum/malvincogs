@@ -5,7 +5,7 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 ## 📦 The Cogs
 
 ### 🎮 Draper Bundle (`draperbundle`)
-**New!** A massive suite of community and gaming utilities created by DraperSniper, (updated & maintaned by Malvinarum).
+**New!** A massive suite of community and gaming utilities created by [DraperSniper](https://github.com/Drapersniper), (updated & maintaned by Malvinarum).
 
 * **Gaming Profiles (`[p]gprofile`):** Let users set up profiles with their region, timezone, and linked game accounts (Steam, Battle.net, etc.). Auto-manages roles based on region!
 * **PC Specs (`[p]specs`):** Allow members to flex their rigs. Tracks CPU, GPU, RAM, and more.
