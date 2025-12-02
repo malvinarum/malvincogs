@@ -25,6 +25,7 @@ class PublisherManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = ConfigHolder.PublisherManager
+        self.account_config = ConfigHolder.AccountManager
 
         self._igdb_token = None
         self._token_expires_at = 0
@@ -82,7 +83,6 @@ class PublisherManager(commands.Cog):
         }
 
         # Query for game, asking for websites and external games (steam id, etc)
-        # Category 1 = Main Game, 2 = DLC, etc.
         query = f'search "{game_name}"; fields name, websites.url, external_games.category; limit 1;'
 
         try:
@@ -153,6 +153,72 @@ class PublisherManager(commands.Cog):
             else:
                 await ctx.send("Service not found.")
 
+    @commands.is_owner()
+    @service.command(name="rename")
+    async def service_rename(self, ctx: commands.Context, old_identifier: str, new_identifier: str, *,
+                             new_name: str = None):
+        """
+        Rename a service and migrate all user accounts.
+        Example: [p]service rename origin ea "EA App"
+        """
+        old_id = old_identifier.lower()
+        new_id = new_identifier.lower()
+
+        # 1. Check if old service exists
+        async with self.config.services() as services:
+            if old_id not in services:
+                return await ctx.send(f"❌ Service `{old_id}` does not exist.")
+
+            if new_id in services:
+                return await ctx.send(f"❌ Service `{new_id}` already exists.")
+
+            # 2. Create new service entry
+            old_data = services[old_id]
+            display_name = new_name if new_name else old_data.get("name", new_id.title())
+
+            services[new_id] = {
+                "identifier": new_id,
+                "name": display_name,
+                "games": old_data.get("games", [])
+            }
+
+            # 3. Delete old service entry
+            del services[old_id]
+
+        # 4. Migrate User Accounts
+        await ctx.send(f"🔄 Migrating users from `{old_id}` to `{new_id}`...")
+
+        all_users = await self.account_config.all_users()
+        migrated_count = 0
+
+        for user_id, data in all_users.items():
+            account_data = data.get("account", {})
+            if old_id in account_data:
+                # Get the username value
+                username = account_data[old_id]
+
+                # Update DB for this user
+                async with self.account_config.user_from_id(user_id).account() as user_acc:
+                    user_acc[new_id] = username
+                    del user_acc[old_id]
+
+                migrated_count += 1
+
+        # 5. Migrate Publisher Mappings (Game -> Service)
+        async with self.config.publisher() as publisher_data:
+            games_migrated = 0
+            for game, service in list(publisher_data.items()):
+                if service == old_id:
+                    publisher_data[game] = new_id
+                    games_migrated += 1
+
+        await ctx.send(
+            f"✅ **Migration Complete**\n"
+            f"• Service renamed: `{old_id}` -> `{new_id}` ({display_name})\n"
+            f"• Users migrated: {migrated_count}\n"
+            f"• Games re-linked: {games_migrated}"
+        )
+
     @service.command(name="show")
     @commands.guild_only()
     async def service_show(self, ctx: commands.Context):
@@ -203,8 +269,7 @@ class PublisherManager(commands.Cog):
         if not unparsed:
             return await ctx.send("Nothing to parse.")
 
-        platforms = await get_supported_platforms()
-        # platforms structure is [(id, name), ...]
+        platforms = await get_supported_platforms()  # [(id, name), ...]
 
         manual_map = {
             "visual studio": "coding",
@@ -222,7 +287,6 @@ class PublisherManager(commands.Cog):
                 found = False
                 for k, v in manual_map.items():
                     if k in lower_game:
-                        # Logic to apply mapped service if it exists could go here
                         pass
 
                 # 2. IGDB Query
@@ -246,7 +310,6 @@ class PublisherManager(commands.Cog):
                                 if res_json:
                                     g_data = res_json[0]
                                     logger.info(f"IGDB Found match for '{game}': {g_data['name']}")
-                                    # Future: Implement logic to map IGDB website categories to your services
 
                             await asyncio.sleep(0.25)
                     except Exception:
@@ -278,12 +341,10 @@ class PublisherManager(commands.Cog):
 
         async with self.config.publisher() as publisher_data:
             for game in existing_data:
-                # Build the embed
                 desc_lines = []
                 for k, v in prompt_map.items():
                     desc_lines.append(f"**{k}.** {v}")
 
-                # Try to enhance with IGDB info if available
                 igdb_info = ""
                 data = await self._query_igdb(game)
                 if data:
