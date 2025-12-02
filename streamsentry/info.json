@@ -1,0 +1,8 @@
+{
+  "author": ["Malvinarum"],
+  "description": "Streamer promotion suite: Live roles, alerts, and clip archiving.",
+  "hidden": false,
+  "install_msg": "Configure with [p]streamset.",
+  "short": "Streamer Tools",
+  "min_bot_version": "3.5.0"
+}
