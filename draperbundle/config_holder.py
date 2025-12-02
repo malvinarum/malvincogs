@@ -1,4 +1,5 @@
 from redbot.core.config import Config
+import logging
 
 # Relative import to ensure portability
 from .constants import (
@@ -12,6 +13,8 @@ from .constants import (
     osrs_icon,
 )
 
+log = logging.getLogger("red.drapercogs.config_holder")
+
 
 class ConfigHolderClass:
     def __init__(self):
@@ -19,91 +22,109 @@ class ConfigHolderClass:
         self.AccountManager = Config.get_conf(
             None, identifier=1273062035, force_registration=True, cog_name="AccountManager"
         )
-        # FIX: Register default user settings for AccountManager
-        self.AccountManager.register_user(account={})
+        try:
+            self.AccountManager.register_user(account={})
+        except KeyError:
+            pass
 
         # GamingProfile: Stores region, timezone, bio
         self.GamingProfile = Config.get_conf(
             None, identifier=9420012589, force_registration=True, cog_name="GamingProfile"
         )
-        # FIX: Register default guild settings for GamingProfile
-        self.GamingProfile.register_guild(role_management=False)
-        self.GamingProfile.register_user(
-            discord_user_id=None,
-            discord_user_name=None,
-            discord_true_name=None,
-            guild_display_name=None,
-            is_bot=False,
-            country=None,
-            timezone=None,
-            language=None,
-            zone=None,
-            subzone=None,
-            seen=None,
-            trial=None,
-            nickname_extas=None,
-        )
+        try:
+            self.GamingProfile.register_guild(role_management=False)
+            self.GamingProfile.register_user(
+                discord_user_id=None,
+                discord_user_name=None,
+                discord_true_name=None,
+                guild_display_name=None,
+                is_bot=False,
+                country=None,
+                timezone=None,
+                language=None,
+                zone=None,
+                subzone=None,
+                seen=None,
+                trial=None,
+                nickname_extas=None,
+            )
+        except KeyError:
+            pass
 
         # PCSpecs: Stores hardware details
         self.PCSpecs = Config.get_conf(
             None, identifier=8205491788, force_registration=True, cog_name="PCSpecs"
         )
-        self.PCSpecs.register_user(rig={
-            "CPU": None,
-            "GPU": None,
-            "RAM": None,
-            "Motherboard": None,
-            "Storage": None,
-            "Monitor": None,
-            "Mouse": None,
-            "Keyboard": None,
-            "Case": None,
-            "Headset": None
-        })
+        try:
+            self.PCSpecs.register_user(rig={
+                "CPU": None,
+                "GPU": None,
+                "RAM": None,
+                "Motherboard": None,
+                "Storage": None,
+                "Monitor": None,
+                "Mouse": None,
+                "Keyboard": None,
+                "Case": None,
+                "Headset": None
+            })
+        except KeyError:
+            pass
 
         # PublisherManager: Stores supported game services
         self.PublisherManager = Config.get_conf(
             None, identifier=2064553666, force_registration=True, cog_name="PublisherManager",
         )
-
-        # Register the new IGDB credentials global group
-        self.PublisherManager.register_global(igdb_creds={})
-        self.PublisherManager.register_global(services={})  # Ensure services dict exists
-        # FIX: Register 'publisher' group which maps games to services
-        self.PublisherManager.register_global(publisher={})
+        try:
+            self.PublisherManager.register_global(igdb_creds={})
+            self.PublisherManager.register_global(services={})
+            self.PublisherManager.register_global(publisher={})
+        except KeyError:
+            pass
 
         # PlayerStatus: Tracks active players
         self.PlayerStatus = Config.get_conf(
             None, identifier=3584065639, force_registration=True, cog_name="PlayerStatus"
         )
-        # FIX: Register default channel settings for PlayerStatus
-        self.PlayerStatus.register_channel(game=None)
+        try:
+            self.PlayerStatus.register_channel(game=None)
+        except KeyError:
+            pass
 
         # LogoData: Stores icons for services
         self.LogoData = Config.get_conf(
             None, identifier=7056820599, force_registration=True, cog_name="LogoData"
         )
-        self.LogoData.register_global()  # Just register empty global if it's dynamic
+        try:
+            self.LogoData.register_global()
+        except KeyError:
+            pass
 
         # DynamicChannels: Auto-creating voice channels
         self.DynamicChannels = Config.get_conf(
             None, identifier=3172784244, force_registration=True, cog_name="DynamicChannels"
         )
-        self.DynamicChannels.register_guild(dynamic_channels={}, blacklist={"blacklist": []})
+        try:
+            self.DynamicChannels.register_guild(dynamic_channels={}, blacklist={"blacklist": []})
+        except KeyError as e:
+            log.warning(f"Config registration error in DynamicChannels (harmless if reloading): {e}")
 
         # CustomChannels: User-managed channels
         self.CustomChannels = Config.get_conf(
             None, identifier=7861412794, force_registration=True, cog_name="CustomChannels"
         )
-        self.CustomChannels.register_guild(
-            category_with_button={},
-            blacklist={"blacklist": []},
-            user_created_voice_channels_bypass_roles=[],
-            mute_roles=[],
-            custom_channels={},
-            user_created_voice_channels={}
-        )
-        self.CustomChannels.register_member(currentRooms={})
+        try:
+            self.CustomChannels.register_guild(
+                category_with_button={},
+                blacklist={"blacklist": []},
+                user_created_voice_channels_bypass_roles=[],
+                mute_roles=[],
+                custom_channels={},
+                user_created_voice_channels={}
+            )
+            self.CustomChannels.register_member(currentRooms={})
+        except KeyError:
+            pass
 
         # RandomQuotes: (Legacy?)
         self.RandomQuotes = Config.get_conf(
@@ -114,15 +135,16 @@ class ConfigHolderClass:
         self.BFV_USER_IDS = Config.get_conf(
             None, identifier=8475527184, force_registration=True, cog_name="BFVUserIDs"
         )
-        self.BFV_USER_IDS.register_user(user_id=None)
+        try:
+            self.BFV_USER_IDS.register_user(user_id=None)
+        except KeyError:
+            pass
 
 
 # Initialize the singleton
 ConfigHolder = ConfigHolderClass()
 
 # --- DEFAULT SCHEMAS ---
-# These are essentially documentation now since we registered them above.
-
 default_member_AccountManager = {"account": {"origin": None, "uplay": None}}
 
 default_member_GamingProfile = {
@@ -156,8 +178,6 @@ default_member_PCSpecs = {
     }
 }
 
-# Ensure PublisherManager services are populated if empty
-# This logic usually belongs in the cog itself, but defining the default structure here helps.
 default_custom_PublisherManager = {
     "services": {
         "battlenet": {
