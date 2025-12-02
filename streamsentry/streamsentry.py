@@ -22,12 +22,13 @@ class StreamSentry(commands.Cog):
             "live_role_id": None,
             "alert_channel_id": None,
             "clip_channel_id": None,
-            "whitelist_role_ids": [],  # CHANGED: Now a list of IDs
+            "whitelist_role_ids": [],  # List of IDs
             "enabled": False,
             "cleanup_on_offline": True
         }
         self.config.register_guild(**default_guild)
 
+        # Regex for common clip URLs (Twitch, Medal, YouTube)
         self.clip_regex = re.compile(
             r"(https?://(?:www\.)?(?:twitch\.tv/\w+/clip/[^ \n]+|clips\.twitch\.tv/[^ \n]+|"
             r"medal\.tv/games/[^ \n]+|youtube\.com/clip/[^ \n]+))"
@@ -40,6 +41,9 @@ class StreamSentry(commands.Cog):
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
+        """
+        Detects when a member starts or stops streaming.
+        """
         guild = after.guild
         if before.bot or after.bot:
             return
@@ -48,15 +52,12 @@ class StreamSentry(commands.Cog):
         if not settings["enabled"]:
             return
 
-        # 1. Check Whitelist (Updated for Multiple Roles)
+        # 1. Check Whitelist (Supports Multiple Roles)
         whitelist_ids = settings["whitelist_role_ids"]
         if whitelist_ids:
             # Check if user has ANY of the whitelisted roles
-            # We use set intersection for efficiency
             user_role_ids = {r.id for r in after.roles}
-            has_whitelisted_role = bool(user_role_ids.intersection(whitelist_ids))
-
-            if not has_whitelisted_role:
+            if not user_role_ids.intersection(whitelist_ids):
                 return
 
         # 2. Determine Stream State
@@ -68,12 +69,14 @@ class StreamSentry(commands.Cog):
 
         # --- STARTED STREAMING ---
         if not before_stream and after_stream:
+            # Assign Role
             if live_role:
                 try:
                     await after.add_roles(live_role, reason="StreamSentry: User went live")
                 except discord.Forbidden:
-                    pass
+                    log.warning(f"StreamSentry: Missing permissions to add role in {guild.name}")
 
+            # Send Alert
             if alert_channel and after_stream.url:
                 embed = discord.Embed(
                     title=f"🔴 {after.display_name} is Now Live!",
@@ -83,6 +86,7 @@ class StreamSentry(commands.Cog):
                 )
                 embed.set_thumbnail(url=after.display_avatar.url)
 
+                # Twitch visual flair
                 if "twitch.tv" in after_stream.url:
                     embed.set_footer(text="Twitch.tv", icon_url="https://i.imgur.com/v9E8D6p.png")
 
@@ -101,6 +105,9 @@ class StreamSentry(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        """
+        Watches for clips and reposts them to the vault.
+        """
         if message.author.bot or not message.guild:
             return
 
@@ -164,8 +171,6 @@ class StreamSentry(commands.Cog):
         await self.config.guild(ctx.guild).clip_channel_id.set(channel.id)
         await ctx.send(f"✅ Clips will be archived to: {channel.mention}")
 
-    # --- UPDATED WHITELIST COMMANDS ---
-
     @streamset.group(name="whitelist")
     async def streamset_whitelist(self, ctx: commands.Context):
         """Manage the role whitelist."""
@@ -194,6 +199,70 @@ class StreamSentry(commands.Cog):
         """Clear all whitelisted roles (Open to everyone)."""
         await self.config.guild(ctx.guild).whitelist_role_ids.set([])
         await ctx.send("🔓 Whitelist cleared. StreamSentry is now open to **everyone**.")
+
+    @streamset.command(name="check")
+    async def streamset_check(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        Manually trigger the live check for a user.
+        Useful if the bot was offline when you started streaming.
+        """
+        if not member:
+            member = ctx.author
+
+        # 1. Check if they are actually streaming
+        stream_activity = next((a for a in member.activities if a.type == discord.ActivityType.streaming), None)
+
+        if not stream_activity:
+            return await ctx.send(f"❌ {member.display_name} is not currently streaming.")
+
+        # 2. Run the same checks as the event listener
+        settings = await self.config.guild(ctx.guild).all()
+
+        # Whitelist Check
+        whitelist_ids = settings["whitelist_role_ids"]
+        if whitelist_ids:
+            user_role_ids = {r.id for r in member.roles}
+            if not user_role_ids.intersection(whitelist_ids):
+                return await ctx.send(f"❌ {member.display_name} does not have a whitelisted role.")
+
+        # 3. Apply Role & Alert
+        live_role = ctx.guild.get_role(settings["live_role_id"]) if settings["live_role_id"] else None
+        alert_channel = ctx.guild.get_channel(settings["alert_channel_id"]) if settings["alert_channel_id"] else None
+
+        actions = []
+
+        # Role
+        if live_role:
+            if live_role not in member.roles:
+                try:
+                    await member.add_roles(live_role, reason="StreamSentry: Manual Check")
+                    actions.append("assigned role")
+                except discord.Forbidden:
+                    actions.append("failed to assign role (perms)")
+            else:
+                actions.append("already has role")
+
+        # Alert
+        if alert_channel:
+            # We don't check history here to avoid spamming API, just send it.
+            # Users should be careful not to spam this command.
+            embed = discord.Embed(
+                title=f"🔴 {member.display_name} is Now Live!",
+                description=f"**Playing:** {stream_activity.game}\n**Title:** {stream_activity.name}",
+                url=stream_activity.url,
+                color=discord.Color.purple()
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            if "twitch.tv" in stream_activity.url:
+                embed.set_footer(text="Twitch.tv", icon_url="https://i.imgur.com/v9E8D6p.png")
+
+            try:
+                await alert_channel.send(content=f"Hey @here, {member.mention} is live!", embed=embed)
+                actions.append("sent alert")
+            except discord.Forbidden:
+                actions.append("failed to alert (perms)")
+
+        await ctx.send(f"✅ Manual check complete: {', '.join(actions)}.")
 
     @streamset.command(name="settings")
     async def streamset_show(self, ctx: commands.Context):
