@@ -50,15 +50,17 @@ class PublisherManager(commands.Cog):
         }
 
         try:
-            async with self.bot.session.post(IGDB_AUTH_URL, params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    self._igdb_token = data["access_token"]
-                    self._token_expires_at = now + data["expires_in"] - 60  # Buffer
-                    return self._igdb_token
-                else:
-                    logger.error(f"Failed to get IGDB Token: {resp.status} - {await resp.text()}")
-                    return None
+            # FIX: Use local session to avoid 'Red object has no attribute session' error
+            async with aiohttp.ClientSession() as session:
+                async with session.post(IGDB_AUTH_URL, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self._igdb_token = data["access_token"]
+                        self._token_expires_at = now + data["expires_in"] - 60  # Buffer
+                        return self._igdb_token
+                    else:
+                        logger.error(f"Failed to get IGDB Token: {resp.status} - {await resp.text()}")
+                        return None
         except Exception as e:
             logger.error(f"IGDB Auth Exception: {e}")
             return None
@@ -83,14 +85,18 @@ class PublisherManager(commands.Cog):
         }
 
         # Query for game, asking for websites and external games (steam id, etc)
-        query = f'search "{game_name}"; fields name, websites.url, external_games.category; limit 1;'
+        # Also escape quotes to prevent syntax errors
+        safe_name = game_name.replace('"', '\\"')
+        query = f'search "{safe_name}"; fields name, websites.url, external_games.category; limit 1;'
 
         try:
-            async with self.bot.session.post(f"{IGDB_API_BASE}/games", headers=headers, data=query) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data:
-                        return data[0]  # Best match
+            # FIX: Use local session here too
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{IGDB_API_BASE}/games", headers=headers, data=query) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data:
+                            return data[0]  # Best match
         except Exception as e:
             logger.error(f"IGDB Query Error: {e}")
 
@@ -198,7 +204,7 @@ class PublisherManager(commands.Cog):
                 username = account_data[old_id]
 
                 # Update DB for this user
-                async with self.account_config.user_from_id(user_id).account() as user_acc:
+                async with self.account_config.user_from_id(int(user_id)).account() as user_acc:
                     user_acc[new_id] = username
                     del user_acc[old_id]
 
@@ -258,7 +264,7 @@ class PublisherManager(commands.Cog):
     async def _parse_auto(self, ctx: commands.Context):
         """Attempts to auto-match unparsed games using IGDB."""
         creds = await self.config.igdb_creds()
-        if not creds:
+        if not creds or not creds.get("client_id"):
             return await ctx.send(f"⚠️ IGDB credentials missing. Run `{ctx.prefix}service igdb` first.")
 
         await ctx.send("🔍 Starting auto-discovery... This may take a while.")
@@ -301,18 +307,23 @@ class PublisherManager(commands.Cog):
                         "Authorization": f"Bearer {token}",
                     }
 
-                    q = f'search "{game}"; fields name, websites.category, websites.url; limit 1;'
+                    # Escape quotes
+                    safe_game = game.replace('"', '\\"')
+                    q = f'search "{safe_game}"; fields name, websites.category, websites.url; limit 1;'
 
                     try:
-                        async with self.bot.session.post(f"{IGDB_API_BASE}/games", headers=headers, data=q) as resp:
-                            if resp.status == 200:
-                                res_json = await resp.json()
-                                if res_json:
-                                    g_data = res_json[0]
-                                    logger.info(f"IGDB Found match for '{game}': {g_data['name']}")
+                        # FIX: Use local session here too
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(f"{IGDB_API_BASE}/games", headers=headers, data=q) as resp:
+                                if resp.status == 200:
+                                    res_json = await resp.json()
+                                    if res_json:
+                                        g_data = res_json[0]
+                                        logger.info(f"IGDB Found match for '{game}': {g_data['name']}")
 
-                            await asyncio.sleep(0.25)
-                    except Exception:
+                                await asyncio.sleep(0.25)
+                    except Exception as e:
+                        logger.error(f"Auto-parse error for {game}: {e}")
                         pass
 
         await ctx.send(f"Auto-parse complete. Matched {matched_count} games.")
