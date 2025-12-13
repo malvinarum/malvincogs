@@ -1,43 +1,42 @@
-from redbot.core import commands
+from redbot.core import commands, Config
 import discord
 from discord.ext import tasks
 import docker
 from datetime import datetime
 
-# --- CONFIGURATION ---
-DOCKER_CHANNEL_ID = None  # e.g., 123456789012345678
-
 
 class DockerControlView(discord.ui.View):
-    def __init__(self, docker_client):
+    def __init__(self, cog):
         super().__init__(timeout=None)
-        self.docker_client = docker_client
+        self.cog = cog
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """
-        Security Check: Locks this entire view to the Bot Owner only.
-        """
+        """Lock to Bot Owner"""
         if await interaction.client.is_owner(interaction.user):
             return True
-
-        await interaction.response.send_message("⛔ You do not have permission to control the Docker Daemon.",
-                                                ephemeral=True)
+        await interaction.response.send_message("⛔ You do not have permission to control Docker.", ephemeral=True)
         return False
 
-    async def generate_latest_options(self):
-        """Helper to dynamically generate dropdown options based on current containers."""
-        try:
-            # all=True ensures we see STOPPED containers so we can turn them back on
-            containers = self.docker_client.containers.list(all=True)
-            options = []
+    async def generate_options(self):
+        """Generates dropdown options from current Docker state."""
+        if not self.cog.docker_client:
+            return [discord.SelectOption(label="Docker Connection Failed", value="error")]
 
-            # Sort containers by name for consistency
+        try:
+            # Get ALL containers (running and stopped)
+            containers = self.cog.docker_client.containers.list(all=True)
             containers.sort(key=lambda x: x.name)
 
-            # Limit to 25 because Discord Select menus max out at 25 options
+            options = []
+            if not containers:
+                return [discord.SelectOption(label="No Containers Found", value="none", default=True)]
+
+            # Limit to 25 for Discord API
             for container in containers[:25]:
-                status_emoji = "🟢" if container.status == "running" else "🔴"
-                # Truncate label if too long (max 100 chars)
+                is_running = container.status == "running"
+                status_emoji = "🟢" if is_running else "🔴"
+
+                # Create a concise label/desc
                 label = f"{container.name}"[:25]
                 desc = f"{status_emoji} {container.status.upper()} | {container.short_id}"
 
@@ -48,19 +47,16 @@ class DockerControlView(discord.ui.View):
                     emoji=status_emoji
                 ))
 
-            if not options:
-                options.append(discord.SelectOption(label="No Containers Found", value="none", default=True))
-
             return options
         except Exception as e:
             print(f"Error generating options: {e}")
-            return [discord.SelectOption(label="Error fetching containers", value="error")]
+            return [discord.SelectOption(label="Error fetching list", value="error")]
 
     @discord.ui.select(
         placeholder="Select a container to manage...",
         min_values=1,
         max_values=1,
-        custom_id="docker_mission_control:select_container",
+        custom_id="docker_control:select_container",
         options=[discord.SelectOption(label="Loading...", value="loading")]
     )
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
@@ -69,87 +65,91 @@ class DockerControlView(discord.ui.View):
             await interaction.response.send_message("No valid container selected.", ephemeral=True)
             return
 
+        # Create the sub-view for this specific container
+        view = ContainerActionView(self.cog, container_name)
+
+        # Get fresh status for the embed
         try:
-            container = self.docker_client.containers.get(container_name)
-
-            status_color = 0x43b581 if container.status == "running" else 0xf04747
-
-            embed = discord.Embed(title=f"📦 {container.name}", color=status_color)
+            container = self.cog.docker_client.containers.get(container_name)
+            color = 0x43b581 if container.status == "running" else 0xf04747
+            embed = discord.Embed(title=f"📦 {container.name}", color=color)
             embed.add_field(name="Status", value=container.status.upper(), inline=True)
             embed.add_field(name="ID", value=container.short_id, inline=True)
-            embed.add_field(name="Image", value=container.image.tags[0] if container.image.tags else "Unknown",
+            embed.add_field(name="Image", value=str(container.image.tags[0]) if container.image.tags else "Unknown",
                             inline=False)
 
-            view = ContainerActionView(container_name)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
         except docker.errors.NotFound:
-            await interaction.response.send_message(f"Container `{container_name}` no longer exists.", ephemeral=True)
+            await interaction.response.send_message(f"Container `{container_name}` not found.", ephemeral=True)
 
     @discord.ui.button(
-        label="Force Refresh",
+        label="Refresh",
         style=discord.ButtonStyle.secondary,
         emoji="🔄",
-        custom_id="docker_mission_control:force_refresh"
+        custom_id="docker_control:force_refresh"
     )
     async def refresh_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await interaction.followup.send("Refresh request received. Panel will update shortly.", ephemeral=True)
+        await self.cog.update_dashboard()
+        await interaction.followup.send("Refreshing dashboard...", ephemeral=True)
 
 
 class ContainerActionView(discord.ui.View):
-    """Ephemeral view to manage a specific container selected from the dropdown"""
+    """Ephemeral view to manage a specific container."""
 
-    def __init__(self, container_name):
+    def __init__(self, cog, container_name):
         super().__init__(timeout=60)
+        self.cog = cog
         self.container_name = container_name
-        self.docker_client = docker.from_env()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """
-        Security Check: Locks this sub-menu to the Bot Owner only.
-        """
         if await interaction.client.is_owner(interaction.user):
             return True
-
-        await interaction.response.send_message("⛔ You do not have permission to manage this container.",
-                                                ephemeral=True)
+        await interaction.response.send_message("⛔ Access Denied.", ephemeral=True)
         return False
+
+    async def run_action(self, interaction, action):
+        await interaction.response.defer()
+        try:
+            container = self.cog.docker_client.containers.get(self.container_name)
+
+            if action == "start":
+                container.start()
+            elif action == "stop":
+                container.stop()
+            elif action == "restart":
+                container.restart()
+
+            await interaction.followup.send(f"✅ Sent `{action}` command to `{self.container_name}`", ephemeral=True)
+            # Force update the main dashboard so the status light changes immediately
+            await self.cog.update_dashboard()
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(label="Start", style=discord.ButtonStyle.success, emoji="▶️")
     async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        try:
-            container = self.docker_client.containers.get(self.container_name)
-            container.start()
-            await interaction.followup.send(f"✅ Started `{self.container_name}`", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+        await self.run_action(interaction, "start")
 
     @discord.ui.button(label="Restart", style=discord.ButtonStyle.primary, emoji="🔁")
     async def restart_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        try:
-            container = self.docker_client.containers.get(self.container_name)
-            container.restart()
-            await interaction.followup.send(f"✅ Restarted `{self.container_name}`", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+        await self.run_action(interaction, "restart")
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        try:
-            container = self.docker_client.containers.get(self.container_name)
-            container.stop()
-            await interaction.followup.send(f"🛑 Stopped `{self.container_name}`", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+        await self.run_action(interaction, "stop")
 
 
 class DockerManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Config setup for persistence
+        self.config = Config.get_conf(self, identifier=85720938475)
+        self.config.register_global(
+            dashboard_channel=None,
+            dashboard_message=None
+        )
+
         try:
             self.docker_client = docker.from_env()
             print("🐳 Docker Client Connected")
@@ -157,75 +157,80 @@ class DockerManager(commands.Cog):
             print(f"❌ Failed to connect to Docker: {e}")
             self.docker_client = None
 
-        self.dashboard_message = None
-
-        # Register the view for persistence
-        if self.docker_client:
-            self.view = DockerControlView(self.docker_client)
-            self.bot.add_view(self.view)
-            self.update_stats_loop.start()
+        self.view = DockerControlView(self)
+        self.bot.add_view(self.view)
+        self.dashboard_loop.start()
 
     def cog_unload(self):
-        self.update_stats_loop.cancel()
+        self.dashboard_loop.cancel()
 
-    async def get_system_embed(self):
-        """Generates the main dashboard embed"""
+    async def get_dashboard_embed(self):
+        """Generates the main dashboard embed."""
         if not self.docker_client:
             return discord.Embed(title="Docker Error", description="Client not connected.", color=0xff0000)
 
         containers = self.docker_client.containers.list(all=True)
+        # Sort for consistent display order
+        containers.sort(key=lambda x: x.name)
+
         running_count = sum(1 for c in containers if c.status == 'running')
         total_count = len(containers)
 
-        embed = discord.Embed(title="🐳 Docker Mission Control", color=0x2b2d31, timestamp=datetime.now())
-        embed.set_footer(text="Pleiades System Monitor")
+        embed = discord.Embed(title="🐳 Docker Mission Control", color=0x2b2d31)
+        embed.timestamp = datetime.now()
+        embed.set_footer(text="Pleiades System Monitor • Last Updated")
 
         # Summary Stats
         embed.add_field(name="Running", value=f"🟢 {running_count}", inline=True)
         embed.add_field(name="Stopped", value=f"🔴 {total_count - running_count}", inline=True)
         embed.add_field(name="Total", value=f"📦 {total_count}", inline=True)
 
+        # List containers (up to 15 to avoid hitting embed limits)
         status_text = ""
-        for container in containers[:10]:
+        for container in containers[:15]:
             icon = "🟢" if container.status == "running" else "🔴"
             status_text += f"{icon} **{container.name}**\n"
 
-        if len(containers) > 10:
-            status_text += f"*...and {len(containers) - 10} more*"
+        if len(containers) > 15:
+            status_text += f"*...and {len(containers) - 15} more*"
 
         embed.description = status_text if status_text else "No containers found."
         return embed
 
-    @tasks.loop(seconds=60)
-    async def update_stats_loop(self):
-        """Updates the dashboard message periodically"""
-        if not self.docker_client:
+    async def update_dashboard(self):
+        """Fetches the message from Config and updates it."""
+        data = await self.config.all()
+        channel_id = data['dashboard_channel']
+        message_id = data['dashboard_message']
+
+        if not channel_id or not message_id:
             return
 
-        if self.dashboard_message is None and DOCKER_CHANNEL_ID:
-            try:
-                channel = self.bot.get_channel(DOCKER_CHANNEL_ID)
-                # Logic to recover message would go here if we tracked message ID
-                pass
-            except Exception:
-                pass
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return
 
-        if self.dashboard_message:
-            try:
-                embed = await self.get_system_embed()
-                new_options = await self.view.generate_latest_options()
+        try:
+            message = await channel.fetch_message(message_id)
+            embed = await self.get_dashboard_embed()
 
-                select_menu = self.view.children[0]
-                select_menu.options = new_options
+            # Generate fresh options for the dropdown
+            new_options = await self.view.generate_options()
+            self.view.children[0].options = new_options
 
-                await self.dashboard_message.edit(embed=embed, view=self.view)
-            except discord.NotFound:
-                self.dashboard_message = None
-            except Exception as e:
-                print(f"Failed to update Docker panel: {e}")
+            await message.edit(embed=embed, view=self.view)
+        except discord.NotFound:
+            # Message was deleted, clear config so we stop trying
+            await self.config.dashboard_message.set(None)
+        except Exception as e:
+            print(f"Failed to update Docker panel: {e}")
 
-    @update_stats_loop.before_loop
-    async def before_update_loop(self):
+    @tasks.loop(seconds=60)
+    async def dashboard_loop(self):
+        await self.update_dashboard()
+
+    @dashboard_loop.before_loop
+    async def before_loop(self):
         await self.bot.wait_until_ready()
 
     @commands.command(name="dockerpanel")
@@ -235,24 +240,21 @@ class DockerManager(commands.Cog):
         Spawns the persistent Docker Mission Control panel.
         Usage: !dockerpanel [channel]
         """
-        # If a channel is provided, use it; otherwise, default to the current channel
         target_channel = channel or ctx.channel
 
-        embed = await self.get_system_embed()
+        embed = await self.get_dashboard_embed()
 
-        new_options = await self.view.generate_latest_options()
-        self.view.children[0].options = new_options
+        # Populate initial options
+        self.view.children[0].options = await self.view.generate_options()
 
-        # We send to target_channel, not ctx
-        self.dashboard_message = await target_channel.send(embed=embed, view=self.view)
+        msg = await target_channel.send(embed=embed, view=self.view)
 
-        # If we sent it to another channel, let the user know in the current one
+        # Save exact location to Config
+        await self.config.dashboard_channel.set(target_channel.id)
+        await self.config.dashboard_message.set(msg.id)
+
         if target_channel != ctx.channel:
             await ctx.send(f"✅ Docker Panel spawned in {target_channel.mention}")
-
-        # Update the global variable in memory just in case (optional, helps with loop recovery)
-        global DOCKER_CHANNEL_ID
-        DOCKER_CHANNEL_ID = target_channel.id
 
 
 async def setup(bot):
