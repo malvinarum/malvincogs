@@ -230,18 +230,29 @@ class DockerManager(commands.Cog):
 
     @commands.command(name="dockerpanel")
     @commands.is_owner()
-    async def docker_panel(self, ctx):
-        """Spawns the persistent Docker Mission Control panel"""
+    async def docker_panel(self, ctx, channel: discord.TextChannel = None):
+        """
+        Spawns the persistent Docker Mission Control panel.
+        Usage: !dockerpanel [channel]
+        """
+        # If a channel is provided, use it; otherwise, default to the current channel
+        target_channel = channel or ctx.channel
+
         embed = await self.get_system_embed()
 
         new_options = await self.view.generate_latest_options()
         self.view.children[0].options = new_options
 
-        self.dashboard_message = await ctx.send(embed=embed, view=self.view)
+        # We send to target_channel, not ctx
+        self.dashboard_message = await target_channel.send(embed=embed, view=self.view)
 
-        if DOCKER_CHANNEL_ID and ctx.channel.id != DOCKER_CHANNEL_ID:
-            print(
-                f"⚠️ Warning: Created panel in channel {ctx.channel.id}, but config DOCKER_CHANNEL_ID is {DOCKER_CHANNEL_ID}.")
+        # If we sent it to another channel, let the user know in the current one
+        if target_channel != ctx.channel:
+            await ctx.send(f"✅ Docker Panel spawned in {target_channel.mention}")
+
+        # Update the global variable in memory just in case (optional, helps with loop recovery)
+        global DOCKER_CHANNEL_ID
+        DOCKER_CHANNEL_ID = target_channel.id
 
 
 async def setup(bot):
