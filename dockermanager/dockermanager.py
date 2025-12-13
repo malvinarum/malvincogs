@@ -178,7 +178,7 @@ class DockerManager(commands.Cog):
 
         embed = discord.Embed(title="🐳 Docker Mission Control", color=0x2b2d31)
         embed.timestamp = datetime.now()
-        embed.set_footer(text="Pleiades System Monitor • Last Updated")
+        embed.set_footer(text="Docker Manager • Last Updated")
 
         # Summary Stats
         embed.add_field(name="Running", value=f"🟢 {running_count}", inline=True)
