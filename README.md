@@ -13,8 +13,30 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 * **Dynamic Voice (`[p]dynamicset`):** Create voice channels that automatically spawn new rooms when they get full.
 * **Game Stats (`[p]gstats`):** Retrieve player statistics for supported games (e.g., Battlefield V).
 
-### 🦖 PalworldWatch (`palworldwatch`)
+### 🐳 Docker Manager (`dockermanager`)
+**New!** Manage your Docker containers without leaving Discord.
 
+* **Interactive Panel:** A persistent dashboard showing container status (🟢 Running / 🔴 Stopped).
+* **Control:** Start, Stop, and Restart containers via dropdowns and buttons.
+* **Secure:** Locked to the bot owner to prevent unauthorized access.
+* **Req:** Requires `pip install docker` on the host machine and access to the docker socket.
+
+### 🐧 Systemd Manager (`systemdmanager`)
+**New!** Control Linux services directly from chat. Perfect for managing game servers or web backends.
+
+* **Service Control:** Start, Stop, and Restart services (e.g., `nginx`, `plexmediaserver`) via a persistent panel.
+* **Dynamic Config:** Add services to the monitoring list on the fly (`[p]systemd add <service>`).
+* **Real-time Status:** Visual indicators for Active/Failed/Inactive states.
+* **Req:** Bot user requires `sudo` (NOPASSWD) privileges for `/bin/systemctl`.
+
+### 📡 Stream Sentry (`streamsentry`)
+**New!** Automated promotion and archiving for your community's content creators.
+
+* **Go-Live Alerts:** Auto-posts stream cards when whitelisted members go live.
+* **Live Role:** Automatically assigns and removes a "Now Live" role.
+* **Clip Vault:** Detects Twitch/Medal/YouTube clips in chat and archives them to a dedicated channel.
+
+### 🦖 PalworldWatch (`palworldwatch`)
 Your mission control for Palworld! Keep an eye on your server stats like a hawk.
 
 * **Live Telemetry:** Watch FPS, CPU, and RAM usage in real-time via the REST API and process monitoring.
@@ -22,7 +44,6 @@ Your mission control for Palworld! Keep an eye on your server stats like a hawk.
 * **Visuals:** Custom images for when the server is up or down.
 
 ### 🎬 Plex Activity (`plexactivity`)
-
 The ultimate "Now Playing" dashboard. Flex your media library!
 
 * **Rich Metadata:** Grabs movie posters from TMDB and audiobook covers from Google Books.
@@ -31,7 +52,6 @@ The ultimate "Now Playing" dashboard. Flex your media library!
 * **Multi-User:** Tracks everyone streaming at once with user mapping support.
 
 ### 📥 Torrents Watch (`torrentswatch`)
-
 A set-it-and-forget-it download monitor for **qBittorrent**.
 
 * **Live Stats:** Real-time download/upload speeds, progress bars, and ETAs.
@@ -39,7 +59,6 @@ A set-it-and-forget-it download monitor for **qBittorrent**.
 * **Auth Support:** Handles cookie-based authentication for newer qBittorrent versions.
 
 ### 🖥️ System Monitor (`systemmonitor`)
-
 Check your server's pulse at a glance.
 
 * **Hardware:** Keeps tabs on CPU temps, load averages, and RAM usage.
@@ -47,7 +66,6 @@ Check your server's pulse at a glance.
 * **Network:** Real-time upload/download bandwidth tracking.
 
 ### 📰 RSS Feed (`rssfeed`)
-
 A smarter news ticker for your server.
 
 * **Filtering:** Only see what you want with `include`/`exclude` keywords.
@@ -55,7 +73,6 @@ A smarter news ticker for your server.
 * **Social:** Estimates reading time and can ping specific roles on new posts.
 
 ### 🐦 XFeed (`xfeed`)
-
 Track social media without breaking the bank (or API limits).
 
 * **Budget Mode:** Smart polling designed to stay within the strict Free Tier API limits.
@@ -70,6 +87,7 @@ To get these running, you'll need [Red Discord Bot V3](https://docs.discord.red/
 ### Step 1: Add the Repository
 
 Load the downloader and add the repo:
+[p]repo add malvincogs https://github.com/malvinarum/malvincogs
 
 ### Step 2: Install a Cog
 
@@ -79,8 +97,12 @@ Pick the cog you want and install it.
 
 ### Step 3: Load and Configure
 
-Load the cog and check its specific setup command:
+Load the cog and check its specific setup command.
+
 **Common Setup Commands:**
+* `[p]dockerpanel` (Spawns Docker Control)
+* `[p]systemd panel` (Spawns Systemd Control)
+* `[p]streamset` (Stream Sentry Config)
 * `[p]pw setup` (Palworld)
 * `[p]tw setup` (Torrents)
 * `[p]sysmon setchannel` (System Monitor)
