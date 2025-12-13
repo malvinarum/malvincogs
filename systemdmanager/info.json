@@ -1,0 +1,11 @@
+{
+    "author": ["Malvinarum"],
+    "name": "SystemdManager",
+    "version": "1.0.0",
+    "description": "Manage Linux systemd services (Start/Stop/Restart) via a Discord persistent panel.",
+    "short": "Control Systemd services from Discord.",
+    "requirements": [],
+    "tags": ["system", "linux", "admin", "panel"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "⚠️ **IMPORTANT**: This cog requires the bot's user to have NOPASSWD sudo access to `/bin/systemctl` on the host machine.\n\nRun `sudo visudo` and add:\n`your_user ALL=(root) NOPASSWD: /bin/systemctl`\n\nWithout this, commands will fail silently or return permission errors."
+}
