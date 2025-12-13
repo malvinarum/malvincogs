@@ -9,7 +9,7 @@ from redbot.core.utils.chat_formatting import box, pagify
 log = logging.getLogger("red.malvincogs.dockermanager")
 
 
-# --- UTILITY FUNCTIONS ---
+# --- UTILITIES ---
 
 def calculate_cpu_percent(d):
     """Calculate CPU % from Docker stats object."""
@@ -30,7 +30,6 @@ def calculate_cpu_percent(d):
 def get_container_snapshot(container):
     """Gets name, status, and stats snapshot for a single container."""
     try:
-        # Get Stats if running
         stats = None
         if container.status == "running":
             stats = container.stats(stream=False)
@@ -93,12 +92,11 @@ class ContainerSelect(discord.ui.Select):
         self.cog = cog
         options = []
         for c in containers:
-            # Status Emoji
             emoji = "🟢" if c.status == "running" else "🔴"
             desc = f"ID: {c.short_id} | {c.status.upper()}"
             options.append(discord.SelectOption(
                 label=c.name[:100],
-                value=c.id,  # Use full ID for value
+                value=c.id,
                 description=desc,
                 emoji=emoji
             ))
@@ -107,7 +105,6 @@ class ContainerSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         container_id = self.values[0]
-        # Send ephemeral control panel
         view = ContainerControlView(self.cog, container_id)
         await interaction.response.send_message(
             f"🎮 **Management Console**: `{container_id[:12]}`",
@@ -117,28 +114,39 @@ class ContainerSelect(discord.ui.Select):
 
 
 class DockerDashboardView(discord.ui.View):
-    """The Main Dashboard View (Embeds + Dropdown)."""
+    """The Main Dashboard View."""
 
-    def __init__(self, cog, ctx):
-        super().__init__(timeout=None)  # Persistent-ish
+    def __init__(self, cog, channel):
+        super().__init__(timeout=None)  # Persistent
         self.cog = cog
-        self.ctx = ctx
+        self.channel = channel  # We store channel, not ctx, for persistence
         self.message = None
         self._task = None
         self._updating = False
 
-    async def start(self):
+    async def start(self, message=None):
+        """Starts the view. If message is provided, it resumes an existing dashboard."""
+        self.message = message
+        # Trigger one immediate refresh
         await self.refresh_view()
+        # Start the loop
         self._task = asyncio.create_task(self.update_loop())
+
+    async def stop(self):
+        if self._task: self._task.cancel()
 
     async def update_loop(self):
         await self.cog.bot.wait_until_ready()
         while True:
-            await asyncio.sleep(30.0)  # 30s refresh for stats
+            await asyncio.sleep(30.0)  # 30s refresh
             try:
+                # If we have a message reference, try to update it.
                 if self.message: await self.refresh_view()
-            except Exception:
-                if self.message: break  # Stop if message deleted
+            except Exception as e:
+                log.error(f"Dashboard Loop Error: {e}")
+                # If message is deleted/not found, we can't do anything.
+                # Ideally we check error type, but for now we just keep trying or break
+                pass
 
     async def refresh_view(self):
         if self._updating: return
@@ -148,12 +156,10 @@ class DockerDashboardView(discord.ui.View):
             client = await self.cog._get_client()
             if not client: return
 
-            # 1. Get Containers (Top 25 max due to Select Menu limit)
             containers = await self.cog.bot.loop.run_in_executor(
                 None, lambda: client.containers.list(all=True)[:25]
             )
 
-            # 2. Parallel Fetch Stats
             tasks = [
                 self.cog.bot.loop.run_in_executor(None, functools.partial(get_container_snapshot, c))
                 for c in containers
@@ -162,15 +168,10 @@ class DockerDashboardView(discord.ui.View):
 
             embeds = []
 
-            # --- Build Embeds ---
             if not results:
                 embeds.append(discord.Embed(description="No containers found.", color=discord.Color.dark_grey()))
 
-            # We limit embeds to 10 (Discord Limit).
-            # If > 10 containers, they show in Dropdown but not all have embeds.
             for container, stats in results[:10]:
-
-                # --- Stats Formatting ---
                 status_icon = "🟢" if container.status == "running" else "🔴" if container.status == "exited" else "🟡"
                 color = discord.Color.from_rgb(46, 204,
                                                113) if container.status == "running" else discord.Color.from_rgb(231,
@@ -183,16 +184,8 @@ class DockerDashboardView(discord.ui.View):
                     mem_usage = stats.get("memory_stats", {}).get("usage", 0)
                     mem_limit = stats.get("memory_stats", {}).get("limit", 1)
                     mem_pct = (mem_usage / mem_limit) * 100.0
-
-                    # Net I/O
-                    net = stats.get('networks', {})
-                    rx = sum(v['rx_bytes'] for v in net.values())
-                    tx = sum(v['tx_bytes'] for v in net.values())
-
                     stats_text += f"\n**CPU:** `{cpu_pct:.1f}%`  **RAM:** `{mem_usage / 1024 / 1024:.0f}MB` ({mem_pct:.0f}%)"
-                    # stats_text += f"\n**Net:** ⬇️`{rx/1024/1024:.1f}MB` ⬆️`{tx/1024/1024:.1f}MB`"
 
-                # Truncate image name
                 image_name = container.image.tags[0].split(':')[0] if container.image.tags else "unknown"
                 if len(image_name) > 25: image_name = image_name[:24] + "…"
 
@@ -200,27 +193,31 @@ class DockerDashboardView(discord.ui.View):
                 embed.set_footer(text=f"ID: {container.short_id} • {image_name}")
                 embeds.append(embed)
 
-            # --- Build View (Dropdown) ---
             self.clear_items()
 
-            # Add Select Menu
             if containers:
                 self.add_item(ContainerSelect(self.cog, containers))
 
-            # Add Force Refresh Button
             refresh_btn = discord.ui.Button(label="Force Refresh", style=discord.ButtonStyle.secondary, emoji="🔃",
                                             custom_id="force_refresh")
             refresh_btn.callback = self.on_refresh_click
             self.add_item(refresh_btn)
 
-            # --- Send/Edit ---
+            # Send New or Edit Existing
             if not self.message:
-                self.message = await self.ctx.send(embeds=embeds, view=self)
+                self.message = await self.channel.send(content="**Docker Mission Control**", embeds=embeds, view=self)
+                # SAVE TO CONFIG
+                await self.cog.config.dashboard_channel.set(self.channel.id)
+                await self.cog.config.dashboard_message.set(self.message.id)
             else:
                 await self.message.edit(embeds=embeds, view=self)
 
         except discord.NotFound:
+            # Message was deleted manually
             if self._task: self._task.cancel()
+            await self.cog.config.dashboard_channel.set(None)
+            await self.cog.config.dashboard_message.set(None)
+            self.message = None
         except Exception as e:
             log.error(f"Dashboard build error: {e}")
         finally:
@@ -239,10 +236,54 @@ class DockerManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9988776655, force_registration=True)
-        default_global = {"base_url": None}
+        default_global = {
+            "base_url": None,
+            "dashboard_channel": None,
+            "dashboard_message": None
+        }
         self.config.register_global(**default_global)
         self.client = None
         self.dashboard_view = None
+
+    async def cog_load(self):
+        """Called when bot loads. Revive dashboard."""
+        log.info("DockerManager loading...")
+        await self._get_client()  # Pre-load client
+        await self._resume_dashboard()
+
+    async def cog_unload(self):
+        """Cleanup tasks."""
+        if self.dashboard_view:
+            await self.dashboard_view.stop()
+        if self.client:
+            self.client.close()
+
+    async def _resume_dashboard(self):
+        """Attempts to find and reconnect to the saved dashboard message."""
+        chan_id = await self.config.dashboard_channel()
+        msg_id = await self.config.dashboard_message()
+
+        if not chan_id or not msg_id:
+            return
+
+        channel = self.bot.get_channel(chan_id)
+        if not channel:
+            return
+
+        try:
+            message = await channel.fetch_message(msg_id)
+            log.info(f"Resuming Docker Dashboard on message {msg_id}")
+
+            self.dashboard_view = DockerDashboardView(self, channel)
+            # Reconnect view to the message object found
+            await self.dashboard_view.start(message=message)
+
+        except discord.NotFound:
+            log.warning("Saved dashboard message not found. Clearing config.")
+            await self.config.dashboard_channel.set(None)
+            await self.config.dashboard_message.set(None)
+        except Exception as e:
+            log.error(f"Failed to resume dashboard: {e}")
 
     async def _get_client(self):
         if self.client:
@@ -269,16 +310,23 @@ class DockerManager(commands.Cog):
 
     @docker_group.command(name="dashboard", aliases=["panel"])
     async def docker_dashboard(self, ctx: commands.Context):
-        """Opens the live Mission Control dashboard with stats."""
+        """
+        Opens or moves the live Mission Control dashboard.
+        Updates every 30 seconds. Persists across reboots.
+        """
         client = await self._get_client()
         if not client: return await ctx.send("❌ Connection failed.")
 
         # Stop old task if running to prevent duplicates
-        if self.dashboard_view and self.dashboard_view._task:
-            self.dashboard_view._task.cancel()
+        if self.dashboard_view:
+            await self.dashboard_view.stop()
+            # Optional: Delete old message to avoid clutter?
+            # if self.dashboard_view.message:
+            #     try: await self.dashboard_view.message.delete()
+            #     except: pass
 
-        self.dashboard_view = DockerDashboardView(self, ctx)
-        await self.dashboard_view.start()
+        self.dashboard_view = DockerDashboardView(self, ctx.channel)
+        await self.dashboard_view.start()  # This creates a NEW message and saves IDs
 
     @docker_group.command(name="config")
     async def docker_config(self, ctx: commands.Context, url: str = None):
