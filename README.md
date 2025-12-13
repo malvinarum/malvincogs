@@ -15,7 +15,6 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 
 ### 🐳 Docker Manager (`dockermanager`)
 **New!** Manage your Docker containers without leaving Discord.
-<img width="537" height="384" alt="image" src="https://github.com/user-attachments/assets/aee20dcb-eaa5-484d-ac3b-ea4c080ea257" />
 
 ![Docker Manager Panel](https://github.com/user-attachments/assets/aee20dcb-eaa5-484d-ac3b-ea4c080ea257)
 
@@ -26,7 +25,6 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 
 ### 🐧 Systemd Manager (`systemdmanager`)
 **New!** Control Linux services directly from chat. Perfect for managing game servers or web backends.
-<img width="476" height="499" alt="image" src="https://github.com/user-attachments/assets/9fdb87ed-ee40-4e88-a44e-3acdcae4071f" />
 
 ![Systemd Manager Panel](https://github.com/user-attachments/assets/9fdb87ed-ee40-4e88-a44e-3acdcae4071f)
 
@@ -44,7 +42,6 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 
 ### 🦖 PalworldWatch (`palworldwatch`)
 Your mission control for Palworld! Keep an eye on your server stats like a hawk.
-<img width="427" height="290" alt="image" src="https://github.com/user-attachments/assets/4b68288e-294c-47ff-b0a8-1c8ea8354d2c" />
 
 ![Palworld Watch](https://github.com/user-attachments/assets/4b68288e-294c-47ff-b0a8-1c8ea8354d2c)
 
@@ -54,7 +51,6 @@ Your mission control for Palworld! Keep an eye on your server stats like a hawk.
 
 ### 🎬 Plex Activity (`plexactivity`)
 The ultimate "Now Playing" dashboard. Flex your media library!
-<img width="380" height="415" alt="image" src="https://github.com/user-attachments/assets/642babb5-889e-4f4d-b2ab-510fdcf0620d" />
 
 ![Plex Activity](https://github.com/user-attachments/assets/642babb5-889e-4f4d-b2ab-510fdcf0620d)
 
@@ -65,7 +61,6 @@ The ultimate "Now Playing" dashboard. Flex your media library!
 
 ### 📥 Torrents Watch (`torrentswatch`)
 A set-it-and-forget-it download monitor for **qBittorrent**.
-<img width="359" height="175" alt="image" src="https://github.com/user-attachments/assets/e1960704-6286-4611-9406-dddbc9ddd96e" />
 
 ![Torrents Watch](https://github.com/user-attachments/assets/e1960704-6286-4611-9406-dddbc9ddd96e)
 
@@ -75,7 +70,6 @@ A set-it-and-forget-it download monitor for **qBittorrent**.
 
 ### 🖥️ System Monitor (`systemmonitor`)
 Check your server's pulse at a glance.
-<img width="447" height="474" alt="image" src="https://github.com/user-attachments/assets/fee81530-25c7-4e1d-a0fb-2d11b7d4cbf1" />
 
 ![System Monitor](https://github.com/user-attachments/assets/fee81530-25c7-4e1d-a0fb-2d11b7d4cbf1)
 
