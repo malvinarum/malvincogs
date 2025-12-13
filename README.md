@@ -5,7 +5,7 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 ## 📦 The Cogs
 
 ### 🎮 Draper Bundle (`draperbundle`)
-**New!** A massive suite of community and gaming utilities created by [DraperSniper](https://github.com/Drapersniper), (updated & maintaned by Malvinarum).
+**New!** A massive suite of community and gaming utilities created by [DraperSniper](https://github.com/Drapersniper), (updated & maintained by Malvinarum).
 
 * **Gaming Profiles (`[p]gprofile`):** Let users set up profiles with their region, timezone, and linked game accounts (Steam, Battle.net, etc.). Auto-manages roles based on region!
 * **PC Specs (`[p]specs`):** Allow members to flex their rigs. Tracks CPU, GPU, RAM, and more.
@@ -16,6 +16,8 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 ### 🐳 Docker Manager (`dockermanager`)
 **New!** Manage your Docker containers without leaving Discord.
 
+![Docker Manager Panel](https://github.com/user-attachments/assets/aee20dcb-eaa5-484d-ac3b-ea4c080ea257)
+
 * **Interactive Panel:** A persistent dashboard showing container status (🟢 Running / 🔴 Stopped).
 * **Control:** Start, Stop, and Restart containers via dropdowns and buttons.
 * **Secure:** Locked to the bot owner to prevent unauthorized access.
@@ -23,6 +25,8 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 
 ### 🐧 Systemd Manager (`systemdmanager`)
 **New!** Control Linux services directly from chat. Perfect for managing game servers or web backends.
+
+![Systemd Manager Panel](https://github.com/user-attachments/assets/9fdb87ed-ee40-4e88-a44e-3acdcae4071f)
 
 * **Service Control:** Start, Stop, and Restart services (e.g., `nginx`, `plexmediaserver`) via a persistent panel.
 * **Dynamic Config:** Add services to the monitoring list on the fly (`[p]systemd add <service>`).
@@ -39,12 +43,16 @@ Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for po
 ### 🦖 PalworldWatch (`palworldwatch`)
 Your mission control for Palworld! Keep an eye on your server stats like a hawk.
 
+![Palworld Watch](https://github.com/user-attachments/assets/4b68288e-294c-47ff-b0a8-1c8ea8354d2c)
+
 * **Live Telemetry:** Watch FPS, CPU, and RAM usage in real-time via the REST API and process monitoring.
 * **Population:** See who's online and their levels.
 * **Visuals:** Custom images for when the server is up or down.
 
 ### 🎬 Plex Activity (`plexactivity`)
 The ultimate "Now Playing" dashboard. Flex your media library!
+
+![Plex Activity](https://github.com/user-attachments/assets/642babb5-889e-4f4d-b2ab-510fdcf0620d)
 
 * **Rich Metadata:** Grabs movie posters from TMDB and audiobook covers from Google Books.
 * **Tech Specs:** Nerd stats! See transcoding status, bitrate, and player device.
@@ -54,12 +62,16 @@ The ultimate "Now Playing" dashboard. Flex your media library!
 ### 📥 Torrents Watch (`torrentswatch`)
 A set-it-and-forget-it download monitor for **qBittorrent**.
 
+![Torrents Watch](https://github.com/user-attachments/assets/e1960704-6286-4611-9406-dddbc9ddd96e)
+
 * **Live Stats:** Real-time download/upload speeds, progress bars, and ETAs.
 * **Smart Sorting:** Prioritizes active downloads and errors so you see what matters.
 * **Auth Support:** Handles cookie-based authentication for newer qBittorrent versions.
 
 ### 🖥️ System Monitor (`systemmonitor`)
 Check your server's pulse at a glance.
+
+![System Monitor](https://github.com/user-attachments/assets/fee81530-25c7-4e1d-a0fb-2d11b7d4cbf1)
 
 * **Hardware:** Keeps tabs on CPU temps, load averages, and RAM usage.
 * **Process Hogs:** Identifies top processes consuming your resources.
