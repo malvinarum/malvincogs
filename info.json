@@ -2,5 +2,6 @@
     "author": ["Malvinarum"],
     "description": "A suite of advanced monitoring and utility cogs for Redbot, focusing on media servers, game servers, and system telemetry.",
     "short": "Malvin's Server Utilities",
-    "install_msg": "Thanks for installing MalvinCogs! Use '[p]help <cog_name>' to see available commands."
+    "install_msg": "Thanks for installing MalvinCogs! Use '[p]help <cog_name>' to see available commands.",
+    "tags": ["monitoring", "plex", "utility", "system", "telemetry"]
 }
