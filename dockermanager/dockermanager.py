@@ -13,9 +13,21 @@ class DockerControlView(discord.ui.View):
         super().__init__(timeout=None)
         self.docker_client = docker_client
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """
+        Security Check: Locks this entire view to the Bot Owner only.
+        """
+        if await interaction.client.is_owner(interaction.user):
+            return True
+
+        await interaction.response.send_message("⛔ You do not have permission to control the Docker Daemon.",
+                                                ephemeral=True)
+        return False
+
     async def generate_latest_options(self):
         """Helper to dynamically generate dropdown options based on current containers."""
         try:
+            # all=True ensures we see STOPPED containers so we can turn them back on
             containers = self.docker_client.containers.list(all=True)
             options = []
 
@@ -76,7 +88,7 @@ class DockerControlView(discord.ui.View):
 
     @discord.ui.button(
         label="Force Refresh",
-        style=discord.ButtonStyle.primary,
+        style=discord.ButtonStyle.secondary,
         emoji="🔄",
         custom_id="docker_mission_control:force_refresh"
     )
@@ -93,13 +105,44 @@ class ContainerActionView(discord.ui.View):
         self.container_name = container_name
         self.docker_client = docker.from_env()
 
-    @discord.ui.button(label="Restart", style=discord.ButtonStyle.danger, emoji="🔁")
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """
+        Security Check: Locks this sub-menu to the Bot Owner only.
+        """
+        if await interaction.client.is_owner(interaction.user):
+            return True
+
+        await interaction.response.send_message("⛔ You do not have permission to manage this container.",
+                                                ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, emoji="▶️")
+    async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            container = self.docker_client.containers.get(self.container_name)
+            container.start()
+            await interaction.followup.send(f"✅ Started `{self.container_name}`", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Restart", style=discord.ButtonStyle.primary, emoji="🔁")
     async def restart_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         try:
             container = self.docker_client.containers.get(self.container_name)
             container.restart()
             await interaction.followup.send(f"✅ Restarted `{self.container_name}`", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            container = self.docker_client.containers.get(self.container_name)
+            container.stop()
+            await interaction.followup.send(f"🛑 Stopped `{self.container_name}`", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
