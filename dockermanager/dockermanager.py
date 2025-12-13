@@ -9,11 +9,10 @@ from redbot.core.utils.chat_formatting import box, pagify
 log = logging.getLogger("red.malvincogs.dockermanager")
 
 
+# --- UTILITY FUNCTIONS ---
+
 def calculate_cpu_percent(d):
-    """
-    Calculate CPU % from Docker stats object.
-    Source: https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
-    """
+    """Calculate CPU % from Docker stats object."""
     try:
         cpu_count = len(d["cpu_stats"]["cpu_usage"]["percpu_usage"])
         cpu_percent = 0.0
@@ -28,26 +27,102 @@ def calculate_cpu_percent(d):
         return 0.0
 
 
-def get_stats_snapshot(container):
-    """Blocking function to get a single snapshot of stats."""
+def get_container_snapshot(container):
+    """Gets name, status, and stats snapshot for a single container."""
     try:
-        # stream=False gets a single snapshot
-        stats = container.stats(stream=False)
-        return container.name, stats
+        # Get Stats if running
+        stats = None
+        if container.status == "running":
+            stats = container.stats(stream=False)
+        return container, stats
     except:
-        return container.name, None
+        return container, None
 
 
-class DockerActionView(discord.ui.View):
+# --- VIEWS ---
+
+class ContainerControlView(discord.ui.View):
     """
-    A persistent view that refreshes the docker status automatically.
+    Ephemeral view: The buttons that appear ONLY when you select a container.
     """
 
-    def __init__(self, cog, ctx, client):
-        super().__init__(timeout=300)
+    def __init__(self, cog, container_id):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.cid = container_id
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, emoji="▶️")
+    async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.do_action(interaction, "start")
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.do_action(interaction, "stop")
+
+    @discord.ui.button(label="Restart", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def restart_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.do_action(interaction, "restart")
+
+    async def do_action(self, interaction, action):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            client = await self.cog._get_client()
+            container = client.containers.get(self.cid)
+
+            def work():
+                if action == "start":
+                    container.start()
+                elif action == "stop":
+                    container.stop()
+                elif action == "restart":
+                    container.restart()
+
+            await self.cog.bot.loop.run_in_executor(None, work)
+            await interaction.followup.send(f"✅ **{container.name}** {action}ed!", ephemeral=True)
+
+            # Force dashboard refresh immediately
+            if self.cog.dashboard_view:
+                await self.cog.dashboard_view.refresh_view()
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+
+class ContainerSelect(discord.ui.Select):
+    def __init__(self, cog, containers):
+        self.cog = cog
+        options = []
+        for c in containers:
+            # Status Emoji
+            emoji = "🟢" if c.status == "running" else "🔴"
+            desc = f"ID: {c.short_id} | {c.status.upper()}"
+            options.append(discord.SelectOption(
+                label=c.name[:100],
+                value=c.id,  # Use full ID for value
+                description=desc,
+                emoji=emoji
+            ))
+
+        super().__init__(placeholder="Select a container to manage...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        container_id = self.values[0]
+        # Send ephemeral control panel
+        view = ContainerControlView(self.cog, container_id)
+        await interaction.response.send_message(
+            f"🎮 **Management Console**: `{container_id[:12]}`",
+            view=view,
+            ephemeral=True
+        )
+
+
+class DockerDashboardView(discord.ui.View):
+    """The Main Dashboard View (Embeds + Dropdown)."""
+
+    def __init__(self, cog, ctx):
+        super().__init__(timeout=None)  # Persistent-ish
         self.cog = cog
         self.ctx = ctx
-        self.client = client
         self.message = None
         self._task = None
         self._updating = False
@@ -56,156 +131,107 @@ class DockerActionView(discord.ui.View):
         await self.refresh_view()
         self._task = asyncio.create_task(self.update_loop())
 
-    async def on_timeout(self):
-        if self._task: self._task.cancel()
-        if self.message:
-            try:
-                for child in self.children: child.disabled = True
-                await self.message.edit(view=self)
-            except:
-                pass
-
     async def update_loop(self):
         await self.cog.bot.wait_until_ready()
         while True:
-            await asyncio.sleep(60.0)
+            await asyncio.sleep(30.0)  # 30s refresh for stats
             try:
-                await self.refresh_view()
-            except Exception as e:
-                log.error(f"Dashboard refresh error: {e}")
-                if self.message is None: break
+                if self.message: await self.refresh_view()
+            except Exception:
+                if self.message: break  # Stop if message deleted
 
     async def refresh_view(self):
         if self._updating: return
         self._updating = True
 
         try:
-            # 1. Get List of Containers
+            client = await self.cog._get_client()
+            if not client: return
+
+            # 1. Get Containers (Top 25 max due to Select Menu limit)
             containers = await self.cog.bot.loop.run_in_executor(
-                None, lambda: self.client.containers.list(all=True)[:10]
+                None, lambda: client.containers.list(all=True)[:25]
             )
 
-            # 2. Parallel Fetch Stats for Running Containers
-            # Docker stats API can be slow, so we gather them concurrently
-            running_containers = [c for c in containers if c.status == "running"]
-            stats_map = {}
-
-            if running_containers:
-                tasks = [
-                    self.cog.bot.loop.run_in_executor(None, functools.partial(get_stats_snapshot, c))
-                    for c in running_containers
-                ]
-                results = await asyncio.gather(*tasks)
-                stats_map = {name: data for name, data in results}
+            # 2. Parallel Fetch Stats
+            tasks = [
+                self.cog.bot.loop.run_in_executor(None, functools.partial(get_container_snapshot, c))
+                for c in containers
+            ]
+            results = await asyncio.gather(*tasks)
 
             embeds = []
-            self.clear_items()
 
-            if not containers:
-                embeds.append(discord.Embed(description="No containers found.", color=discord.Color.light_grey()))
+            # --- Build Embeds ---
+            if not results:
+                embeds.append(discord.Embed(description="No containers found.", color=discord.Color.dark_grey()))
 
-            for c in containers:
-                # --- Stats Calculation ---
-                stats_str = "Offline"
-                color = discord.Color.red()
-                status_icon = "🔴"
+            # We limit embeds to 10 (Discord Limit).
+            # If > 10 containers, they show in Dropdown but not all have embeds.
+            for container, stats in results[:10]:
 
-                if c.status == "running":
-                    color = discord.Color.green()
-                    status_icon = "🟢"
+                # --- Stats Formatting ---
+                status_icon = "🟢" if container.status == "running" else "🔴" if container.status == "exited" else "🟡"
+                color = discord.Color.from_rgb(46, 204,
+                                               113) if container.status == "running" else discord.Color.from_rgb(231,
+                                                                                                                 76, 60)
 
-                    s = stats_map.get(c.name)
-                    if s:
-                        # CPU
-                        cpu_usage = calculate_cpu_percent(s)
+                stats_text = f"**Status:** {container.status.upper()}"
 
-                        # RAM
-                        mem_usage = s.get("memory_stats", {}).get("usage", 0)
-                        mem_limit = s.get("memory_stats", {}).get("limit", 1)
-                        mem_percent = (mem_usage / mem_limit) * 100.0
+                if stats:
+                    cpu_pct = calculate_cpu_percent(stats)
+                    mem_usage = stats.get("memory_stats", {}).get("usage", 0)
+                    mem_limit = stats.get("memory_stats", {}).get("limit", 1)
+                    mem_pct = (mem_usage / mem_limit) * 100.0
 
-                        stats_str = f"**CPU:** `{cpu_usage:.1f}%`  **RAM:** `{mem_usage / 1024 / 1024:.0f}MB` ({mem_percent:.1f}%)"
-                    else:
-                        stats_str = "Fetching stats..."
+                    # Net I/O
+                    net = stats.get('networks', {})
+                    rx = sum(v['rx_bytes'] for v in net.values())
+                    tx = sum(v['tx_bytes'] for v in net.values())
 
-                elif c.status == "exited":
-                    stats_str = f"Exited ({c.attrs['State'].get('ExitCode', '?')})"
+                    stats_text += f"\n**CPU:** `{cpu_pct:.1f}%`  **RAM:** `{mem_usage / 1024 / 1024:.0f}MB` ({mem_pct:.0f}%)"
+                    # stats_text += f"\n**Net:** ⬇️`{rx/1024/1024:.1f}MB` ⬆️`{tx/1024/1024:.1f}MB`"
 
-                # --- Embed ---
-                # Truncate image name for cleaner look
-                img = c.image.tags[0].split(':')[0] if c.image.tags else c.image.short_id
-                if len(img) > 25: img = img[:24] + "…"
+                # Truncate image name
+                image_name = container.image.tags[0].split(':')[0] if container.image.tags else "unknown"
+                if len(image_name) > 25: image_name = image_name[:24] + "…"
 
-                embed = discord.Embed(
-                    title=f"{status_icon} {c.name}",
-                    description=stats_str,
-                    color=color
-                )
-                embed.set_footer(text=f"ID: {c.short_id} • {img}")
+                embed = discord.Embed(title=f"{status_icon} {container.name}", description=stats_text, color=color)
+                embed.set_footer(text=f"ID: {container.short_id} • {image_name}")
                 embeds.append(embed)
 
-                # --- Buttons ---
-                # Label is truncated to 8 chars to fit row
-                label_name = c.name[:8]
+            # --- Build View (Dropdown) ---
+            self.clear_items()
 
-                if c.status == "running":
-                    self.add_item(discord.ui.Button(
-                        style=discord.ButtonStyle.danger,
-                        label=f"Stop {label_name}",
-                        custom_id=f"stop:{c.name}",
-                        emoji="⏹️"
-                    ))
-                    self.add_item(discord.ui.Button(
-                        style=discord.ButtonStyle.secondary,
-                        custom_id=f"restart:{c.name}",
-                        emoji="🔄"
-                    ))
-                else:
-                    self.add_item(discord.ui.Button(
-                        style=discord.ButtonStyle.success,
-                        label=f"Start {label_name}",
-                        custom_id=f"start:{c.name}",
-                        emoji="▶️"
-                    ))
+            # Add Select Menu
+            if containers:
+                self.add_item(ContainerSelect(self.cog, containers))
 
-                # Assign callbacks dynamically
-                for child in self.children:
-                    if not child.callback:
-                        # Extract action and id from custom_id
-                        action, cid = child.custom_id.split(":")
-                        child.callback = functools.partial(self.on_button_click, action=action, container_id=cid)
+            # Add Force Refresh Button
+            refresh_btn = discord.ui.Button(label="Force Refresh", style=discord.ButtonStyle.secondary, emoji="🔃",
+                                            custom_id="force_refresh")
+            refresh_btn.callback = self.on_refresh_click
+            self.add_item(refresh_btn)
 
-            # Send/Edit
+            # --- Send/Edit ---
             if not self.message:
-                self.message = await self.ctx.send(content="**Docker Mission Control**", embeds=embeds, view=self)
+                self.message = await self.ctx.send(embeds=embeds, view=self)
             else:
                 await self.message.edit(embeds=embeds, view=self)
 
         except discord.NotFound:
-            self._task.cancel()
+            if self._task: self._task.cancel()
         except Exception as e:
             log.error(f"Dashboard build error: {e}")
         finally:
             self._updating = False
 
-    async def on_button_click(self, interaction: discord.Interaction, action: str, container_id: str):
+    async def on_refresh_click(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        try:
-            container = self.client.containers.get(container_id)
+        await self.refresh_view()
 
-            def do_work():
-                if action == "start":
-                    container.start()
-                elif action == "stop":
-                    container.stop()
-                elif action == "restart":
-                    container.restart()
 
-            await self.cog.bot.loop.run_in_executor(None, do_work)
-            await self.refresh_view()
-        except Exception as e:
-            await interaction.followup.send(f"Error: {e}", ephemeral=True)
-
+# --- MAIN COG ---
 
 class DockerManager(commands.Cog):
     """Manage Docker containers from Discord."""
@@ -216,6 +242,7 @@ class DockerManager(commands.Cog):
         default_global = {"base_url": None}
         self.config.register_global(**default_global)
         self.client = None
+        self.dashboard_view = None
 
     async def _get_client(self):
         if self.client:
@@ -246,9 +273,12 @@ class DockerManager(commands.Cog):
         client = await self._get_client()
         if not client: return await ctx.send("❌ Connection failed.")
 
-        # Cleanup old view if exists? (Optional logic here)
-        view = DockerActionView(self, ctx, client)
-        await view.start()
+        # Stop old task if running to prevent duplicates
+        if self.dashboard_view and self.dashboard_view._task:
+            self.dashboard_view._task.cancel()
+
+        self.dashboard_view = DockerDashboardView(self, ctx)
+        await self.dashboard_view.start()
 
     @docker_group.command(name="config")
     async def docker_config(self, ctx: commands.Context, url: str = None):
