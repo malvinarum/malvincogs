@@ -1,0 +1,10 @@
+{
+  "author": ["Malvinarum"],
+  "description": "Manage Docker containers directly from Discord. Start, stop, restart, and monitor containers.",
+  "install_msg": "You must have the python docker library installed on the bot's host (`pip install docker`).\nEnsure the bot has permissions to access the docker socket (e.g., add to docker group).",
+  "short": "Docker Container Manager",
+  "requirements": ["docker"],
+  "tags": ["docker", "devops", "server", "utility"],
+  "min_bot_version": "3.5.0",
+  "hidden": false
+}
