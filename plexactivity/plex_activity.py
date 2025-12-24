@@ -32,7 +32,7 @@ DEFAULT_GUILD_SETTINGS = {
     "google_books_api_key": None,
     "spotify_client_id": None,
     "spotify_client_secret": None,
-    "audiobook_libraries": [],  # List of library names that contain audiobooks
+    "audiobook_libraries": [],
     "user_map": {}
 }
 
@@ -151,9 +151,8 @@ class PlexActivity(commands.Cog):
         if not token:
             return None
 
-        # Clean strings for better search accuracy
         clean_artist = re.sub(r"[^a-zA-Z0-9 ]", "", artist)
-        clean_title = re.sub(r"\s*\(.*?\)", "", title)  # Remove (feat. X) etc
+        clean_title = re.sub(r"\s*\(.*?\)", "", title)
 
         search_url = "https://api.spotify.com/v1/search"
         params = {
@@ -173,7 +172,6 @@ class PlexActivity(commands.Cog):
                         album = track.get("album", {})
                         images = album.get("images", [])
                         if images:
-                            # Spotify usually returns [640x640, 300x300, 64x64]. Grab the first (largest).
                             return images[0].get("url")
         except Exception as e:
             log.error(f"Spotify Search Error: {e}")
@@ -197,22 +195,13 @@ class PlexActivity(commands.Cog):
         return None
 
     async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
-        """
-        Searches Google Books API for a cover with smart query cleaning.
-        """
         if not api_key or not title: return None
-
-        # --- CLEAN TITLE LOGIC ---
-        # Remove (Unabridged), (Audiobook), [Dramatized], etc.
         clean_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
-
         query = f"intitle:{clean_title}"
         if author:
             query += f"+inauthor:{author}"
-
         search_url = "https://www.googleapis.com/books/v1/volumes"
         params = {'q': query, 'key': api_key, 'maxResults': 1, 'printType': 'books'}
-
         try:
             async with self.session.get(search_url, params=params) as response:
                 if response.status == 200:
@@ -220,26 +209,17 @@ class PlexActivity(commands.Cog):
                     if "items" in data and len(data["items"]) > 0:
                         volume_info = data["items"][0].get("volumeInfo", {})
                         image_links = volume_info.get("imageLinks", {})
-
-                        # Google API keys: extraLarge, large, medium, small, thumbnail, smallThumbnail
                         url = image_links.get("extraLarge") or \
                               image_links.get("large") or \
                               image_links.get("medium") or \
                               image_links.get("thumbnail") or \
                               image_links.get("smallThumbnail")
-
                         if url:
-                            # Force HTTPS
                             if url.startswith("http://"):
                                 url = url.replace("http://", "https://")
-                            log.info(f"Google Books found cover for '{clean_title}': {url}")
                             return url
-                    else:
-                        log.info(f"Google Books found NO results for '{clean_title}' by '{author}'")
-                else:
-                    log.error(f"Google Books API Error: {response.status}")
-        except Exception as e:
-            log.error(f"Google Books Fetch Exception: {e}")
+        except Exception:
+            pass
         return None
 
     async def _get_plex_sessions(self, guild_id: int):
@@ -295,7 +275,6 @@ class PlexActivity(commands.Cog):
                         duration_ms = int(session_elem.get("duration", "1"))
                         year = session_elem.get("year")
                         
-                        # Identify Library to distinguish Music vs Audiobooks
                         library_name = session_elem.get("librarySectionTitle", "")
                         is_audiobook = library_name in audiobook_libs
 
@@ -312,8 +291,27 @@ class PlexActivity(commands.Cog):
                         device = player_elem.get("product", "Unknown Device")
                         state = player_elem.get("state", "playing")
 
-                        bitrate_kbps = int(media_elem.get("bitrate", 0)) if media_elem is not None else 0
-                        bandwidth_str = f"{bitrate_kbps / 1000:.1f} Mbps" if bitrate_kbps > 0 else "Unknown"
+                        # --- BITRATE FIX ---
+                        bitrate_kbps = 0
+                        if media_elem is not None:
+                            # Try Media attribute first
+                            bitrate_kbps = int(media_elem.get("bitrate", 0))
+                            # If missing/zero, check the Part tag (common for Music)
+                            if bitrate_kbps == 0:
+                                part_elem = media_elem.find("Part")
+                                if part_elem is not None:
+                                    bitrate_kbps = int(part_elem.get("bitrate", 0))
+
+                        # Smart formatting
+                        if bitrate_kbps > 0:
+                            # If it's music or low bitrate, show kbps. Otherwise Mbps.
+                            if bitrate_kbps < 1000 or (media_type in ['track', 'audio']):
+                                bandwidth_str = f"{bitrate_kbps} kbps"
+                            else:
+                                bandwidth_str = f"{bitrate_kbps / 1000:.1f} Mbps"
+                        else:
+                            bandwidth_str = "Unknown"
+                        # -------------------
 
                         stream_info = "Direct Play"
                         if transcode_elem is not None:
@@ -328,25 +326,21 @@ class PlexActivity(commands.Cog):
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
-                        # 2. AUDIOBOOK STRATEGY
+                        # 2. Audiobook -> Google Books
                         if (media_type == 'track' or media_type == 'audio') and is_audiobook:
-                            # Prefer Google Books for Audiobooks
                             if gb_key:
                                 book_title = album_name or media_title
                                 author = artist_name or ""
                                 image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
-                            # Fallback to Spotify if GB fails
                             if not image_url and spotify_id and spotify_secret:
                                 image_url = await self._fetch_spotify_metadata(spotify_id, spotify_secret, artist_name, media_title)
 
-                        # 3. MUSIC STRATEGY
+                        # 3. Music -> Spotify
                         elif (media_type == 'track' or media_type == 'audio') and not is_audiobook:
-                             # Prefer Spotify for Music
                             if spotify_id and spotify_secret:
                                 image_url = await self._fetch_spotify_metadata(spotify_id, spotify_secret, artist_name, media_title)
-                             # No Google Books fallback for music (usually returns weird results)
 
-                        # 4. Fallback -> Plex Internal
+                        # 4. Fallback -> Plex
                         if not image_url:
                             thumb_path = None
                             if media_type == 'track' or media_type == 'audio':
@@ -363,7 +357,7 @@ class PlexActivity(commands.Cog):
                             "user_thumb": user_thumb,
                             "discord_id": discord_id,
                             "type": media_type,
-                            "is_audiobook": is_audiobook, # Pass flag to embed generator
+                            "is_audiobook": is_audiobook,
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
                             "current_ms": view_offset_ms,
@@ -446,14 +440,12 @@ class PlexActivity(commands.Cog):
             
             elif media_type == "track" or media_type == "audio":
                 if is_audiobook:
-                    # Audiobook Format
                     book_title = session.get("album") or "Unknown Book"
                     chapter_title = session.get("title")
                     author = session.get("artist") or "Unknown Author"
                     embed.title = book_title
                     embed.description = f"**{chapter_title}**\n✍️ *{author}*"
                 else:
-                    # Music Format
                     track_title = session.get("title")
                     artist = session.get("artist") or "Unknown Artist"
                     album = session.get("album")
@@ -462,7 +454,6 @@ class PlexActivity(commands.Cog):
                          embed.description = f"👤 **{artist}**\n💿 *{album}*"
                     else:
                          embed.description = f"👤 **{artist}**"
-
             else:
                 embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
