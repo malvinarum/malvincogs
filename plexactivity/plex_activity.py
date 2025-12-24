@@ -4,7 +4,7 @@ import logging
 import io
 import urllib.parse
 import re
-import time  # Added for token expiry checks
+import time
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
@@ -32,6 +32,7 @@ DEFAULT_GUILD_SETTINGS = {
     "google_books_api_key": None,
     "spotify_client_id": None,
     "spotify_client_secret": None,
+    "audiobook_libraries": [],  # List of library names that contain audiobooks
     "user_map": {}
 }
 
@@ -249,6 +250,7 @@ class PlexActivity(commands.Cog):
         gb_key = settings.get("google_books_api_key")
         spotify_id = settings.get("spotify_client_id")
         spotify_secret = settings.get("spotify_client_secret")
+        audiobook_libs = settings.get("audiobook_libraries", [])
         user_map = settings.get("user_map", {})
 
         if not plex_url or not plex_token: return []
@@ -292,6 +294,10 @@ class PlexActivity(commands.Cog):
                         view_offset_ms = int(session_elem.get("viewOffset", "0"))
                         duration_ms = int(session_elem.get("duration", "1"))
                         year = session_elem.get("year")
+                        
+                        # Identify Library to distinguish Music vs Audiobooks
+                        library_name = session_elem.get("librarySectionTitle", "")
+                        is_audiobook = library_name in audiobook_libs
 
                         current_time_formatted = self._format_milliseconds_to_time(view_offset_ms)
                         total_duration_formatted = self._format_milliseconds_to_time(duration_ms)
@@ -322,19 +328,23 @@ class PlexActivity(commands.Cog):
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
-                        # 2. Audio -> Spotify
-                        if (media_type == 'track' or media_type == 'audio') and spotify_id and spotify_secret and not image_url:
-                            image_url = await self._fetch_spotify_metadata(spotify_id, spotify_secret, artist_name, media_title)
-                            if image_url:
-                                log.info(f"Spotify found cover for {media_title}")
+                        # 2. AUDIOBOOK STRATEGY
+                        if (media_type == 'track' or media_type == 'audio') and is_audiobook:
+                            # Prefer Google Books for Audiobooks
+                            if gb_key:
+                                book_title = album_name or media_title
+                                author = artist_name or ""
+                                image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
+                            # Fallback to Spotify if GB fails
+                            if not image_url and spotify_id and spotify_secret:
+                                image_url = await self._fetch_spotify_metadata(spotify_id, spotify_secret, artist_name, media_title)
 
-                        # 3. Audio -> Google Books API (Fallback)
-                        if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
-                            # Use Parent Title (Book Name) if available, else Title (Chapter Name?)
-                            # Usually album_name holds the Book Title for Audiobooks
-                            book_title = album_name or media_title
-                            author = artist_name or ""
-                            image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
+                        # 3. MUSIC STRATEGY
+                        elif (media_type == 'track' or media_type == 'audio') and not is_audiobook:
+                             # Prefer Spotify for Music
+                            if spotify_id and spotify_secret:
+                                image_url = await self._fetch_spotify_metadata(spotify_id, spotify_secret, artist_name, media_title)
+                             # No Google Books fallback for music (usually returns weird results)
 
                         # 4. Fallback -> Plex Internal
                         if not image_url:
@@ -353,6 +363,7 @@ class PlexActivity(commands.Cog):
                             "user_thumb": user_thumb,
                             "discord_id": discord_id,
                             "type": media_type,
+                            "is_audiobook": is_audiobook, # Pass flag to embed generator
                             "current_time": current_time_formatted,
                             "total_duration": total_duration_formatted,
                             "current_ms": view_offset_ms,
@@ -387,6 +398,7 @@ class PlexActivity(commands.Cog):
             user = session.get("user", "Unknown")
             discord_id = session.get("discord_id")
             media_type = session.get("type")
+            is_audiobook = session.get("is_audiobook", False)
             device = session.get("device")
             image_url = session.get("image_url")
             state = session.get("state")
@@ -404,7 +416,10 @@ class PlexActivity(commands.Cog):
             elif media_type == 'episode':
                 color = discord.Color.blue()
             elif media_type == 'track':
-                color = discord.Color.teal()
+                if is_audiobook:
+                    color = discord.Color.gold()
+                else:
+                    color = discord.Color.teal()
             else:
                 color = discord.Color.purple()
 
@@ -416,7 +431,9 @@ class PlexActivity(commands.Cog):
             user_icon = session.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png"
 
             verb = "is watching..."
-            if media_type == "track" or media_type == "audio":
+            if is_audiobook:
+                verb = "is listening to an Audiobook 📖"
+            elif media_type == "track" or media_type == "audio":
                 verb = "is listening to..."
 
             embed.set_author(name=f"{user} {verb}", icon_url=user_icon)
@@ -426,16 +443,26 @@ class PlexActivity(commands.Cog):
                 e_num = int(session.get("episode_num")) if session.get("episode_num") else 0
                 embed.title = session.get("series_title")
                 embed.description = f"**{session.get('title')}**\n`S{s_num:02}E{e_num:02}`"
-            elif media_type == "track":
-                book_title = session.get("album")
-                chapter_title = session.get("title")
-                author = session.get("artist") or "Unknown Author"
-                if book_title:
+            
+            elif media_type == "track" or media_type == "audio":
+                if is_audiobook:
+                    # Audiobook Format
+                    book_title = session.get("album") or "Unknown Book"
+                    chapter_title = session.get("title")
+                    author = session.get("artist") or "Unknown Author"
                     embed.title = book_title
                     embed.description = f"**{chapter_title}**\n✍️ *{author}*"
                 else:
-                    embed.title = chapter_title
-                    embed.description = f"✍️ *{author}*"
+                    # Music Format
+                    track_title = session.get("title")
+                    artist = session.get("artist") or "Unknown Artist"
+                    album = session.get("album")
+                    embed.title = track_title
+                    if album:
+                         embed.description = f"👤 **{artist}**\n💿 *{album}*"
+                    else:
+                         embed.description = f"👤 **{artist}**"
+
             else:
                 embed.title = session.get("title")
                 embed.description = f"*{media_type.capitalize()}*"
@@ -586,6 +613,45 @@ class PlexActivity(commands.Cog):
             msg += f"`{p_user}` ➡️ {name}\n"
 
         await ctx.send(msg)
+    
+    # --- AUDIOBOOK LIBRARY MANAGEMENT ---
+    @plex.group(name="audiobooks")
+    async def plex_audiobooks(self, ctx: commands.Context):
+        """Manage Audiobook Libraries."""
+        pass
+
+    @plex_audiobooks.command(name="add")
+    async def plex_audiobooks_add(self, ctx: commands.Context, *, library_name: str):
+        """
+        Add a Plex library to the Audiobook list.
+        Exact name required (case-sensitive usually).
+        """
+        async with self.config.guild(ctx.guild).audiobook_libraries() as libs:
+            if library_name not in libs:
+                libs.append(library_name)
+                await ctx.send(f"✅ Added `{library_name}` to Audiobook libraries.")
+            else:
+                await ctx.send(f"⚠️ `{library_name}` is already in the list.")
+
+    @plex_audiobooks.command(name="remove")
+    async def plex_audiobooks_remove(self, ctx: commands.Context, *, library_name: str):
+        """Remove a library from the Audiobook list."""
+        async with self.config.guild(ctx.guild).audiobook_libraries() as libs:
+            if library_name in libs:
+                libs.remove(library_name)
+                await ctx.send(f"🗑️ Removed `{library_name}` from Audiobook libraries.")
+            else:
+                await ctx.send(f"⚠️ `{library_name}` not found in list.")
+
+    @plex_audiobooks.command(name="list")
+    async def plex_audiobooks_list(self, ctx: commands.Context):
+        """List configured Audiobook libraries."""
+        libs = await self.config.guild(ctx.guild).audiobook_libraries()
+        if not libs:
+            await ctx.send("No Audiobook libraries configured.")
+        else:
+            await ctx.send(f"**Audiobook Libraries:**\n" + "\n".join([f"- {x}" for x in libs]))
+    # ------------------------------------
 
     @plex.command(name="status")
     async def plex_status(self, ctx: commands.Context):
@@ -598,6 +664,7 @@ class PlexActivity(commands.Cog):
             f"Google Books Key: {'Set' if data.get('google_books_api_key') else 'Missing'}\n"
             f"Spotify Creds: {'Set' if data.get('spotify_client_id') else 'Missing'}\n"
             f"Channel: {data['activity_channel']}\n"
+            f"Audiobook Libs: {data.get('audiobook_libraries')}\n"
             f"Mapped Users: {len(data.get('user_map', {}))}"
         ))
 
