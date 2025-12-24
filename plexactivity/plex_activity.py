@@ -3,7 +3,8 @@ import aiohttp
 import logging
 import io
 import urllib.parse
-import re  # Added for regex cleaning
+import re
+import time  # Added for token expiry checks
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
@@ -29,6 +30,8 @@ DEFAULT_GUILD_SETTINGS = {
     "update_interval": 60,
     "tmdb_api_key": None,
     "google_books_api_key": None,
+    "spotify_client_id": None,
+    "spotify_client_secret": None,
     "user_map": {}
 }
 
@@ -36,7 +39,7 @@ DEFAULT_GUILD_SETTINGS = {
 class PlexActivity(commands.Cog):
     """
     A Redbot cog to track and display Plex Media Server activity.
-    Features: TMDB, Google Books, Dynamic Colors, Tech Specs, User Mapping!
+    Features: TMDB, Google Books, Spotify, Dynamic Colors, Tech Specs, User Mapping!
     """
 
     def __init__(self, bot):
@@ -46,6 +49,10 @@ class PlexActivity(commands.Cog):
         self.session = aiohttp.ClientSession()
         self._plex_activity_loop_task = None
         self.color_cache = {}
+
+        # Spotify Cache
+        self.spotify_token = None
+        self.spotify_token_expires = 0
 
     async def cog_load(self):
         log.info("PlexActivity cog loaded. Starting activity loop.")
@@ -107,6 +114,70 @@ class PlexActivity(commands.Cog):
                     return color
         except Exception:
             return None
+
+    # --- SPOTIFY HELPERS ---
+    async def _get_spotify_token(self, client_id, client_secret):
+        """Retrieves a valid Bearer token for Spotify."""
+        if self.spotify_token and time.time() < self.spotify_token_expires:
+            return self.spotify_token
+
+        url = "https://accounts.spotify.com/api/token"
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret
+        }
+        try:
+            async with self.session.post(url, data=data) as resp:
+                if resp.status == 200:
+                    js = await resp.json()
+                    self.spotify_token = js.get("access_token")
+                    # Set expiry (usually 3600s) minus a buffer
+                    self.spotify_token_expires = time.time() + js.get("expires_in", 3600) - 60
+                    return self.spotify_token
+                else:
+                    log.error(f"Spotify Auth Failed: {resp.status} - {await resp.text()}")
+        except Exception as e:
+            log.error(f"Spotify Token Error: {e}")
+        return None
+
+    async def _fetch_spotify_metadata(self, client_id, client_secret, artist, title):
+        """Searches Spotify for a track and returns the album art URL."""
+        if not client_id or not client_secret or not artist or not title:
+            return None
+
+        token = await self._get_spotify_token(client_id, client_secret)
+        if not token:
+            return None
+
+        # Clean strings for better search accuracy
+        clean_artist = re.sub(r"[^a-zA-Z0-9 ]", "", artist)
+        clean_title = re.sub(r"\s*\(.*?\)", "", title)  # Remove (feat. X) etc
+
+        search_url = "https://api.spotify.com/v1/search"
+        params = {
+            "q": f"artist:{clean_artist} track:{clean_title}",
+            "type": "track",
+            "limit": "1"
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+
+        try:
+            async with self.session.get(search_url, params=params, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    tracks = data.get("tracks", {}).get("items", [])
+                    if tracks:
+                        track = tracks[0]
+                        album = track.get("album", {})
+                        images = album.get("images", [])
+                        if images:
+                            # Spotify usually returns [640x640, 300x300, 64x64]. Grab the first (largest).
+                            return images[0].get("url")
+        except Exception as e:
+            log.error(f"Spotify Search Error: {e}")
+        return None
+    # -----------------------
 
     async def _fetch_tmdb_poster(self, api_key: str, query: str, media_type: str = 'movie', year: str = None):
         if not api_key: return None
@@ -176,6 +247,8 @@ class PlexActivity(commands.Cog):
         plex_token = settings["plex_token"]
         tmdb_key = settings.get("tmdb_api_key")
         gb_key = settings.get("google_books_api_key")
+        spotify_id = settings.get("spotify_client_id")
+        spotify_secret = settings.get("spotify_client_secret")
         user_map = settings.get("user_map", {})
 
         if not plex_url or not plex_token: return []
@@ -249,7 +322,13 @@ class PlexActivity(commands.Cog):
                             search_type = 'tv' if media_type == 'episode' else 'movie'
                             image_url = await self._fetch_tmdb_poster(tmdb_key, search_query, search_type, year)
 
-                        # 2. Audio -> Google Books API
+                        # 2. Audio -> Spotify
+                        if (media_type == 'track' or media_type == 'audio') and spotify_id and spotify_secret and not image_url:
+                            image_url = await self._fetch_spotify_metadata(spotify_id, spotify_secret, artist_name, media_title)
+                            if image_url:
+                                log.info(f"Spotify found cover for {media_title}")
+
+                        # 3. Audio -> Google Books API (Fallback)
                         if (media_type == 'track' or media_type == 'audio') and gb_key and not image_url:
                             # Use Parent Title (Book Name) if available, else Title (Chapter Name?)
                             # Usually album_name holds the Book Title for Audiobooks
@@ -257,7 +336,7 @@ class PlexActivity(commands.Cog):
                             author = artist_name or ""
                             image_url = await self._fetch_google_books_cover(gb_key, book_title, author)
 
-                        # 3. Fallback -> Plex Internal
+                        # 4. Fallback -> Plex Internal
                         if not image_url:
                             thumb_path = None
                             if media_type == 'track' or media_type == 'audio':
@@ -452,6 +531,16 @@ class PlexActivity(commands.Cog):
         await self.config.guild(ctx.guild).google_books_api_key.set(api_key)
         await ctx.send("✅ Google Books API Key set!")
 
+    @plex.command(name="spotify")
+    async def plex_spotify(self, ctx: commands.Context, client_id: str, client_secret: str):
+        """
+        Set the Spotify Client ID and Secret.
+        Get these from the Spotify Developer Dashboard.
+        """
+        await self.config.guild(ctx.guild).spotify_client_id.set(client_id)
+        await self.config.guild(ctx.guild).spotify_client_secret.set(client_secret)
+        await ctx.send("✅ Spotify credentials set! Music metadata should now be much better.")
+
     @plex.command(name="setchannel")
     async def plex_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for Plex updates."""
@@ -507,6 +596,7 @@ class PlexActivity(commands.Cog):
             f"Token: {'Set' if data['plex_token'] else 'Missing'}\n"
             f"TMDB Key: {'Set' if data['tmdb_api_key'] else 'Missing'}\n"
             f"Google Books Key: {'Set' if data.get('google_books_api_key') else 'Missing'}\n"
+            f"Spotify Creds: {'Set' if data.get('spotify_client_id') else 'Missing'}\n"
             f"Channel: {data['activity_channel']}\n"
             f"Mapped Users: {len(data.get('user_map', {}))}"
         ))
