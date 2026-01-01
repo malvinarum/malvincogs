@@ -2,6 +2,13 @@
 
 Welcome to the "Enterprise Grade" utility cogs for Red Discord Bot! Built for power users running home labs, game servers, and media empires. Basically, cool stuff for your server! 😎
 
+<a href="https://github.com/sponsors/malvinarum">
+  <img src="https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=for-the-badge&logo=github&logoColor=white" alt="Sponsor on GitHub" />
+</a>
+<a href="https://www.buymeacoffee.com/malvinarum">
+  <img src="https://img.shields.io/badge/Buy_Me_A_Coffee-Donate-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me A Coffee" />
+</a>
+
 ## 📦 The Cogs
 
 ### 🎮 Draper Bundle (`draperbundle`)
