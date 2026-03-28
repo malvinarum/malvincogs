@@ -51,7 +51,7 @@ class PlexActivity(commands.Cog):
 
     async def cog_load(self):
         log.info("PlexActivity cog loaded. Starting activity loop.")
-        # Added a slightly more 'real' User-Agent and Accept headers to ensure iTunes response
+        # Create session inside cog_load to ensure it uses the correct event loop
         self.session = aiohttp.ClientSession(headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
@@ -176,7 +176,6 @@ class PlexActivity(commands.Cog):
 
     async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
         if not api_key or not title or not self.session: return None
-        # Clean query for Python 3.11 compatibility
         clean_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
         query = f"intitle:{clean_title}"
         if author:
@@ -457,13 +456,14 @@ class PlexActivity(commands.Cog):
     # --- ITUNES DEBUG COMMAND ---
     @plex.command(name="debugitunes")
     async def plex_debugitunes(self, ctx, *, query: str):
-        """Debug iTunes API search results for a specific query."""
+        """Debug iTunes API results for a specific query."""
         if not self.session:
             return await ctx.send("Error: API Session not initialized.")
 
         await ctx.send(f"🔍 Searching iTunes for: `{query}`...")
         search_url = "https://itunes.apple.com/search"
-        params = {"term": query, "entity": "song", "limit": "10"}
+        # Using a very broad search term just for the debug command
+        params = {"term": query, "entity": "song", "limit": "5"}
 
         try:
             async with self.session.get(search_url, params=params, timeout=10) as resp:
@@ -477,21 +477,16 @@ class PlexActivity(commands.Cog):
                     return await ctx.send("❓ No results found on iTunes.")
 
                 msg = f"✅ Found {len(results)} results.\n\n"
-                for idx, item in enumerate(results[:5], 1):
+                for idx, item in enumerate(results, 1):
                     msg += (
                         f"{idx}. **{item.get('trackName')}** by **{item.get('artistName')}**\n"
                         f"💿 Album: {item.get('collectionName')}\n"
                         f"🖼️ Art: <{item.get('artworkUrl100')}>\n\n"
                     )
 
-                # Check for length and pagify if needed
-                if len(msg) > 2000:
-                    for page in pagify(msg):
-                        await ctx.send(page)
-                else:
-                    await ctx.send(msg)
+                await ctx.send(msg)
 
-                # Test the high-res art upgrade logic
+                # Test the high-res art upgrade logic on the first result
                 top_art = results[0].get('artworkUrl100', '')
                 if top_art:
                     upgraded = top_art.replace("100x100bb", "600x600bb")
