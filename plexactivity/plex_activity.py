@@ -188,8 +188,14 @@ class PlexActivity(commands.Cog):
 
     async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
         if not api_key or not title or not self.session: return None
-        query = f"intitle:{re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()}"
-        if author: query += f"+inauthor:{author}"
+
+        # Pull the regex cleanup out of the f-string to avoid SyntaxError in Python < 3.12
+        clean_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
+        query = f"intitle:{clean_title}"
+
+        if author:
+            query += f"+inauthor:{author}"
+
         params = {'q': query, 'key': api_key, 'maxResults': 1, 'printType': 'books'}
         try:
             async with self.session.get("https://www.googleapis.com/books/v1/volumes", params=params,
@@ -201,8 +207,8 @@ class PlexActivity(commands.Cog):
                         links = info.get("imageLinks", {})
                         url = links.get("extraLarge") or links.get("large") or links.get("thumbnail")
                         if url: return url.replace("http://", "https://")
-        except:
-            pass
+        except Exception as e:
+            log.error(f"Google Books Error: {e}")
         return None
 
     async def _get_plex_sessions(self, guild_id: int):
