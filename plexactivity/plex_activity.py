@@ -51,9 +51,10 @@ class PlexActivity(commands.Cog):
 
     async def cog_load(self):
         log.info("PlexActivity cog loaded. Starting activity loop.")
-        # Create session inside cog_load to ensure it uses the correct event loop
+        # Added a slightly more 'real' User-Agent and Accept headers to ensure iTunes response
         self.session = aiohttp.ClientSession(headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
         })
         if not self._plex_activity_loop_task or self._plex_activity_loop_task.done():
             self._plex_activity_loop_task = self.plex_activity_loop.start()
@@ -175,6 +176,7 @@ class PlexActivity(commands.Cog):
 
     async def _fetch_google_books_cover(self, api_key: str, title: str, author: str):
         if not api_key or not title or not self.session: return None
+        # Clean query for Python 3.11 compatibility
         clean_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
         query = f"intitle:{clean_title}"
         if author:
@@ -451,6 +453,54 @@ class PlexActivity(commands.Cog):
         s = await self.config.guild(ctx.guild).all()
         await ctx.send(
             box(f"URL: {s['plex_url']}\nToken: {'Set' if s['plex_token'] else 'No'}\nChannel: {s['activity_channel']}\nMaps: {len(s['user_map'])}"))
+
+    # --- ITUNES DEBUG COMMAND ---
+    @plex.command(name="debugitunes")
+    async def plex_debugitunes(self, ctx, *, query: str):
+        """Debug iTunes API search results for a specific query."""
+        if not self.session:
+            return await ctx.send("Error: API Session not initialized.")
+
+        await ctx.send(f"🔍 Searching iTunes for: `{query}`...")
+        search_url = "https://itunes.apple.com/search"
+        params = {"term": query, "entity": "song", "limit": "10"}
+
+        try:
+            async with self.session.get(search_url, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    return await ctx.send(f"❌ API returned status `{resp.status}`")
+
+                data = await resp.json()
+                results = data.get("results", [])
+
+                if not results:
+                    return await ctx.send("❓ No results found on iTunes.")
+
+                msg = f"✅ Found {len(results)} results.\n\n"
+                for idx, item in enumerate(results[:5], 1):
+                    msg += (
+                        f"{idx}. **{item.get('trackName')}** by **{item.get('artistName')}**\n"
+                        f"💿 Album: {item.get('collectionName')}\n"
+                        f"🖼️ Art: <{item.get('artworkUrl100')}>\n\n"
+                    )
+
+                # Check for length and pagify if needed
+                if len(msg) > 2000:
+                    for page in pagify(msg):
+                        await ctx.send(page)
+                else:
+                    await ctx.send(msg)
+
+                # Test the high-res art upgrade logic
+                top_art = results[0].get('artworkUrl100', '')
+                if top_art:
+                    upgraded = top_art.replace("100x100bb", "600x600bb")
+                    embed = discord.Embed(title="Art Upgrade Test", description=f"Top match high-res art:\n{upgraded}")
+                    embed.set_image(url=upgraded)
+                    await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(box(f"Exception: {str(e)}", lang="py"))
 
 
 async def setup(bot):
