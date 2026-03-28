@@ -27,7 +27,7 @@ DEFAULT_GUILD_SETTINGS = {
     "plex_token": None,
     "activity_channel": None,
     "activity_message_id": None,
-    "update_interval": 60,
+    "update_interval": 30,  # Faster updates for debugging
     "tmdb_api_key": None,
     "google_books_api_key": None,
     "audiobook_libraries": [],
@@ -47,7 +47,7 @@ class PlexActivity(commands.Cog):
     async def cog_load(self):
         self.session = aiohttp.ClientSession(headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PlexRPC-Bot/2.3",
-            "Accept": "application/json, text/xml"
+            "Accept": "application/xml, text/xml"
         })
         if not self._plex_activity_loop_task or self._plex_activity_loop_task.done():
             self._plex_activity_loop_task = self.plex_activity_loop.start()
@@ -62,6 +62,12 @@ class PlexActivity(commands.Cog):
         s = ms // 1000
         h, m, s = s // 3600, (s % 3600) // 60, s % 60
         return f"{h:02}:{m:02}:{s:02}" if h > 0 else f"{m:02}:{s:02}"
+
+    def _generate_progress_bar(self, current_ms: int, total_ms: int, length: int = 10) -> str:
+        if total_ms == 0: return "░" * length
+        percent = min(1.0, max(0.0, current_ms / total_ms))
+        filled = int(length * percent)
+        return "▓" * filled + "░" * (length - filled)
 
     async def _get_dominant_color(self, url: str):
         if not HAS_PIL or not url or not self.session: return None
@@ -83,7 +89,6 @@ class PlexActivity(commands.Cog):
 
     async def _fetch_itunes_art(self, artist, title, album=None):
         if not artist or not title or not self.session: return None
-        # Clean query for Python 3.11 compatibility
         c_title = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
         params = {"term": f"{artist} {c_title}", "entity": "song", "limit": "20"}
         try:
@@ -111,15 +116,24 @@ class PlexActivity(commands.Cog):
         url = f"{s['plex_url'].rstrip('/')}/status/sessions?X-Plex-Token={s['plex_token']}"
         try:
             async with self.session.get(url, timeout=10) as resp:
-                if resp.status != 200: return []
-                root = ET.fromstring(await resp.text())
+                if resp.status != 200:
+                    log.error(f"Plex API returned {resp.status}")
+                    return []
+
+                raw_xml = await resp.text()
+                root = ET.fromstring(raw_xml)
                 sessions = []
 
-                # Broad search for any active media elements
-                for item in root.findall(".//Video") + root.findall(".//Track") + root.findall(".//Photo"):
+                # Broad iteration: check EVERY element in the XML for playback data
+                for item in root.iter():
+                    if item.tag not in ["Video", "Track", "Photo"]:
+                        continue
+
                     try:
                         u_elem = item.find("User")
                         p_elem = item.find("Player")
+
+                        # If a session lacks a User or Player, it's likely not a real active stream
                         if u_elem is None or p_elem is None: continue
 
                         p_user = u_elem.get("title")
@@ -128,7 +142,8 @@ class PlexActivity(commands.Cog):
                         u_thumb = u_elem.get("thumb")
 
                         if d_id:
-                            member = self.bot.get_guild(guild_id).get_member(d_id)
+                            guild = self.bot.get_guild(guild_id)
+                            member = guild.get_member(d_id) if guild else None
                             if member:
                                 disp_name, u_thumb = member.display_name, member.display_avatar.url
 
@@ -141,7 +156,6 @@ class PlexActivity(commands.Cog):
                         if m_type == 'track':
                             image_url = await self._fetch_itunes_art(artist, title, album)
 
-                        # Fallback to Plex local thumb if metadata fetch fails
                         if not image_url:
                             t_path = item.get("parentThumb") or item.get("thumb") or item.get("art")
                             if t_path: image_url = f"{s['plex_url'].rstrip('/')}{t_path}?X-Plex-Token={s['plex_token']}"
@@ -155,9 +169,14 @@ class PlexActivity(commands.Cog):
                             "device": p_elem.get("product"), "image_url": image_url,
                             "finish_ts": int((datetime.now() + timedelta(milliseconds=max(0, dur - v_off))).timestamp())
                         })
+                        log.info(f"✅ Found active session for {p_user}: {title}")
                     except Exception as e:
                         log.error(f"Error parsing session item: {e}")
-                        continue
+
+                if not sessions:
+                    log.debug(
+                        "Plex MediaContainer found, but no active 'Video', 'Track', or 'Photo' tags with Player data.")
+
                 return sessions
         except Exception as e:
             log.error(f"Plex Session Fetch Error: {e}")
@@ -198,7 +217,7 @@ class PlexActivity(commands.Cog):
             u_str = f"👤 **User:** <@{s['discord_id']}>\n" if s.get('discord_id') else ""
             embed.add_field(name="Tech Specs", value=f"{u_str}📱 **Device:** `{s['device']}`", inline=False)
 
-            if s['image_url'] and not any(x in s['image_url'] for x in ["127.0.0.1", "192.168", "localhost"]):
+            if s['image_url'] and not any(x in str(s['image_url']) for x in ["127.0.0.1", "192.168", "localhost"]):
                 embed.set_thumbnail(url=s['image_url'])
             embeds.append(embed)
         return embeds
@@ -241,7 +260,7 @@ class PlexActivity(commands.Cog):
     async def plex_setup(self, ctx):
         def check(m): return m.author == ctx.author and m.channel == ctx.channel
 
-        await ctx.send("Plex URL (e.g. http://192.168.1.100:32400):")
+        await ctx.send("Plex URL (including port, e.g., http://127.0.0.1:32400):")
         u = (await self.bot.wait_for("message", check=check)).content.strip()
         await ctx.send("Plex Token:")
         t = (await self.bot.wait_for("message", check=check)).content.strip()
@@ -259,22 +278,6 @@ class PlexActivity(commands.Cog):
     async def plex_map(self, ctx, plex_user: str, discord_user: discord.Member):
         async with self.config.guild(ctx.guild).user_map() as m: m[plex_user] = discord_user.id
         await ctx.send(f"✅ Mapped `{plex_user}` to {discord_user.mention}.")
-
-    @plex.command(name="debugmusic")
-    async def plex_debugmusic(self, ctx, *, query: str):
-        """Debug iTunes API search results."""
-        if not self.session: return await ctx.send("Session not initialized.")
-        await ctx.send(f"🔍 Searching iTunes for `{query}`...")
-        try:
-            art = await self._fetch_itunes_art("", query)
-            if art:
-                e = discord.Embed(title="iTunes Result", description=f"Found: {art}")
-                e.set_image(url=art)
-                await ctx.send(embed=e)
-            else:
-                await ctx.send("❌ No results found.")
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
 
 
 async def setup(bot): await bot.add_cog(PlexActivity(bot))
