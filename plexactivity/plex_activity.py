@@ -176,7 +176,6 @@ class PlexActivity(commands.Cog):
                 root = ET.fromstring(await response.text())
                 sessions = []
 
-                # Broad iteration to catch all media
                 for item in root.iter():
                     if item.tag not in ["Video", "Track", "Photo"]:
                         continue
@@ -206,8 +205,10 @@ class PlexActivity(commands.Cog):
                         artist = item.get("grandparentTitle") or item.get("originalTitle")
                         album = item.get("parentTitle")
                         m_type = item.get("type", "media")
+                        year = item.get("year")
+                        season_num = item.get("parentIndex")
+                        episode_num = item.get("index")
 
-                        # --- RESTORED TECH SPECS LOGIC ---
                         bitrate_kbps = 0
                         if media_elem is not None:
                             bitrate_kbps = int(media_elem.get("bitrate", 0))
@@ -225,16 +226,14 @@ class PlexActivity(commands.Cog):
                         if transcode_elem is not None:
                             video_decision = transcode_elem.get("videoDecision", "unknown")
                             stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
-                        # ---------------------------------
 
                         image_url = None
                         if m_type == 'track':
                             image_url = await self._fetch_itunes_metadata(artist, media_title, album)
                         elif m_type in ['movie', 'episode'] and settings.get("tmdb_api_key"):
-                            image_url = await self._fetch_tmdb_poster(settings["tmdb_api_key"],
-                                                                      artist if m_type == 'episode' else media_title,
-                                                                      'tv' if m_type == 'episode' else 'movie',
-                                                                      item.get("year"))
+                            query = artist if m_type == 'episode' else media_title
+                            image_url = await self._fetch_tmdb_poster(settings["tmdb_api_key"], query,
+                                                                      'tv' if m_type == 'episode' else 'movie', year)
 
                         if not image_url:
                             t_path = item.get("parentThumb") or item.get("thumb") or item.get("art")
@@ -244,8 +243,9 @@ class PlexActivity(commands.Cog):
                             "user": display_name, "user_thumb": user_thumb, "discord_id": discord_id,
                             "type": m_type, "current_ms": v_off, "total_ms": dur,
                             "state": p_elem.get("state", "playing"), "device": p_elem.get("product", "Device"),
-                            "stream_info": stream_info, "bandwidth": bandwidth_str,  # Tech specs re-added here
+                            "stream_info": stream_info, "bandwidth": bandwidth_str,
                             "image_url": image_url, "title": media_title, "artist": artist, "album": album,
+                            "year": year, "season_num": season_num, "episode_num": episode_num,
                             "finish_ts": int((datetime.now() + timedelta(milliseconds=max(0, dur - v_off))).timestamp())
                         })
                     except Exception as e:
@@ -262,48 +262,63 @@ class PlexActivity(commands.Cog):
 
         embeds = []
         for s in sessions[:10]:
-            color = discord.Color.teal()
-            if s['type'] == 'episode':
-                color = discord.Color.blue()
-            elif s['type'] == 'movie':
-                color = discord.Color.orange()
+            m_type = s.get('type')
+            image_url = s.get('image_url')
 
-            if s['image_url'] and HAS_PIL:
-                dyn = await self._get_dominant_color(s['image_url'])
+            color = discord.Color.teal()
+            if m_type == 'movie':
+                color = discord.Color.orange()
+            elif m_type == 'episode':
+                color = discord.Color.blue()
+
+            if image_url and HAS_PIL:
+                dyn = await self._get_dominant_color(image_url)
                 if dyn: color = dyn
 
             embed = discord.Embed(color=color)
-            verb = "listening to" if s['type'] == 'track' else "watching"
+            verb = "watching" if m_type in ['movie', 'episode'] else "listening to"
             embed.set_author(name=f"{s['user']} is {verb}...",
                              icon_url=s.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png")
-            embed.title = s['title']
 
-            if s['artist']:
-                desc = f"👤 **{s['artist']}**"
-                if s['album']: desc += f"\n💿 *{s['album']}*"
-                embed.description = desc
+            # --- DYNAMIC FORMATTING BLOCK ---
+            if m_type == 'episode':
+                s_num = int(s.get("season_num") or 0)
+                e_num = int(s.get("episode_num") or 0)
+                # For TV, Plex puts the show name in the "artist" (grandparent) field
+                embed.title = s.get("artist") or "Unknown Series"
+                embed.description = f"📺 **{s.get('title')}**\n`S{s_num:02}E{e_num:02}`"
+
+            elif m_type in ['track', 'audio']:
+                embed.title = s.get('title')
+                desc = ""
+                if s.get('artist'): desc += f"👤 **{s['artist']}**"
+                if s.get('album'): desc += f"\n💿 *{s['album']}*"
+                embed.description = desc.strip()
+
+            else:  # Movies / Other
+                embed.title = s.get('title')
+                if s.get('year'):
+                    embed.description = f"🎬 *Movie ({s.get('year')})*"
+                else:
+                    embed.description = f"🎬 *{str(m_type).capitalize()}*"
+            # --------------------------------
 
             bar = self._generate_progress_bar(s["current_ms"], s["total_ms"])
             state_icon = '⏸️' if s['state'] == 'paused' else '▶️'
-
-            # Formatted current time to match the UI you wanted
             current_time_str = self._format_milliseconds_to_time(s["current_ms"])
             total_time_str = self._format_milliseconds_to_time(s["total_ms"])
-
             embed.add_field(name=f"{state_icon} Progress",
                             value=f"`{bar}`\n`{current_time_str} / {total_time_str}`\nEnds: <t:{s['finish_ts']}:R>",
                             inline=False)
 
-            # --- FULL TECH SPECS RESTORED ---
             u_str = f"👤 **User:** <@{s['discord_id']}>\n" if s.get('discord_id') else ""
             device_emoji = self._get_device_emoji(s['device'])
             embed.add_field(name="Tech Specs",
                             value=f"{u_str}{device_emoji} **Device:** `{s['device']}`\n⚙️ **Stream:** `{s.get('stream_info', 'Unknown')}`\n📶 **Bitrate:** `{s.get('bandwidth', 'Unknown')}`",
                             inline=False)
-            # --------------------------------
 
-            if s['image_url'] and not any(x in str(s['image_url']) for x in ["127.0.0.1", "192.168", "localhost"]):
-                embed.set_thumbnail(url=s['image_url'])
+            if image_url and not any(x in str(image_url) for x in ["127.0.0.1", "192.168", "localhost"]):
+                embed.set_thumbnail(url=image_url)
             embeds.append(embed)
 
         embeds[-1].timestamp = datetime.now()
