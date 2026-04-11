@@ -175,53 +175,84 @@ class PlexActivity(commands.Cog):
                 response.raise_for_status()
                 root = ET.fromstring(await response.text())
                 sessions = []
-                for session_elem in root.findall("./Video") + root.findall("./Photo") + root.findall("./Track"):
-                    user_elem = session_elem.find("User")
-                    player_elem = session_elem.find("Player")
-                    if user_elem is None or player_elem is None: continue
 
-                    plex_username = user_elem.get("title", "Unknown User")
-                    display_name, user_thumb = plex_username, user_elem.get("thumb")
-                    discord_id = settings["user_map"].get(plex_username)
+                # Broad iteration to catch all media
+                for item in root.iter():
+                    if item.tag not in ["Video", "Track", "Photo"]:
+                        continue
+                    try:
+                        u_elem = item.find("User")
+                        p_elem = item.find("Player")
+                        media_elem = item.find("Media")
+                        transcode_elem = item.find("TranscodeSession")
 
-                    if discord_id:
-                        guild = self.bot.get_guild(guild_id)
-                        member = guild.get_member(discord_id) if guild else None
-                        if member:
-                            display_name, user_thumb = member.display_name, member.display_avatar.url
+                        if u_elem is None or p_elem is None: continue
 
-                    if user_thumb and not str(user_thumb).startswith("http"):
-                        user_thumb = f"{settings['plex_url'].rstrip('/')}{user_thumb}?X-Plex-Token={settings['plex_token']}"
+                        plex_username = u_elem.get("title", "Unknown User")
+                        display_name, user_thumb = plex_username, u_elem.get("thumb")
+                        discord_id = settings["user_map"].get(plex_username)
 
-                    media_title = session_elem.get("title", "Unknown Title")
-                    v_off, dur = int(session_elem.get("viewOffset", "0")), int(session_elem.get("duration", "1"))
-                    artist = session_elem.get("grandparentTitle") or session_elem.get("originalTitle")
-                    album = session_elem.get("parentTitle")
-                    m_type = session_elem.get("type", "media")
+                        if discord_id:
+                            guild = self.bot.get_guild(guild_id)
+                            member = guild.get_member(discord_id) if guild else None
+                            if member:
+                                display_name, user_thumb = member.display_name, member.display_avatar.url
 
-                    image_url = None
-                    if m_type == 'track':
-                        image_url = await self._fetch_itunes_metadata(artist, media_title, album)
-                    elif m_type in ['movie', 'episode'] and settings.get("tmdb_api_key"):
-                        image_url = await self._fetch_tmdb_poster(settings["tmdb_api_key"],
-                                                                  artist if m_type == 'episode' else media_title,
-                                                                  'tv' if m_type == 'episode' else 'movie',
-                                                                  session_elem.get("year"))
+                        if user_thumb and not str(user_thumb).startswith("http"):
+                            user_thumb = f"{settings['plex_url'].rstrip('/')}{user_thumb}?X-Plex-Token={settings['plex_token']}"
 
-                    if not image_url:
-                        t_path = session_elem.get("parentThumb") or session_elem.get("thumb") or session_elem.get("art")
-                        if t_path: image_url = f"{settings['plex_url'].rstrip('/')}{t_path}?X-Plex-Token={settings['plex_token']}"
+                        media_title = item.get("title", "Unknown Title")
+                        v_off, dur = int(item.get("viewOffset", "0")), int(item.get("duration", "1"))
+                        artist = item.get("grandparentTitle") or item.get("originalTitle")
+                        album = item.get("parentTitle")
+                        m_type = item.get("type", "media")
 
-                    sessions.append({
-                        "user": display_name, "user_thumb": user_thumb, "discord_id": discord_id,
-                        "type": m_type, "current_ms": v_off, "total_ms": dur,
-                        "state": player_elem.get("state", "playing"), "device": player_elem.get("product", "Device"),
-                        "image_url": image_url, "title": media_title, "artist": artist, "album": album,
-                        "finish_ts": int((datetime.now() + timedelta(milliseconds=max(0, dur - v_off))).timestamp())
-                    })
+                        # --- RESTORED TECH SPECS LOGIC ---
+                        bitrate_kbps = 0
+                        if media_elem is not None:
+                            bitrate_kbps = int(media_elem.get("bitrate", 0))
+                            if bitrate_kbps == 0:
+                                part_elem = media_elem.find("Part")
+                                if part_elem is not None:
+                                    bitrate_kbps = int(part_elem.get("bitrate", 0))
+
+                        if bitrate_kbps > 0:
+                            bandwidth_str = f"{bitrate_kbps} kbps" if bitrate_kbps < 1000 or m_type == 'track' else f"{bitrate_kbps / 1000:.1f} Mbps"
+                        else:
+                            bandwidth_str = "Unknown"
+
+                        stream_info = "Direct Play"
+                        if transcode_elem is not None:
+                            video_decision = transcode_elem.get("videoDecision", "unknown")
+                            stream_info = "Transcoding ⚠️" if video_decision == "transcode" else "Direct Stream"
+                        # ---------------------------------
+
+                        image_url = None
+                        if m_type == 'track':
+                            image_url = await self._fetch_itunes_metadata(artist, media_title, album)
+                        elif m_type in ['movie', 'episode'] and settings.get("tmdb_api_key"):
+                            image_url = await self._fetch_tmdb_poster(settings["tmdb_api_key"],
+                                                                      artist if m_type == 'episode' else media_title,
+                                                                      'tv' if m_type == 'episode' else 'movie',
+                                                                      item.get("year"))
+
+                        if not image_url:
+                            t_path = item.get("parentThumb") or item.get("thumb") or item.get("art")
+                            if t_path: image_url = f"{settings['plex_url'].rstrip('/')}{t_path}?X-Plex-Token={settings['plex_token']}"
+
+                        sessions.append({
+                            "user": display_name, "user_thumb": user_thumb, "discord_id": discord_id,
+                            "type": m_type, "current_ms": v_off, "total_ms": dur,
+                            "state": p_elem.get("state", "playing"), "device": p_elem.get("product", "Device"),
+                            "stream_info": stream_info, "bandwidth": bandwidth_str,  # Tech specs re-added here
+                            "image_url": image_url, "title": media_title, "artist": artist, "album": album,
+                            "finish_ts": int((datetime.now() + timedelta(milliseconds=max(0, dur - v_off))).timestamp())
+                        })
+                    except Exception as e:
+                        log.error(f"Error parsing specific session item: {e}")
                 return sessions
         except Exception as e:
-            log.error(f"Plex Session Error: {e}")
+            log.error(f"Plex Session Fetch Error: {e}")
             return []
 
     async def _generate_session_embeds(self, sessions: list):
@@ -242,22 +273,41 @@ class PlexActivity(commands.Cog):
                 if dyn: color = dyn
 
             embed = discord.Embed(color=color)
-            embed.set_author(
-                name=f"{s['user']} is watching..." if s['type'] != 'track' else f"{s['user']} is listening to...",
-                icon_url=s.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png")
+            verb = "listening to" if s['type'] == 'track' else "watching"
+            embed.set_author(name=f"{s['user']} is {verb}...",
+                             icon_url=s.get("user_thumb") or "https://i.imgur.com/1F0B7gP.png")
             embed.title = s['title']
-            if s['artist']: embed.description = f"👤 **{s['artist']}**" + (f"\n💿 *{s['album']}*" if s['album'] else "")
+
+            if s['artist']:
+                desc = f"👤 **{s['artist']}**"
+                if s['album']: desc += f"\n💿 *{s['album']}*"
+                embed.description = desc
 
             bar = self._generate_progress_bar(s["current_ms"], s["total_ms"])
             state_icon = '⏸️' if s['state'] == 'paused' else '▶️'
-            embed.add_field(name=f"{state_icon} Progress", value=f"`{bar}`\nEnds: <t:{s['finish_ts']}:R>", inline=False)
 
+            # Formatted current time to match the UI you wanted
+            current_time_str = self._format_milliseconds_to_time(s["current_ms"])
+            total_time_str = self._format_milliseconds_to_time(s["total_ms"])
+
+            embed.add_field(name=f"{state_icon} Progress",
+                            value=f"`{bar}`\n`{current_time_str} / {total_time_str}`\nEnds: <t:{s['finish_ts']}:R>",
+                            inline=False)
+
+            # --- FULL TECH SPECS RESTORED ---
             u_str = f"👤 **User:** <@{s['discord_id']}>\n" if s.get('discord_id') else ""
-            embed.add_field(name="Tech Specs", value=f"{u_str}📱 **Device:** `{s['device']}`", inline=False)
+            device_emoji = self._get_device_emoji(s['device'])
+            embed.add_field(name="Tech Specs",
+                            value=f"{u_str}{device_emoji} **Device:** `{s['device']}`\n⚙️ **Stream:** `{s.get('stream_info', 'Unknown')}`\n📶 **Bitrate:** `{s.get('bandwidth', 'Unknown')}`",
+                            inline=False)
+            # --------------------------------
 
             if s['image_url'] and not any(x in str(s['image_url']) for x in ["127.0.0.1", "192.168", "localhost"]):
                 embed.set_thumbnail(url=s['image_url'])
             embeds.append(embed)
+
+        embeds[-1].timestamp = datetime.now()
+        embeds[-1].set_footer(text="Plex Activity • Live Update")
         return embeds
 
     @tasks.loop(seconds=60)
@@ -277,13 +327,11 @@ class PlexActivity(commands.Cog):
                         msg = await channel.fetch_message(msg_id)
                         await msg.edit(embeds=embeds)
                     except discord.NotFound:
-                        # Message was actually deleted, send a new one
                         msg = await channel.send(embeds=embeds)
                         await self.config.guild_from_id(guild_id).activity_message_id.set(msg.id)
                     except discord.Forbidden:
                         log.warning(f"Lost permission to edit message in {channel.name}")
                     except discord.HTTPException as e:
-                        # Skip this loop for transient Discord errors/ratelimits
                         log.debug(f"Transient Discord error, skipping edit: {e}")
                 else:
                     msg = await channel.send(embeds=embeds)
@@ -331,7 +379,8 @@ class PlexActivity(commands.Cog):
         await ctx.send(f"🔍 Searching iTunes for: `{query}`...")
         try:
             params = {"term": query, "entity": "song", "limit": "5"}
-            async with self.session.get("https://itunes.apple.com/search", params=params, timeout=10) as resp:
+            async with self.session.get("https://itunes.apple.com/search", params=params,
+                                        headers={"Accept": "application/json"}, timeout=10) as resp:
                 data = await resp.json(content_type=None)
                 results = data.get("results", [])
                 if not results: return await ctx.send("❓ No results found.")
