@@ -11,9 +11,9 @@ class SystemdControlView(discord.ui.View):
         self.cog = cog
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if await interaction.client.is_owner(interaction.user):
+        if await self.cog.user_can_manage(interaction.user):
             return True
-        await interaction.response.send_message("⛔ Access Denied: Bot Owner Only.", ephemeral=True)
+        await interaction.response.send_message("⛔ Access Denied: You are not authorized.", ephemeral=True)
         return False
 
     async def generate_options(self):
@@ -79,7 +79,7 @@ class ServiceActionView(discord.ui.View):
         self.service_name = service_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if await interaction.client.is_owner(interaction.user):
+        if await self.cog.user_can_manage(interaction.user):
             return True
         await interaction.response.send_message("⛔ Access Denied.", ephemeral=True)
         return False
@@ -120,6 +120,7 @@ class SystemdManager(commands.Cog):
         self.config = Config.get_conf(self, identifier=9812374129)
         self.config.register_global(
             services=[],
+            authorized_users=[],
             dashboard_channel=None,
             dashboard_message=None
         )
@@ -130,6 +131,13 @@ class SystemdManager(commands.Cog):
 
     def cog_unload(self):
         self.dashboard_loop.cancel()
+
+    async def user_can_manage(self, user) -> bool:
+        """Owner OR an explicitly authorized user may control services."""
+        if await self.bot.is_owner(user):
+            return True
+        authorized = await self.config.authorized_users()
+        return user.id in authorized
 
     def get_systemctl_status(self, service_name):
         """Runs systemctl is-active and returns the string (active, inactive, failed)."""
@@ -241,6 +249,39 @@ class SystemdManager(commands.Cog):
         await ctx.send(f"🗑️ Removed `{service_name}`.")
         await self.update_dashboard()
 
+    @systemd_group.command(name="allow")
+    async def allow_user(self, ctx, user: discord.User):
+        """Authorize a user to control services via the panel."""
+        async with self.config.authorized_users() as users:
+            if user.id in users:
+                await ctx.send(f"⚠️ {user.mention} is already authorized.")
+                return
+            users.append(user.id)
+        await ctx.send(f"✅ {user.mention} can now manage the services.")
+
+    @systemd_group.command(name="deny")
+    async def deny_user(self, ctx, user: discord.User):
+        """Revoke a user's permission to control services."""
+        async with self.config.authorized_users() as users:
+            if user.id not in users:
+                await ctx.send(f"⚠️ {user.mention} is not in the authorized list.")
+                return
+            users.remove(user.id)
+        await ctx.send(f"🗑️ Revoked access for {user.mention}.")
+
+    @systemd_group.command(name="allowed")
+    async def list_allowed(self, ctx):
+        """List users authorized to control services."""
+        users = await self.config.authorized_users()
+        if not users:
+            await ctx.send("No extra users authorized. (Owner always has access.)")
+            return
+        lines = []
+        for uid in users:
+            member = ctx.guild.get_member(uid) if ctx.guild else None
+            lines.append(f"• {member.mention if member else f'`{uid}`'}")
+        await ctx.send("**Authorized users:**\n" + "\n".join(lines))
+
     @systemd_group.command(name="panel")
     async def spawn_panel(self, ctx, channel: discord.TextChannel = None):
         """Spawn the persistent Systemd panel."""
@@ -258,7 +299,3 @@ class SystemdManager(commands.Cog):
 
         if target_channel != ctx.channel:
             await ctx.send(f"✅ Panel created in {target_channel.mention}")
-
-
-async def setup(bot):
-    await bot.add_cog(SystemdManager(bot))
