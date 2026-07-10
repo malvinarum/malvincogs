@@ -21,6 +21,8 @@ DEFAULT_GUILD_SETTINGS = {
     "max_players": 32,
     "image_url_online": None,  # Image when server is UP
     "image_url_offline": None,  # Image when server is DOWN
+    "image_url_idle": None,  # Image when server is FROZEN / hibernating
+    "pal_service": "palworld.service",  # systemd unit, used to detect freeze state
     "enabled": False
 }
 
@@ -57,6 +59,28 @@ class PalworldWatch(commands.Cog):
         filled = int(length * percent)
         return "▓" * filled + "░" * (length - filled)
 
+    async def _get_freezer_state(self, unit: str):
+        """
+        Ask systemd whether the game server's cgroup is frozen.
+        Returns "frozen", "freezing", "thawing", "running", or None if the
+        query fails (systemctl missing, unit unknown, not on the same host, etc.).
+        This is a read-only query and needs no root.
+        """
+        if not unit:
+            return None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "show", "-p", "FreezerState", "--value", unit,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            state = out.decode(errors="ignore").strip()
+            return state or None
+        except Exception as e:
+            log.debug(f"Freezer state check failed: {e}")
+            return None
+
     def _get_process_stats(self):
         """
         Hunts for the PalServer process to get real CPU/RAM usage.
@@ -64,28 +88,23 @@ class PalworldWatch(commands.Cog):
         """
         try:
             target_proc = None
-
             # 1. Try to reuse existing process handle if valid
             if self.pal_process:
                 if self.pal_process.is_running():
                     target_proc = self.pal_process
                 else:
                     self.pal_process = None
-
             # 2. Hunt for it if we don't have it
             if not target_proc:
                 target_names = ['PalServer-Linux', 'PalServer-Win64']
-
                 for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                     try:
                         name = proc.info['name']
                         cmdline = proc.info['cmdline'] or []
-
                         # Check for the binary name explicitly
                         if any(t in name for t in target_names) or 'PalServer-Linux-Shipp' in name:
                             target_proc = proc
                             break
-
                             # Fallback: Check for the script if binary isn't found yet
                         if 'PalServer.sh' in name or any('PalServer.sh' in arg for arg in cmdline):
                             try:
@@ -97,33 +116,25 @@ class PalworldWatch(commands.Cog):
                                         break
                             except (psutil.NoSuchProcess, psutil.AccessDenied):
                                 pass
-
                             if not target_proc:
                                 target_proc = proc
-
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
-
                 if target_proc:
                     self.pal_process = target_proc
-
             # 3. Get Stats
             if target_proc:
                 # Memory
                 with target_proc.oneshot():
                     mem = target_proc.memory_info().rss / (1024 ** 3)
                     create_ts = target_proc.create_time()
-
                 # CPU: We use a small interval to get an instant reading.
                 # We divide by cpu_count() to normalize to 0-100% system usage instead of per-core usage.
                 raw_cpu = target_proc.cpu_percent(interval=0.1)
                 cpu = raw_cpu / psutil.cpu_count()
-
                 return {"cpu": cpu, "ram_gb": mem, "create_ts": create_ts, "status": "Running"}
-
         except Exception as e:
             log.error(f"Process check error: {e}")
-
         return None
 
     async def _fetch_api_metrics(self, url, password):
@@ -131,50 +142,40 @@ class PalworldWatch(commands.Cog):
         Fetches metrics/info from Palworld REST API.
         """
         if not url or not password: return None
-
         if not url.endswith("/"): url += "/"
-
         # Basic Auth construction
         auth_str = f"admin:{password}"
         auth_b64 = base64.b64encode(auth_str.encode()).decode()
         headers = {"Authorization": f"Basic {auth_b64}", "Accept": "application/json"}
-
         # We need /v1/api/metrics and /v1/api/players
         metrics = {}
         players = []
         info = {}
-
         try:
             # 1. Metrics (FPS, FrameTime, MaxPlayers)
             async with self.session.get(f"{url}v1/api/metrics", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     metrics = await resp.json()
-
             # 2. Players
             async with self.session.get(f"{url}v1/api/players", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     players = data.get("players", [])
-
             # 3. Server Info (Version/Name)
             async with self.session.get(f"{url}v1/api/info", headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     info = await resp.json()
-
             return {"metrics": metrics, "players": players, "info": info}
-
         except Exception as e:
             # log.error(f"Palworld API Fail: {e}")
             return None
 
     # --- BUILD EMBED ---
-    async def _build_embed(self, api_data, proc_data, settings) -> discord.Embed:
+    async def _build_embed(self, api_data, proc_data, settings, freezer_state=None) -> discord.Embed:
         server_name = settings["server_name"]
-
         # Determine Max Players: API > Config
         # We prioritize the API 'maxplayernum' if it exists, otherwise fall back to manual config
         max_players = settings["max_players"]
-
         if api_data and "metrics" in api_data:
             # Try to get maxplayernum from metrics endpoint
             api_max = api_data["metrics"].get("maxplayernum")
@@ -185,6 +186,45 @@ class PalworldWatch(commands.Cog):
                     pass
 
         is_online = bool(api_data or proc_data)
+
+        # --- IDLE / FROZEN STATE (checked first) ---
+        # When the auto-idle watcher freezes the server, the process is still
+        # alive (psutil finds it) but the REST API goes silent. Without this
+        # branch that would look like "Starting / API Unreachable". Treat a
+        # frozen cgroup as its own calm, expected state instead.
+        if freezer_state in ("frozen", "freezing"):
+            idle_img = (settings.get("image_url_idle")
+                        or settings.get("image_url_offline")
+                        or settings.get("image_url_online"))
+            embed = discord.Embed(
+                title=f"🦖 {server_name}",
+                description=(
+                    "💤 **Idle — Hibernating**\n"
+                    "No players online, so the server is suspended to save CPU. "
+                    "It wakes automatically the moment someone joins."
+                ),
+                color=discord.Color.light_grey(),
+                timestamp=datetime.now(),
+            )
+            if idle_img:
+                embed.set_thumbnail(url=idle_img)
+            # The world is still resident in RAM; surface that to reassure.
+            if proc_data:
+                idle_str = f"**RAM:** `{proc_data['ram_gb']:.1f} GB` *(world held in memory)*"
+                create_ts = proc_data.get("create_ts", 0)
+                if create_ts:
+                    td = timedelta(seconds=int(time.time() - create_ts))
+                    d = td.days
+                    h, rem = divmod(td.seconds, 3600)
+                    m, _s = divmod(rem, 60)
+                    up = ""
+                    if d > 0: up += f"{d}d "
+                    if h > 0 or d > 0: up += f"{h}h "
+                    up += f"{m}m"
+                    idle_str += f"\n**Up:** `{up}`"
+                embed.add_field(name="🌙 Standby", value=idle_str, inline=False)
+            embed.set_footer(text="PalworldWatch • Live Telemetry")
+            return embed
 
         # --- IMAGE LOGIC ---
         image_url = settings.get("image_url_online") if is_online else settings.get("image_url_offline")
@@ -232,7 +272,6 @@ class PalworldWatch(commands.Cog):
 
         embed = discord.Embed(title=f"🦖 {server_name}", color=status_color)
         embed.description = " • ".join(desc_parts)
-
         # CHANGED: Use set_thumbnail instead of set_image
         if image_url: embed.set_thumbnail(url=image_url)
 
@@ -244,26 +283,21 @@ class PalworldWatch(commands.Cog):
                 perf_str += " ✨"
             elif server_fps < 20:
                 perf_str += " 💀"
-
             if proc_data:
                 perf_str += f"\n**RAM:** `{proc_data['ram_gb']:.1f} GB`"
                 perf_str += f"\n**CPU:** `{proc_data['cpu']:.1f}%`"
-
                 # --- UPTIME LOGIC ---
                 # Prefer API uptime (server uptime), fallback to process uptime
                 uptime_sec = uptime_seconds_api if uptime_seconds_api else (time.time() - proc_data.get('create_ts', 0))
-
                 if uptime_sec > 0:
                     td = timedelta(seconds=int(uptime_sec))
                     d = td.days
                     h, rem = divmod(td.seconds, 3600)
                     m, s = divmod(rem, 60)
-
                     uptime_str = ""
                     if d > 0: uptime_str += f"{d}d "
                     if h > 0 or d > 0: uptime_str += f"{h}h "
                     uptime_str += f"{m}m"
-
                     perf_str += f"\n**Up:** `{uptime_str}`"
 
         embed.add_field(name="📊 Performance", value=perf_str, inline=True)
@@ -271,7 +305,6 @@ class PalworldWatch(commands.Cog):
         # --- POPULATION BLOCK ---
         curr_players = len(players)
         bar = self._generate_progress_bar(curr_players, max_players, length=10)
-
         pop_str = f"`{bar}` **{curr_players} / {max_players}**"
 
         if players:
@@ -301,13 +334,10 @@ class PalworldWatch(commands.Cog):
     async def watch_loop(self):
         await self.bot.wait_until_ready()
         all_guilds = await self.config.all_guilds()
-
         for guild_id, settings in all_guilds.items():
             if not settings["enabled"]: continue
-
             channel_id = settings["channel_id"]
             if not channel_id: continue
-
             channel = self.bot.get_channel(channel_id)
             if not channel: continue
 
@@ -316,8 +346,14 @@ class PalworldWatch(commands.Cog):
             proc_data = await self.bot.loop.run_in_executor(None, self._get_process_stats)
             api_data = await self._fetch_api_metrics(settings["api_url"], settings["api_password"])
 
+            # Only bother asking systemd about the freeze state when the API is
+            # silent — that's the one ambiguous case (idle vs. starting vs. down).
+            freezer_state = None
+            if not api_data:
+                freezer_state = await self._get_freezer_state(settings.get("pal_service"))
+
             # 2. Build Embed
-            embed = await self._build_embed(api_data, proc_data, settings)
+            embed = await self._build_embed(api_data, proc_data, settings, freezer_state)
 
             # 3. Send/Edit
             message_id = settings["message_id"]
@@ -348,11 +384,9 @@ class PalworldWatch(commands.Cog):
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == ctx.author, timeout=60)
             url = msg.content.strip()
-
             await ctx.send("Enter Admin Password:")
             msg = await self.bot.wait_for("message", check=lambda m: m.author == ctx.author, timeout=60)
             pwd = msg.content.strip()
-
             await self.config.guild(ctx.guild).api_url.set(url)
             await self.config.guild(ctx.guild).api_password.set(pwd)
             await ctx.send("Saved! (Ensure REST API is enabled in PalWorldSettings.ini)")
@@ -380,13 +414,24 @@ class PalworldWatch(commands.Cog):
         await self.config.guild(ctx.guild).server_name.set(name)
         await ctx.send(f"Server name set to: **{name}**")
 
+    @palwatch.command(name="setservice")
+    async def pw_setservice(self, ctx: commands.Context, *, unit: str):
+        """
+        Set the systemd unit name of the game server (used to detect the
+        idle/frozen state). Default: palworld.service
+        """
+        unit = unit.strip()
+        if not unit.endswith(".service"):
+            unit += ".service"
+        await self.config.guild(ctx.guild).pal_service.set(unit)
+        await ctx.send(f"Game service unit set to: `{unit}` (used for idle detection).")
+
     # --- NEW COMMAND: Set Max Players ---
     @palwatch.command(name="setmax")
     async def pw_setmax(self, ctx: commands.Context, max_players: int):
         """Set the maximum player count manually."""
         if max_players < 1:
             return await ctx.send("Max players must be at least 1.")
-
         await self.config.guild(ctx.guild).max_players.set(max_players)
         await ctx.send(f"Max players set to: **{max_players}**")
 
@@ -394,28 +439,28 @@ class PalworldWatch(commands.Cog):
     @palwatch.command(name="setimage")
     async def pw_setimage(self, ctx: commands.Context, state: str, image_url: str):
         """
-        Set the embed image for online/offline states.
-        Usage: [p]pw setimage online <url> OR [p]pw setimage offline <url>
+        Set the embed image for online/offline/idle states.
+        Usage: [p]pw setimage online <url> | offline <url> | idle <url>
         """
         state = state.lower()
-        if state not in ["online", "offline"]:
-            return await ctx.send("State must be 'online' or 'offline'.")
-
+        if state not in ["online", "offline", "idle"]:
+            return await ctx.send("State must be 'online', 'offline', or 'idle'.")
         if not image_url.startswith("http"):
             return await ctx.send("Please provide a valid URL starting with http/https.")
-
         if state == "online":
             await self.config.guild(ctx.guild).image_url_online.set(image_url)
-        else:
+        elif state == "offline":
             await self.config.guild(ctx.guild).image_url_offline.set(image_url)
-
+        else:
+            await self.config.guild(ctx.guild).image_url_idle.set(image_url)
         await ctx.send(f"Server {state} image set!")
 
     @palwatch.command(name="clearimage")
     async def pw_clearimage(self, ctx: commands.Context):
-        """Remove both server images."""
+        """Remove all server images."""
         await self.config.guild(ctx.guild).image_url_online.set(None)
         await self.config.guild(ctx.guild).image_url_offline.set(None)
+        await self.config.guild(ctx.guild).image_url_idle.set(None)
         await ctx.send("Server images removed.")
 
 
