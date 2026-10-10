@@ -1,0 +1,10 @@
+{
+  "name": "AutoDelete",
+  "short": "Auto-delete command invocations and bot responses after a delay.",
+  "description": "Cleans up after prefix commands: removes the invoking message and the bot's replies after a configurable delay, with per-guild settings and channel/command exclusions.",
+  "author": ["Malvinarum"],
+  "requirements": [],
+  "tags": ["utility", "cleanup", "moderation"],
+  "min_bot_version": "3.5.0",
+  "end_user_data_statement": "This cog stores channel and command names you choose to exclude, plus per-guild settings. It stores no personal data."
+}
